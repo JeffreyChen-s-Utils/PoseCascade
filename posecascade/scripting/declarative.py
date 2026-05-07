@@ -173,6 +173,8 @@ class DeclarativeAnimation:
     rig: RigBindings
     ground: GroundSpec | None
     phases: tuple[Phase, ...]
+    physics_chains: dict[str, dict[str, float]]
+    wind: dict[str, Any] | None
 
 
 def _parse_rig(raw: dict[str, Any]) -> RigBindings:
@@ -247,7 +249,30 @@ def parse_animation(document: dict[str, Any]) -> DeclarativeAnimation:
         rig=_parse_rig(document.get("rig", {})),
         ground=_parse_ground(document.get("ground")),
         phases=phases,
+        physics_chains=_parse_physics_chains(document.get("physics_chains", {})),
+        wind=_parse_wind(document.get("wind")),
     )
+
+
+def _parse_physics_chains(raw: Any) -> dict[str, dict[str, float]]:
+    if not isinstance(raw, dict):
+        raise DeclarativeAnimationError("'physics_chains' must be an object")
+    out: dict[str, dict[str, float]] = {}
+    for chain_name, params in raw.items():
+        if not isinstance(params, dict):
+            raise DeclarativeAnimationError(
+                f"physics_chains[{chain_name!r}] must be an object",
+            )
+        out[str(chain_name)] = {k: _resolve_scalar(v) for k, v in params.items()}
+    return out
+
+
+def _parse_wind(raw: Any) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise DeclarativeAnimationError("'wind' must be an object")
+    return raw
 
 
 # --- Runtime ----------------------------------------------------------------
@@ -323,6 +348,33 @@ class DeclarativeRuntime:
             and self.animation.rig.leg_chain_r
         ):
             self._bind_foot_planter()
+        # Apply physics chain tunings + wind setup if declared.
+        self._apply_physics_setup()
+
+    def _apply_physics_setup(self) -> None:
+        if self.physics_lite is None:
+            return
+        for chain_name, params in self.animation.physics_chains.items():
+            chain = self.physics_lite.get_chain(chain_name)
+            if chain is None:
+                _log.debug("declarative: physics chain %r not found", chain_name)
+                continue
+            if "stiffness" in params:
+                chain.stiffness = params["stiffness"]
+            if "damping" in params:
+                chain.damping = params["damping"]
+            if "inertia" in params:
+                chain.set_inertia(params["inertia"])
+        if self.animation.wind is not None:
+            wind = self.animation.wind
+            self.physics_lite.add_wind(
+                direction=vec3(*[
+                    _resolve_scalar(c) for c in wind.get("direction", (1.0, 0.0, 0.0))
+                ]),
+                speed=_resolve_scalar(wind.get("speed", 0.0)),
+                turbulence_amplitude=_resolve_scalar(wind.get("turbulence_amplitude", 0.0)),
+                turbulence_frequency_hz=_resolve_scalar(wind.get("turbulence_frequency_hz", 0.0)),
+            )
 
     def _bind_foot_planter(self) -> None:
         ground = self._build_ground_provider()
@@ -399,10 +451,50 @@ class DeclarativeRuntime:
         if kind == "walking":
             self._apply_walking_gait(gait, phase_elapsed)
         elif kind == "stride":
-            # Stage 2 — stride needs leading/trailing tracking, lock targets.
-            _log.debug("declarative: stride gait not yet implemented")
+            self._apply_stride_gait(gait, phase_t)
         else:
             _log.debug("declarative: unknown gait kind %r", kind)
+
+    def _apply_stride_gait(self, gait: dict[str, Any], phase_t: float) -> None:
+        """Step-based stair stride: leading leg lifts forward, trailing back-pedals.
+
+        Maps phase_t into ``step_count`` discrete strides; within each stride
+        the gait blends through bell envelopes to drive upper-leg / knee /
+        arm angles. Cross-body coordination flips per stride (parity of
+        step index).
+        """
+        step_count = int(gait.get("step_count", 1))
+        if step_count <= 0:
+            return
+        leading_lift = _resolve_scalar(gait.get("leading_lift_rad", 0.0))
+        trailing_back = _resolve_scalar(gait.get("trailing_back_rad", 0.0))
+        knee_bend = _resolve_scalar(gait.get("knee_bend_rad", 0.0))
+        arm_amp = _resolve_scalar(gait.get("arm_swing_amplitude_rad", 0.0))
+        knee_bell = gait.get("knee_bell", [0.10, 0.65])
+        forward_bell = gait.get("forward_bell", [0.10, 0.65])
+        step_pos = phase_t * step_count
+        step_idx = min(int(step_pos), step_count - 1)
+        step_t = step_pos - step_idx
+        leading_l = (step_idx % 2 == 0)
+        knee_env = _bell(step_t, float(knee_bell[0]), float(knee_bell[1]))
+        forward_env = _bell(step_t, float(forward_bell[0]), float(forward_bell[1]))
+        leading_upper = leading_lift * forward_env
+        trailing_upper = trailing_back * forward_env
+        leading_knee = knee_bend * knee_env
+        trailing_knee = 0.0
+        if leading_l:
+            upper_l, upper_r = leading_upper, trailing_upper
+            knee_l, knee_r = leading_knee, trailing_knee
+        else:
+            upper_l, upper_r = trailing_upper, leading_upper
+            knee_l, knee_r = trailing_knee, leading_knee
+        arm_swing = (+arm_amp if leading_l else -arm_amp) * forward_env
+        self._set_world_x_delta("upper_leg_L", upper_l)
+        self._set_world_x_delta("upper_leg_R", upper_r)
+        self._set_world_x_delta("lower_leg_L", knee_l)
+        self._set_world_x_delta("lower_leg_R", knee_r)
+        self._set_world_y_delta("upper_arm_L", arm_swing)
+        self._set_world_y_delta("upper_arm_R", arm_swing)
 
     def _apply_walking_gait(self, gait: dict[str, Any], phase_elapsed: float) -> None:
         cycle_sec = float(gait.get("step_cycle_sec", 1.0))
@@ -456,7 +548,7 @@ def _gait_target_bones(gait: dict[str, Any], rig: RigBindings) -> tuple[str, ...
     """List bone names that a gait's drivers will write to."""
     bones: set[str] = set()
     kind = gait.get("kind", "")
-    if kind == "walking":
+    if kind in ("walking", "stride"):
         # Default leg / arm names — overridable via rig.body_bones[bone_key].
         for key in (
             "upper_leg_L", "upper_leg_R",
@@ -467,14 +559,74 @@ def _gait_target_bones(gait: dict[str, Any], rig: RigBindings) -> tuple[str, ...
     return tuple(bones)
 
 
+def _bell(t: float, start: float, end: float) -> float:
+    """Half-sine bell — 0 outside ``[start, end]``, 1 at the midpoint."""
+    if t <= start or t >= end or end <= start:
+        return 0.0
+    return math.sin(((t - start) / (end - start)) * math.pi)
+
+
 def _resolve_translation(
     spec: dict[str, Any], phase_t: float,
 ) -> tuple[float, float, float]:
+    if "stair" in spec:
+        return _resolve_stair_translation(spec["stair"], phase_t)
     return (
         _resolve_value_curve(spec.get("x", 0.0), phase_t),
         _resolve_value_curve(spec.get("y", 0.0), phase_t),
         _resolve_value_curve(spec.get("z", 0.0), phase_t),
     )
+
+
+def _resolve_stair_translation(
+    spec: dict[str, Any], phase_t: float,
+) -> tuple[float, float, float]:
+    """Body Y / Z trajectory for stair traversal.
+
+    Spec fields:
+    - ``base_z``: world Z of the staircase's front edge (entrance).
+    - ``rise``: total height climbed (Y).
+    - ``forward``: total horizontal travel (along Z).
+    - ``step_count``: number of steps spanned.
+    - ``ascending``: ``True`` for going up (low → high), False for descending.
+    - ``rise_window``: ``[t0, t1]`` within each per-stride normalised time
+      where the body's Y eases from base step height to next step height.
+      Outside this window the body sits on the current step's height.
+    - ``forward_sign``: sign convention matching the ground provider's.
+    """
+    base_z = _resolve_scalar(spec.get("base_z", 0.0))
+    rise = _resolve_scalar(spec.get("rise", 0.0))
+    forward = _resolve_scalar(spec.get("forward", 0.0))
+    step_count = max(1, int(spec.get("step_count", 1)))
+    ascending = bool(spec.get("ascending", True))
+    rise_window = spec.get("rise_window", [0.65, 0.95])
+    forward_sign = int(spec.get("forward_sign", -1))
+    rise_per_step = rise / step_count
+    z_offset = forward * float(phase_t)
+    if ascending:
+        body_z = base_z + forward_sign * z_offset
+    else:
+        body_z = base_z + forward_sign * (forward - z_offset)
+    step_pos = phase_t * step_count
+    step_idx = min(int(step_pos), step_count - 1)
+    step_t = step_pos - step_idx
+    if ascending:
+        base_y = step_idx * rise_per_step
+        next_y = (step_idx + 1) * rise_per_step
+    else:
+        base_y = (step_count - step_idx) * rise_per_step
+        next_y = (step_count - step_idx - 1) * rise_per_step
+    rise_start = float(rise_window[0])
+    rise_end = float(rise_window[1])
+    if step_t < rise_start:
+        body_y = base_y
+    elif step_t < rise_end:
+        progress = (step_t - rise_start) / (rise_end - rise_start)
+        eased = _HALF - _HALF * math.cos(progress * math.pi)
+        body_y = base_y + (next_y - base_y) * eased
+    else:
+        body_y = next_y
+    return (0.0, float(body_y), float(body_z))
 
 
 # --- Loader (matches sandbox.load_script's signature shape) -----------------

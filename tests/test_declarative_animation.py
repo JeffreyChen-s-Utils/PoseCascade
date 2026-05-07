@@ -186,3 +186,134 @@ def test_load_animation_rejects_invalid_json() -> None:
     api = {"scene": _build_minimal_scene(), "time": lambda: 0.0}
     with pytest.raises(DeclarativeAnimationError, match="failed to parse"):
         load_animation("{not json", "broken.json", api)
+
+
+# --- Stage 2: stride gait + stair body trajectory ---------------------------
+
+
+def test_stride_gait_alternates_leading_leg_per_step() -> None:
+    """Stride parity flips each step — leading_l on step 0/2/4, trailing on 1/3.
+
+    Verifies by stepping into a stride with step_count=5 and a non-zero
+    forward bell at the midpoint of step_t, then checking which side has
+    the larger upper-leg X rotation.
+    """
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["loop_sec"] = 1.0
+    doc["phases"][0]["duration_sec"] = 1.0
+    doc["phases"][0]["gait"] = {
+        "kind": "stride", "step_count": 5,
+        "leading_lift_rad": -0.70, "trailing_back_rad": 0.25,
+        "knee_bend_rad": 0.30, "arm_swing_amplitude_rad": 0.40,
+        "knee_bell": [0.10, 0.65], "forward_bell": [0.10, 0.65],
+    }
+    parsed = parse_animation(doc)
+    t_now = [0.0]
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: t_now[0],
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    # phase_t = 0.075 → step_pos = 0.375 → step_idx 0 (leading_l=True),
+    # step_t = 0.375. Within bell window. L upper should have larger
+    # |angle| than R upper because leading_lift > trailing_back.
+    t_now[0] = 0.075
+    hooks["update"](0.0)
+    leg_l = scene.find("upper_leg_L").transform.rotation
+    leg_r = scene.find("upper_leg_R").transform.rotation
+    assert abs(leg_l[0]) > abs(leg_r[0]), (
+        f"leading_l=True: |L|={abs(leg_l[0])} not > |R|={abs(leg_r[0])}"
+    )
+    # phase_t corresponding to step_idx=1 → leading_l=False → R should
+    # be the leading leg (larger |angle|).
+    t_now[0] = 0.275  # step_pos = 1.375
+    hooks["update"](0.0)
+    leg_l = scene.find("upper_leg_L").transform.rotation
+    leg_r = scene.find("upper_leg_R").transform.rotation
+    assert abs(leg_r[0]) > abs(leg_l[0]), (
+        f"leading_l=False: |R|={abs(leg_r[0])} not > |L|={abs(leg_l[0])}"
+    )
+
+
+def test_stair_translation_climb_advances_y_z() -> None:
+    """``stair`` body translation kind sweeps body Y up and Z forward
+    over the phase, in step-quantised Y rises with cosine-ease in
+    each step's rise window."""
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["loop_sec"] = 5.0
+    doc["phases"][0]["duration_sec"] = 5.0
+    doc["phases"][0]["body"] = {
+        "translation": {
+            "stair": {
+                "base_z": -0.20, "rise": 0.10, "forward": 0.20,
+                "step_count": 5, "ascending": True,
+                "rise_window": [0.40, 0.75], "forward_sign": -1,
+            },
+        },
+    }
+    parsed = parse_animation(doc)
+    t_now = [0.0]
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: t_now[0],
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    # Beginning of phase: body at base_z, base_y=0.
+    t_now[0] = 0.001
+    hooks["update"](0.0)
+    root = scene.find("Sketchfab_model")
+    assert root.transform.translation[1] == 0.0
+    np.testing.assert_allclose(root.transform.translation[2], -0.20, atol=1e-3)
+    # Mid loop: body Y > 0, Z further into stairs.
+    t_now[0] = 2.5  # phase_t = 0.5
+    hooks["update"](0.0)
+    assert root.transform.translation[1] > 0.0, "body Y did not rise into climb"
+    assert root.transform.translation[2] < -0.20, "body Z did not advance into stairs"
+
+
+def test_stair_translation_descend_returns_z_to_base() -> None:
+    """Descending body starts at top stair Z and walks back toward base."""
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["loop_sec"] = 4.0
+    doc["phases"][0]["duration_sec"] = 4.0
+    doc["phases"][0]["body"] = {
+        "translation": {
+            "stair": {
+                "base_z": -0.20, "rise": 0.10, "forward": 0.20,
+                "step_count": 5, "ascending": False,
+                "rise_window": [0.40, 0.75], "forward_sign": -1,
+            },
+        },
+    }
+    parsed = parse_animation(doc)
+    t_now = [0.0]
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: t_now[0],
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    # Start of descend: at top of stairs (base_z + forward_sign * forward).
+    t_now[0] = 0.001
+    hooks["update"](0.0)
+    root = scene.find("Sketchfab_model")
+    np.testing.assert_allclose(root.transform.translation[2], -0.40, atol=1e-3)
+    # End of descend: back at base (-0.20).
+    t_now[0] = 3.999
+    hooks["update"](0.0)
+    np.testing.assert_allclose(root.transform.translation[2], -0.20, atol=1e-3)
+
+
+def test_physics_chains_parse_into_dict_of_floats() -> None:
+    """``physics_chains`` parses param-by-param, converting symbolic
+    floats and rejecting non-object entries."""
+    doc = _minimal_doc()
+    doc["physics_chains"] = {
+        "hair_a": {"stiffness": 14.0, "damping": 0.45},
+        "hair_b": {"stiffness": "tau", "damping": 0.30},
+    }
+    parsed = parse_animation(doc)
+    assert parsed.physics_chains["hair_a"] == {"stiffness": 14.0, "damping": 0.45}
+    assert parsed.physics_chains["hair_b"]["stiffness"] == pytest.approx(2 * 3.14159265, abs=1e-3)
