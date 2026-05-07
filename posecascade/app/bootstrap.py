@@ -136,7 +136,13 @@ def attach_script(window: MainWindow, services: Services, script_path: Path) -> 
         meshes=services.imported_meshes,
     )
     try:
-        hooks = load_script(source, str(script_path), api)
+        if script_path.suffix.lower() == ".json":
+            from posecascade.scripting.declarative import (  # noqa: PLC0415
+                load_animation,
+            )
+            hooks = load_animation(source, str(script_path), api)
+        else:
+            hooks = load_script(source, str(script_path), api)
     except PoseCascadeError as err:
         _log.error("failed to load script %s: %s", script_path, err)
         return

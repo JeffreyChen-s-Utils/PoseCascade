@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "name": "stair_walk_declarative_demo",
+  "loop_sec": 8.0,
+
+  "rig": {
+    "character_root": "Sketchfab_model",
+    "leg_chain_l": ["upper_leg_L", "lower_leg_L", "foot_L"],
+    "leg_chain_r": ["upper_leg_R", "lower_leg_R", "foot_R"],
+    "knee_limit_min": [-2.4, 0, 0],
+    "knee_limit_max": [0.1, 0, 0],
+    "body_bones": {
+      "head": "head",
+      "chest": "chest",
+      "hip": "hip",
+      "upper_arm_L": "upper_arm_L",
+      "upper_arm_R": "upper_arm_R",
+      "upper_leg_L": "upper_leg_L",
+      "upper_leg_R": "upper_leg_R",
+      "lower_leg_L": "lower_leg_L",
+      "lower_leg_R": "lower_leg_R",
+      "foot_L": "foot_L",
+      "foot_R": "foot_R"
+    }
+  },
+
+  "ground": {
+    "kind": "stairs",
+    "base_z": -0.20,
+    "step_depth": 0.04,
+    "step_rise": 0.02,
+    "count": 5,
+    "forward_sign": -1
+  },
+
+  "phases": [
+    {
+      "name": "walk_forward",
+      "duration_sec": 4.0,
+      "body": {
+        "yaw_rad": "pi",
+        "translation": {
+          "x": 0,
+          "y": 0,
+          "z": {"kind": "linear", "from": 0.0, "to": -0.20}
+        }
+      },
+      "gait": {
+        "kind": "walking",
+        "step_cycle_sec": 1.0,
+        "leg_swing_amplitude": 0.50,
+        "knee_bend": -0.30,
+        "arm_swing_amplitude": 0.40
+      }
+    },
+    {
+      "name": "walk_back",
+      "duration_sec": 4.0,
+      "body": {
+        "yaw_rad": 0.0,
+        "translation": {
+          "x": 0,
+          "y": 0,
+          "z": {"kind": "linear", "from": -0.20, "to": 0.0}
+        }
+      },
+      "gait": {
+        "kind": "walking",
+        "step_cycle_sec": 1.0,
+        "leg_swing_amplitude": 0.50,
+        "knee_bend": -0.30,
+        "arm_swing_amplitude": 0.40
+      }
+    }
+  ]
+}
