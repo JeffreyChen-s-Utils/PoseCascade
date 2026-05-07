@@ -184,6 +184,21 @@ def test_load_animation_returns_hooks() -> None:
     hooks["start"]()  # smoke
 
 
+def test_schema_file_loads_and_describes_v1() -> None:
+    """``schemas/animation_v1.json`` is well-formed JSON and pins the
+    schema_version constant. Acts as a smoke check that the schema
+    file we ship matches the runtime's parser version."""
+    from pathlib import Path  # noqa: PLC0415
+    schema_path = Path(__file__).parent.parent / "schemas" / "animation_v1.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    assert schema["properties"]["schema_version"]["const"] == 1
+    assert "phases" in schema["properties"]
+    assert "rig" in schema["properties"]
+    assert "ground" in schema["properties"]
+    assert schema["$defs"]["gait"]["oneOf"][0]["properties"]["kind"]["const"] == "walking"
+    assert schema["$defs"]["gait"]["oneOf"][1]["properties"]["kind"]["const"] == "stride"
+
+
 def test_load_animation_rejects_invalid_json() -> None:
     api = {"scene": _build_minimal_scene(), "time": lambda: 0.0}
     with pytest.raises(DeclarativeAnimationError, match="failed to parse"):

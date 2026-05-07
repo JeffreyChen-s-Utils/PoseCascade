@@ -1,0 +1,269 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://posecascade.dev/schemas/animation_v1.json",
+  "title": "PoseCascade declarative animation v1",
+  "description": "JSON document parsed by posecascade.scripting.declarative.parse_animation. Drives a character demo as data — phase timeline, body trajectory, gait, ground geometry, physics chain tunings, morph weights — without writing Python.",
+  "type": "object",
+  "required": ["schema_version", "phases"],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Schema generation. Older / newer versions are rejected with DeclarativeAnimationError."
+    },
+    "name": {
+      "type": "string",
+      "description": "Display name for logs / UI."
+    },
+    "loop_sec": {
+      "type": "number",
+      "description": "Total animation length. Defaults to the sum of phase durations."
+    },
+    "rig": { "$ref": "#/$defs/rig" },
+    "ground": {
+      "anyOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/ground" }
+      ]
+    },
+    "physics_chains": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/physics_chain_params" },
+      "description": "Per-chain tunings for the spring-physics host (hair / cloth ribbons). Applied at start()."
+    },
+    "wind": { "$ref": "#/$defs/wind" },
+    "phases": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/phase" }
+    }
+  },
+
+  "$defs": {
+
+    "scalar": {
+      "description": "Either a JSON number, a symbolic float ('pi', 'tau', 'e', 'pi/2', 'inf', etc.), or an inline expression string. Expressions go through a whitelisted-AST evaluator (see posecascade.scripting.expressions) with per-frame variables (elapsed, phase_t, phase_elapsed) and math fns (sin, cos, sqrt, clamp, lerp, ...).",
+      "anyOf": [
+        { "type": "number" },
+        { "type": "string" }
+      ]
+    },
+
+    "value_curve": {
+      "description": "A scalar (constant), or a curve object that varies with phase_t in [0,1].",
+      "anyOf": [
+        { "$ref": "#/$defs/scalar" },
+        {
+          "type": "object",
+          "required": ["kind"],
+          "properties": {
+            "kind": { "enum": ["constant", "linear", "ease", "expression"] },
+            "value": { "$ref": "#/$defs/scalar" },
+            "from": { "$ref": "#/$defs/scalar" },
+            "to": { "$ref": "#/$defs/scalar" },
+            "source": {
+              "type": "string",
+              "description": "For kind='expression': inline expression evaluated each frame."
+            }
+          }
+        }
+      ]
+    },
+
+    "rig": {
+      "type": "object",
+      "properties": {
+        "character_root": {
+          "type": "string",
+          "description": "Name of the scene node holding the character's root translation + yaw."
+        },
+        "leg_chain_l": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 3, "maxItems": 3,
+          "description": "[upper, lower, foot] bone names for the L leg."
+        },
+        "leg_chain_r": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 3, "maxItems": 3
+        },
+        "knee_limit_min": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/scalar" },
+          "minItems": 3, "maxItems": 3,
+          "description": "XYZ Euler radians clamping the knee's local rotation per IK iteration. (-2.4, 0, 0) keeps a knee on its hinge axis."
+        },
+        "knee_limit_max": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/scalar" },
+          "minItems": 3, "maxItems": 3
+        },
+        "body_bones": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Aliases mapping logical names (e.g. 'upper_leg_L') to actual bone names in the rig. Lets a single JSON document target rigs that use different naming conventions."
+        }
+      }
+    },
+
+    "ground": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind"],
+          "properties": {
+            "kind": { "const": "flat" },
+            "y": { "$ref": "#/$defs/scalar" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "base_z", "step_depth", "step_rise", "count"],
+          "properties": {
+            "kind": { "const": "stairs" },
+            "base_z": { "$ref": "#/$defs/scalar", "description": "World Z of the staircase's front edge." },
+            "step_depth": { "$ref": "#/$defs/scalar" },
+            "step_rise": { "$ref": "#/$defs/scalar" },
+            "count": { "type": "integer", "minimum": 1 },
+            "base_y": { "$ref": "#/$defs/scalar" },
+            "forward_sign": {
+              "enum": [-1, 1],
+              "description": "Sign of the walking direction along Z. -1 if the stairs go in -Z (default for the demo scene)."
+            },
+            "edge_smooth": {
+              "$ref": "#/$defs/scalar",
+              "description": "Front-edge ramp width (m) for smoothing the height jump between adjacent stairs."
+            }
+          }
+        }
+      ]
+    },
+
+    "physics_chain_params": {
+      "type": "object",
+      "properties": {
+        "stiffness": { "$ref": "#/$defs/scalar" },
+        "damping":   { "$ref": "#/$defs/scalar" },
+        "inertia":   { "$ref": "#/$defs/scalar" }
+      }
+    },
+
+    "wind": {
+      "type": "object",
+      "properties": {
+        "direction": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/scalar" },
+          "minItems": 3, "maxItems": 3
+        },
+        "speed": { "$ref": "#/$defs/scalar" },
+        "turbulence_amplitude": { "$ref": "#/$defs/scalar" },
+        "turbulence_frequency_hz": { "$ref": "#/$defs/scalar" }
+      }
+    },
+
+    "phase": {
+      "type": "object",
+      "required": ["name", "duration_sec"],
+      "properties": {
+        "name": { "type": "string" },
+        "duration_sec": { "type": "number", "exclusiveMinimum": 0 },
+        "body": { "$ref": "#/$defs/body" },
+        "gait": { "$ref": "#/$defs/gait" },
+        "morphs": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/value_curve" },
+          "description": "Morph-name → curve. Evaluated per frame; weight is written into the script's morphs API."
+        }
+      }
+    },
+
+    "body": {
+      "type": "object",
+      "properties": {
+        "yaw_rad": { "$ref": "#/$defs/value_curve" },
+        "lean_x_rad": { "$ref": "#/$defs/value_curve" },
+        "translation": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "x": { "$ref": "#/$defs/value_curve" },
+                "y": { "$ref": "#/$defs/value_curve" },
+                "z": { "$ref": "#/$defs/value_curve" }
+              }
+            },
+            {
+              "type": "object",
+              "required": ["stair"],
+              "properties": {
+                "stair": { "$ref": "#/$defs/stair_translation" }
+              }
+            }
+          ]
+        }
+      }
+    },
+
+    "stair_translation": {
+      "type": "object",
+      "required": ["base_z", "rise", "forward", "step_count"],
+      "properties": {
+        "base_z": { "$ref": "#/$defs/scalar" },
+        "rise": { "$ref": "#/$defs/scalar" },
+        "forward": { "$ref": "#/$defs/scalar" },
+        "step_count": { "type": "integer", "minimum": 1 },
+        "ascending": { "type": "boolean" },
+        "rise_window": {
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 2, "maxItems": 2,
+          "description": "[t0, t1] within each per-stride normalised time where the body Y eases from current to next step height."
+        },
+        "forward_sign": { "enum": [-1, 1] }
+      }
+    },
+
+    "gait": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind", "step_cycle_sec"],
+          "properties": {
+            "kind": { "const": "walking" },
+            "step_cycle_sec": { "$ref": "#/$defs/scalar" },
+            "leg_swing_amplitude": { "$ref": "#/$defs/scalar" },
+            "knee_bend": { "$ref": "#/$defs/scalar" },
+            "arm_swing_amplitude": { "$ref": "#/$defs/scalar" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "step_count"],
+          "properties": {
+            "kind": { "const": "stride" },
+            "step_count": { "type": "integer", "minimum": 1 },
+            "leading_lift_rad": { "$ref": "#/$defs/scalar" },
+            "trailing_back_rad": { "$ref": "#/$defs/scalar" },
+            "knee_bend_rad": { "$ref": "#/$defs/scalar" },
+            "arm_swing_amplitude_rad": { "$ref": "#/$defs/scalar" },
+            "knee_bell": {
+              "type": "array",
+              "items": { "type": "number" },
+              "minItems": 2, "maxItems": 2
+            },
+            "forward_bell": {
+              "type": "array",
+              "items": { "type": "number" },
+              "minItems": 2, "maxItems": 2
+            },
+            "lock_trailing_foot": {
+              "type": "boolean",
+              "description": "Snapshot the trailing foot's world position at each step boundary and run analytical IK to keep it pinned. Default true; set false for running gaits where trailing-foot drift is desired."
+            }
+          }
+        }
+      ]
+    }
+  }
+}
