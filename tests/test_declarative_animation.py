@@ -25,6 +25,7 @@ from posecascade.scripting.declarative import (
     load_animation,
     parse_animation,
 )
+from posecascade.utils.math3d import vec3
 
 
 def _node(name: str, **kw) -> Node:
@@ -305,6 +306,81 @@ def test_stair_translation_descend_returns_z_to_base() -> None:
     t_now[0] = 3.999
     hooks["update"](0.0)
     np.testing.assert_allclose(root.transform.translation[2], -0.20, atol=1e-3)
+
+
+def test_stride_lock_alternates_trailing_side_per_step() -> None:
+    """At each stride boundary the trailing-foot lock switches sides:
+    step 0 (leading_l=True) snapshots R, step 1 snapshots L, etc.
+    The opposite side's lock is cleared so the leading leg can swing
+    freely."""
+    scene = _build_minimal_scene()
+    # Add proper hierarchical chain so analytical IK has bones to rotate.
+    root = scene.find("Sketchfab_model")
+    hip = _node("hip", translation=vec3(0.0, 0.4, 0.0))
+    ul_l = _node("upper_leg_L_chain", translation=vec3(0.05, 0.0, 0.0))
+    ll_l = _node("lower_leg_L_chain", translation=vec3(0.0, -0.2, 0.0))
+    ft_l = _node("foot_L_chain", translation=vec3(0.0, -0.2, 0.0))
+    ul_r = _node("upper_leg_R_chain", translation=vec3(-0.05, 0.0, 0.0))
+    ll_r = _node("lower_leg_R_chain", translation=vec3(0.0, -0.2, 0.0))
+    ft_r = _node("foot_R_chain", translation=vec3(0.0, -0.2, 0.0))
+    ll_l.add_child(ft_l)
+    ul_l.add_child(ll_l)
+    hip.add_child(ul_l)
+    ll_r.add_child(ft_r)
+    ul_r.add_child(ll_r)
+    hip.add_child(ul_r)
+    root.add_child(hip)
+    doc = _minimal_doc()
+    doc["loop_sec"] = 5.0
+    doc["phases"][0]["duration_sec"] = 5.0
+    doc["rig"]["leg_chain_l"] = ["upper_leg_L_chain", "lower_leg_L_chain", "foot_L_chain"]
+    doc["rig"]["leg_chain_r"] = ["upper_leg_R_chain", "lower_leg_R_chain", "foot_R_chain"]
+    doc["phases"][0]["gait"] = {
+        "kind": "stride", "step_count": 5,
+        "leading_lift_rad": -0.7, "trailing_back_rad": 0.25,
+        "knee_bend_rad": 0.3, "arm_swing_amplitude_rad": 0.4,
+        "knee_bell": [0.10, 0.65], "forward_bell": [0.10, 0.65],
+        "lock_trailing_foot": True,
+    }
+    parsed = parse_animation(doc)
+    t_now = [0.05]  # step_idx=0, leading_l=True → R should be locked
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: t_now[0],
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    assert "R" in runtime._foot_lock
+    assert "L" not in runtime._foot_lock
+    # Cross into step 1 → leading_l=False → L should be locked, R cleared.
+    t_now[0] = 1.05
+    hooks["update"](0.0)
+    assert "L" in runtime._foot_lock
+    assert "R" not in runtime._foot_lock
+
+
+def test_stride_lock_disabled_when_flag_false() -> None:
+    """``lock_trailing_foot: false`` skips the snapshot — useful when the
+    user wants the trailing foot to follow the body (e.g. running)."""
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["loop_sec"] = 5.0
+    doc["phases"][0]["duration_sec"] = 5.0
+    doc["phases"][0]["gait"] = {
+        "kind": "stride", "step_count": 5,
+        "leading_lift_rad": -0.7, "trailing_back_rad": 0.25,
+        "knee_bend_rad": 0.3, "arm_swing_amplitude_rad": 0.4,
+        "lock_trailing_foot": False,
+    }
+    parsed = parse_animation(doc)
+    t_now = [0.05]
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: t_now[0],
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    assert runtime._foot_lock == {}
 
 
 def test_runtime_drives_per_phase_morph_weights() -> None:

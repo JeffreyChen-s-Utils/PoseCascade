@@ -338,6 +338,9 @@ class DeclarativeRuntime:
     _root_drive: _BoneDrive | None = None
     _bone_drives: dict[str, _BoneDrive] = field(default_factory=dict)
     _phase_starts: list[float] = field(default_factory=list)
+    _last_step_idx: dict[str, int] = field(default_factory=dict)
+    _foot_lock: dict[str, np.ndarray] = field(default_factory=dict)
+    _leg_chain_nodes: dict[str, tuple[Any, Any, Any]] = field(default_factory=dict)
 
     # ----- Hook surface (matches ScriptHost expectations) -------------------
     def hooks(self) -> dict[str, Callable[..., Any]]:
@@ -392,6 +395,16 @@ class DeclarativeRuntime:
             self._bind_foot_planter()
         # Apply physics chain tunings + wind setup if declared.
         self._apply_physics_setup()
+        # Cache leg-chain nodes for stride lock-target IK.
+        for side, chain_names in (
+            ("L", self.animation.rig.leg_chain_l),
+            ("R", self.animation.rig.leg_chain_r),
+        ):
+            if chain_names is None:
+                continue
+            nodes = tuple(self.scene.find(n) for n in chain_names)
+            if all(n is not None for n in nodes):
+                self._leg_chain_nodes[side] = nodes
 
     def _apply_physics_setup(self) -> None:
         if self.physics_lite is None:
@@ -525,6 +538,56 @@ class DeclarativeRuntime:
         else:
             _log.debug("declarative: unknown gait kind %r", kind)
 
+    def _refresh_lock_target(
+        self, gait: dict[str, Any], step_idx: int, leading_l: bool,
+    ) -> None:
+        """Snapshot the trailing foot's world position at each step boundary.
+
+        ``stride`` gaits naturally pin the leg that's NOT swinging — the
+        trailing foot stays planted on its stair while the leading leg
+        moves. Snapshotting at each ``step_idx`` boundary gives us a
+        per-stride world target the IK pass can then drive the trailing
+        leg toward, on top of the engine's own collision planter.
+        Without this lock the trailing foot drifts as the body translates
+        and the engine planter is the only thing preventing visible
+        sliding — fine for clip-prevention, less natural-looking.
+        """
+        if not gait.get("lock_trailing_foot", True):
+            return
+        # Detect step boundary on a per-side basis so each foot's lock
+        # is refreshed only when IT is the trailing one.
+        side = "R" if leading_l else "L"
+        last = self._last_step_idx.get(side, -1)
+        if last == step_idx:
+            return
+        self._last_step_idx[side] = step_idx
+        chain = self._leg_chain_nodes.get(side)
+        if chain is None:
+            return
+        foot = chain[2]
+        self._foot_lock[side] = _world_position(foot)
+        # The OTHER side is leading — release any stale lock so the IK
+        # pass doesn't keep dragging it backwards once it lifts off.
+        opposite = "L" if side == "R" else "R"
+        self._foot_lock.pop(opposite, None)
+
+    def _apply_lock_targets(self) -> None:
+        """Run analytical 2-bone IK on each foot that has an active lock target."""
+        if not self._foot_lock or not self._leg_chain_nodes:
+            return
+        for side, target_world in list(self._foot_lock.items()):
+            chain = self._leg_chain_nodes.get(side)
+            if chain is None:
+                continue
+            root, mid, end = chain
+            try:
+                from posecascade.animation.ik import (  # noqa: PLC0415
+                    solve_two_bone_analytic,
+                )
+            except ImportError:
+                return
+            solve_two_bone_analytic(root, mid, end, target_world.astype(np.float32))
+
     def _apply_stride_gait(self, gait: dict[str, Any], phase_t: float) -> None:
         """Step-based stair stride: leading leg lifts forward, trailing back-pedals.
 
@@ -546,6 +609,9 @@ class DeclarativeRuntime:
         step_idx = min(int(step_pos), step_count - 1)
         step_t = step_pos - step_idx
         leading_l = (step_idx % 2 == 0)
+        # Snapshot trailing foot at each step boundary BEFORE the gait
+        # rewrites the trailing leg's pose.
+        self._refresh_lock_target(gait, step_idx, leading_l)
         knee_env = _bell(step_t, float(knee_bell[0]), float(knee_bell[1]))
         forward_env = _bell(step_t, float(forward_bell[0]), float(forward_bell[1]))
         leading_upper = leading_lift * forward_env
@@ -565,6 +631,10 @@ class DeclarativeRuntime:
         self._set_world_x_delta("lower_leg_R", knee_r)
         self._set_world_y_delta("upper_arm_L", arm_swing)
         self._set_world_y_delta("upper_arm_R", arm_swing)
+        # AFTER gait writes the leg poses, drag the trailing foot back
+        # to its locked world position via analytical IK. Engine's
+        # foot_planter still runs (post-script) as the safety net.
+        self._apply_lock_targets()
 
     def _apply_walking_gait(self, gait: dict[str, Any], phase_elapsed: float) -> None:
         cycle_sec = float(gait.get("step_cycle_sec", 1.0))
@@ -634,6 +704,16 @@ def _bell(t: float, start: float, end: float) -> float:
     if t <= start or t >= end or end <= start:
         return 0.0
     return math.sin(((t - start) / (end - start)) * math.pi)
+
+
+def _world_position(node: Any) -> np.ndarray:
+    """Compose ``node``'s parent chain to get its world-space origin."""
+    matrix = node.transform.to_matrix()
+    parent = node.parent
+    while parent is not None:
+        matrix = parent.transform.to_matrix() @ matrix
+        parent = parent.parent
+    return np.array([matrix[0, 3], matrix[1, 3], matrix[2, 3]], dtype=np.float64)
 
 
 def _resolve_translation(
