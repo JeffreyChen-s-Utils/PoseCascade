@@ -11,6 +11,7 @@ them.
 from __future__ import annotations
 
 import json
+import math
 
 import numpy as np
 import pytest
@@ -304,6 +305,55 @@ def test_stair_translation_descend_returns_z_to_base() -> None:
     t_now[0] = 3.999
     hooks["update"](0.0)
     np.testing.assert_allclose(root.transform.translation[2], -0.20, atol=1e-3)
+
+
+def test_value_curve_accepts_inline_expression_string() -> None:
+    """A scalar string with arithmetic (e.g. ``"0.5 * sin(elapsed * tau)"``)
+    is evaluated through the safe AST DSL when resolved per-frame."""
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["loop_sec"] = 1.0
+    doc["phases"][0]["duration_sec"] = 1.0
+    doc["phases"][0]["body"] = {
+        # x position oscillates with elapsed time.
+        "translation": {"x": "0.1 * sin(elapsed * tau)", "y": 0.0, "z": 0.0},
+    }
+    parsed = parse_animation(doc)
+    t_now = [0.0]
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: t_now[0],
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    # At t=0.25 (quarter of cycle), sin(π/2)=1 → x = 0.1.
+    t_now[0] = 0.25
+    hooks["update"](0.0)
+    root = scene.find("Sketchfab_model")
+    np.testing.assert_allclose(root.transform.translation[0], 0.1, atol=1e-3)
+
+
+def test_value_curve_kind_expression_is_supported() -> None:
+    """Explicit ``{kind: expression, source: ...}`` form, for cases where
+    the author wants to be unambiguous."""
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["loop_sec"] = 1.0
+    doc["phases"][0]["duration_sec"] = 1.0
+    doc["phases"][0]["body"] = {
+        "yaw_rad": {"kind": "expression", "source": "phase_t * pi"},
+    }
+    parsed = parse_animation(doc)
+    t_now = [0.5]  # phase_t = 0.5
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: t_now[0],
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    root = scene.find("Sketchfab_model")
+    # yaw = 0.5 * π = π/2 → quaternion (0, sin(π/4), 0, cos(π/4))
+    rot = root.transform.rotation
+    np.testing.assert_allclose(rot[1], math.sin(math.pi / 4), atol=1e-3)
 
 
 def test_physics_chains_parse_into_dict_of_floats() -> None:

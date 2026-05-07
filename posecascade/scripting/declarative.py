@@ -52,6 +52,11 @@ from typing import Any
 import numpy as np
 
 from posecascade.errors import PoseCascadeError, ScriptSecurityError
+from posecascade.scripting.expressions import (
+    ExpressionError,
+    evaluate_expression,
+    looks_like_expression,
+)
 from posecascade.utils.logging import get_logger
 from posecascade.utils.math3d import (
     quat_from_axis_angle,
@@ -87,53 +92,84 @@ _SYMBOLIC_FLOATS = {
 }
 
 
-def _resolve_scalar(value: Any) -> float:
-    """Resolve a scalar that may be a number or a symbolic constant string."""
+def _resolve_scalar(value: Any, scope: dict[str, float] | None = None) -> float:
+    """Resolve a scalar that may be a number, symbolic constant, or expression.
+
+    ``scope`` is the per-frame variable bag (``elapsed``, ``phase_t``,
+    ``phase_elapsed``); pass ``None`` for parse-time resolution where
+    only :data:`_SYMBOLIC_FLOATS` are accepted. Scalars containing
+    arithmetic operators or function calls are routed through the
+    expression DSL so animation authors can write
+    ``"amplitude * sin(elapsed * tau)"`` directly in the JSON value.
+    """
     if isinstance(value, (int, float)):
         return float(value)
     if isinstance(value, str):
         if value in _SYMBOLIC_FLOATS:
             return _SYMBOLIC_FLOATS[value]
+        if looks_like_expression(value):
+            try:
+                return evaluate_expression(value, scope or {})
+            except ExpressionError as err:
+                raise DeclarativeAnimationError(str(err)) from err
         try:
             return float(value)
         except ValueError as err:
             raise DeclarativeAnimationError(
-                f"unrecognised scalar string {value!r}; expected a number "
-                f"or one of {sorted(_SYMBOLIC_FLOATS)}",
+                f"unrecognised scalar string {value!r}; expected a number, "
+                f"an expression, or one of {sorted(_SYMBOLIC_FLOATS)}",
             ) from err
     raise DeclarativeAnimationError(
         f"expected scalar, got {type(value).__name__}: {value!r}",
     )
 
 
-def _resolve_value_curve(spec: Any, phase_t: float) -> float:
+def _resolve_value_curve(
+    spec: Any, phase_t: float, scope: dict[str, float] | None = None,
+) -> float:
     """Evaluate a per-phase value at normalised phase time ``phase_t`` ∈ [0,1].
 
-    ``spec`` is either a scalar (constant) or a dict with a ``kind`` field
-    naming one of the supported curves: ``constant``, ``linear``, ``ease``.
+    ``spec`` is either a scalar (number / symbolic constant / expression
+    string) or a dict with a ``kind`` field naming one of the supported
+    curves: ``constant``, ``linear``, ``ease``, ``expression``. The
+    ``expression`` kind takes a ``"source"`` string and evaluates it
+    via the safe AST DSL with access to ``elapsed``, ``phase_t``,
+    ``phase_elapsed`` and the math helpers.
     """
+    eval_scope = dict(scope) if scope else {}
+    eval_scope.setdefault("phase_t", float(phase_t))
     if isinstance(spec, (int, float, str)):
-        return _resolve_scalar(spec)
+        return _resolve_scalar(spec, eval_scope)
     if not isinstance(spec, dict):
         raise DeclarativeAnimationError(
             f"value curve must be scalar or dict, got {type(spec).__name__}",
         )
     kind = spec.get("kind", "constant")
     if kind == "constant":
-        return _resolve_scalar(spec.get("value", 0.0))
+        return _resolve_scalar(spec.get("value", 0.0), eval_scope)
     if kind == "linear":
-        a = _resolve_scalar(spec.get("from", 0.0))
-        b = _resolve_scalar(spec.get("to", 0.0))
+        a = _resolve_scalar(spec.get("from", 0.0), eval_scope)
+        b = _resolve_scalar(spec.get("to", 0.0), eval_scope)
         return a + (b - a) * float(phase_t)
     if kind == "ease":
-        a = _resolve_scalar(spec.get("from", 0.0))
-        b = _resolve_scalar(spec.get("to", 0.0))
+        a = _resolve_scalar(spec.get("from", 0.0), eval_scope)
+        b = _resolve_scalar(spec.get("to", 0.0), eval_scope)
         t = float(phase_t)
         eased = _HALF - _HALF * math.cos(t * math.pi)
         return a + (b - a) * eased
+    if kind == "expression":
+        source = spec.get("source", "0")
+        if not isinstance(source, str):
+            raise DeclarativeAnimationError(
+                f"expression curve 'source' must be str, got {type(source).__name__}",
+            )
+        try:
+            return evaluate_expression(source, eval_scope)
+        except ExpressionError as err:
+            raise DeclarativeAnimationError(str(err)) from err
     raise DeclarativeAnimationError(
         f"unknown value-curve kind {kind!r}; expected one of "
-        "constant / linear / ease",
+        "constant / linear / ease / expression",
     )
 
 
@@ -413,9 +449,14 @@ class DeclarativeRuntime:
     def _update(self, _dt: float) -> None:
         elapsed = self.time() % self.animation.loop_sec
         phase, phase_t, phase_elapsed = self._phase_for(elapsed)
-        yaw = _resolve_value_curve(phase.body_yaw_rad, phase_t)
-        lean = _resolve_value_curve(phase.body_lean_x_rad, phase_t)
-        translation = _resolve_translation(phase.body_translation, phase_t)
+        scope = {
+            "elapsed": float(elapsed),
+            "phase_t": float(phase_t),
+            "phase_elapsed": float(phase_elapsed),
+        }
+        yaw = _resolve_value_curve(phase.body_yaw_rad, phase_t, scope)
+        lean = _resolve_value_curve(phase.body_lean_x_rad, phase_t, scope)
+        translation = _resolve_translation(phase.body_translation, phase_t, scope)
         self._apply_root(translation, yaw, lean)
         if phase.gait is not None:
             self._apply_gait(phase.gait, phase_elapsed, phase_t)
@@ -567,14 +608,14 @@ def _bell(t: float, start: float, end: float) -> float:
 
 
 def _resolve_translation(
-    spec: dict[str, Any], phase_t: float,
+    spec: dict[str, Any], phase_t: float, scope: dict[str, float] | None = None,
 ) -> tuple[float, float, float]:
     if "stair" in spec:
         return _resolve_stair_translation(spec["stair"], phase_t)
     return (
-        _resolve_value_curve(spec.get("x", 0.0), phase_t),
-        _resolve_value_curve(spec.get("y", 0.0), phase_t),
-        _resolve_value_curve(spec.get("z", 0.0), phase_t),
+        _resolve_value_curve(spec.get("x", 0.0), phase_t, scope),
+        _resolve_value_curve(spec.get("y", 0.0), phase_t, scope),
+        _resolve_value_curve(spec.get("z", 0.0), phase_t, scope),
     )
 
 
