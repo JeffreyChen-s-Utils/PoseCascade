@@ -678,23 +678,36 @@ def auto_foot_samples(
     has no dominant vertices — caller should fall back to script-supplied
     samples in that case.
     """
-    foot_idx = -1
-    skin_match = None
+    skin_match, foot_idx = _find_foot_in_skins(foot_node, skins)
+    if skin_match is None:
+        return ((), 0.0)
+    foot_world = _world_matrix(foot_node).astype(np.float64, copy=False)
+    skin_matrix = foot_world @ np.asarray(
+        skin_match.inverse_bind_matrices[foot_idx], dtype=np.float64,
+    )
+    verts_world = _collect_dominant_vertices(
+        meshes, foot_idx, skin_matrix, weight_threshold,
+    )
+    if not verts_world:
+        return ((), 0.0)
+    return _build_samples_from_vertices(np.asarray(verts_world), foot_world, safety_margin)
+
+
+def _find_foot_in_skins(foot_node: Node, skins) -> tuple[object, int]:
     for skin in skins:
         for i, joint in enumerate(skin.joints):
             if joint is foot_node:
-                foot_idx = i
-                skin_match = skin
-                break
-        if skin_match is not None:
-            break
-    if skin_match is None:
-        return ((), 0.0)
-    inv_bind = np.asarray(skin_match.inverse_bind_matrices[foot_idx], dtype=np.float64)
-    foot_world = _world_matrix(foot_node).astype(np.float64, copy=False)
-    skin_matrix = foot_world @ inv_bind
-    foot_origin = foot_world[:3, 3]
-    verts_world: list[np.ndarray] = []
+                return skin, i
+    return None, -1
+
+
+def _collect_dominant_vertices(
+    meshes,
+    foot_idx: int,
+    skin_matrix: np.ndarray,
+    weight_threshold: float,
+) -> list[np.ndarray]:
+    verts: list[np.ndarray] = []
     for mesh in meshes:
         if mesh.joints_0 is None or mesh.weights_0 is None or mesh.positions is None:
             continue
@@ -709,43 +722,41 @@ def auto_foot_samples(
                         [float(v_pos[0]), float(v_pos[1]), float(v_pos[2]), 1.0],
                         dtype=np.float64,
                     )
-                    verts_world.append((skin_matrix @ v_h)[:3])
+                    verts.append((skin_matrix @ v_h)[:3])
                     break
-    if not verts_world:
-        return ((), 0.0)
-    arr = np.asarray(verts_world)
+    return verts
+
+
+def _build_samples_from_vertices(
+    arr: np.ndarray, foot_world: np.ndarray, safety_margin: float,
+) -> tuple[
+    tuple[tuple[tuple[float, float, float], float], ...],
+    float,
+]:
+    foot_origin = foot_world[:3, 3]
     rel = arr - foot_origin
-    # Pick the bottom 5 % of vertices (lowest in world Y) — these are
-    # the ground-contact zone. Within that band, three extremes:
-    # backmost (heel), central (sole), foremost (toe).
     sole_band_threshold = arr[:, 1].min() + (arr[:, 1].max() - arr[:, 1].min()) * 0.05
     sole_mask = arr[:, 1] <= sole_band_threshold
     if not np.any(sole_mask):
         return ((), 0.0)
     sole_indices = np.where(sole_mask)[0]
     sole_arr = arr[sole_mask]
-    heel_idx = int(sole_indices[sole_arr[:, 2].argmin()])
-    toe_idx = int(sole_indices[sole_arr[:, 2].argmax()])
-    centre_idx = int(sole_indices[arr[sole_indices, 1].argmin()])
-    extreme_offsets: dict[int, np.ndarray] = {}
-    for idx in (heel_idx, centre_idx, toe_idx):
-        extreme_offsets[idx] = rel[idx]
-    unit_rotation = _extract_unit_rotation(foot_world)
-    rotation_inv = unit_rotation.T  # orthonormal inverse
+    extreme_idx = {
+        int(sole_indices[sole_arr[:, 2].argmin()]),
+        int(sole_indices[sole_arr[:, 2].argmax()]),
+        int(sole_indices[arr[sole_indices, 1].argmin()]),
+    }
+    rotation_inv = _extract_unit_rotation(foot_world).T  # orthonormal inverse
     samples: list[tuple[tuple[float, float, float], float]] = []
-    for offset in extreme_offsets.values():
+    for idx in extreme_idx:
+        offset = rel[idx]
         norm = float(np.linalg.norm(offset))
         if norm < _DEFAULT_PENETRATION_TOLERANCE:
             continue
-        unit_world = offset / norm
-        local_axis = rotation_inv @ unit_world
+        local_axis = rotation_inv @ (offset / norm)
         samples.append(
             (
-                (
-                    float(local_axis[0]),
-                    float(local_axis[1]),
-                    float(local_axis[2]),
-                ),
+                (float(local_axis[0]), float(local_axis[1]), float(local_axis[2])),
                 norm,
             ),
         )

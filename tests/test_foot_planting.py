@@ -14,9 +14,11 @@ import numpy as np
 from posecascade.animation.foot_planting import (
     FootIKChain,
     FootPlanter,
+    auto_foot_samples,
     flat_ground,
     stair_ground,
 )
+from posecascade.assets.types import Mesh, Skin
 from posecascade.scene.node import Node
 from posecascade.scene.transform import Transform
 from posecascade.utils.math3d import vec3
@@ -485,6 +487,69 @@ def test_foot_planter_uses_body_forward_for_knee_bend() -> None:
     assert knee_perp[2] > 0, (
         f"knee perpendicular Z={knee_perp[2]:.4f} not on body-forward (+Z) side"
     )
+
+
+def test_auto_foot_samples_derives_extremes_from_skin() -> None:
+    """``auto_foot_samples`` walks the foot bone's skinned vertices,
+    finds the lowest 5 % (= sole), and emits sample axes at the
+    heel / centre / toe extremes. This pins the engine-internal
+    auto-derivation so scripts can call ``floor.bind_foot`` with
+    just (chain, ground) and skip the hand-tuned axis bookkeeping
+    each rig requires."""
+    foot = _make_node("foot", translation=vec3(0.0, 0.0, 0.0))
+    # Synthetic skin with foot bone at index 0 + a single mesh
+    # whose dominant vertices are arranged like a foot's sole:
+    # heel at z=-0.005, sole-centre at z=0, toe at z=+0.025, all
+    # at y=-0.014 (14 mm below the bone's joint origin).
+    skin = Skin(
+        name="rig",
+        joints=(foot,),
+        inverse_bind_matrices=np.tile(np.eye(4, dtype=np.float32), (1, 1, 1)),
+    )
+    positions = np.array(
+        [
+            [0.000, -0.014, -0.005],  # heel
+            [0.000, -0.014, +0.000],  # sole centre
+            [0.000, -0.014, +0.025],  # toe
+            [0.000, +0.005, +0.000],  # top of foot — should NOT become a sample
+        ],
+        dtype=np.float32,
+    )
+    joints_0 = np.zeros((4, 4), dtype=np.uint32)
+    weights_0 = np.zeros((4, 4), dtype=np.float32)
+    weights_0[:, 0] = 1.0  # all dominantly bound to foot bone
+    mesh = Mesh(
+        name="foot_mesh",
+        positions=positions,
+        indices=np.array([0, 1, 2, 0, 2, 3], dtype=np.uint32),
+        joints_0=joints_0,
+        weights_0=weights_0,
+    )
+    samples, offset = auto_foot_samples(foot, (skin,), (mesh,), safety_margin=0.005)
+    assert len(samples) >= 1, f"no samples derived (got {samples})"
+    # Each sample axis should point downward (component along world -Y > 0).
+    for axis, _distance in samples:
+        assert axis[1] < 0, f"sample axis {axis} doesn't point down"
+    # Sample distances should match the synthetic foot's geometry
+    # (sqrt(0.014² + Δz²) = 14 mm to 28 mm).
+    for _axis, distance in samples:
+        assert 0.013 < distance < 0.030, f"sample distance {distance} out of expected band"
+    assert offset == 0.005, f"expected safety margin 5 mm, got {offset}"
+
+
+def test_auto_foot_samples_returns_empty_when_foot_not_in_skin() -> None:
+    """Foot bone not present in any skin → empty samples + zero offset
+    so the caller can fall back to a hand-supplied default."""
+    foot = _make_node("foot", translation=vec3(0.0, 0.0, 0.0))
+    other = _make_node("other", translation=vec3(0.0, 0.0, 0.0))
+    skin = Skin(
+        name="rig",
+        joints=(other,),
+        inverse_bind_matrices=np.tile(np.eye(4, dtype=np.float32), (1, 1, 1)),
+    )
+    samples, offset = auto_foot_samples(foot, (skin,), ())
+    assert samples == ()
+    assert offset == 0.0
 
 
 def test_foot_planter_aligns_toe_to_body_forward() -> None:
