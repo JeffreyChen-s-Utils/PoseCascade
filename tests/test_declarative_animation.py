@@ -307,6 +307,55 @@ def test_stair_translation_descend_returns_z_to_base() -> None:
     np.testing.assert_allclose(root.transform.translation[2], -0.20, atol=1e-3)
 
 
+def test_runtime_drives_per_phase_morph_weights() -> None:
+    """Phases declare ``morphs: {name: curve}``; the runtime resolves
+    each curve per frame and writes the weight through ``api.morphs``.
+    This is the JSON path equivalent of a script doing
+    ``morphs.set("smile", value)`` each tick."""
+    from posecascade.scripting.morph_api import MorphApi  # noqa: PLC0415
+    scene = _build_minimal_scene()
+    morph_api = MorphApi()
+    doc = _minimal_doc()
+    doc["loop_sec"] = 1.0
+    doc["phases"][0]["duration_sec"] = 1.0
+    doc["phases"][0]["morphs"] = {
+        "smile": {"kind": "linear", "from": 0.0, "to": 1.0},
+        "blink": "0.5 * sin(elapsed * tau)",
+    }
+    parsed = parse_animation(doc)
+    t_now = [0.5]  # phase_t = 0.5 → smile = 0.5; elapsed=0.5 → sin(π) ≈ 0 → blink ≈ 0
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: t_now[0],
+        morph_api=morph_api,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    weights = dict(morph_api.current_weights())
+    assert weights["smile"] == pytest.approx(0.5, abs=1e-3)
+    assert weights["blink"] == pytest.approx(0.0, abs=1e-3)
+
+
+def test_phase_without_morphs_does_not_write_weights() -> None:
+    """Phases that don't declare morphs leave the weight map alone —
+    so a previous phase's last weight stays until a later phase
+    overwrites it (or the script clears explicitly)."""
+    from posecascade.scripting.morph_api import MorphApi  # noqa: PLC0415
+    scene = _build_minimal_scene()
+    morph_api = MorphApi()
+    morph_api.set("preexisting", 0.42)
+    doc = _minimal_doc()  # no morphs
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+        morph_api=morph_api,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    assert dict(morph_api.current_weights()) == {"preexisting": 0.42}
+
+
 def test_value_curve_accepts_inline_expression_string() -> None:
     """A scalar string with arithmetic (e.g. ``"0.5 * sin(elapsed * tau)"``)
     is evaluated through the safe AST DSL when resolved per-frame."""

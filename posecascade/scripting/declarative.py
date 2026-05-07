@@ -200,6 +200,7 @@ class Phase:
     body_lean_x_rad: Any
     body_translation: dict[str, Any]
     gait: dict[str, Any] | None
+    morphs: dict[str, Any]  # name → value-curve spec
 
 
 @dataclass(frozen=True)
@@ -253,6 +254,9 @@ def _parse_phase(raw: dict[str, Any]) -> Phase:
     body = raw.get("body", {})
     if not isinstance(body, dict):
         raise DeclarativeAnimationError("phase 'body' must be an object")
+    morphs = raw.get("morphs", {})
+    if not isinstance(morphs, dict):
+        raise DeclarativeAnimationError("phase 'morphs' must be an object")
     return Phase(
         name=str(raw.get("name", "")),
         duration_sec=float(raw.get("duration_sec", 0.0)),
@@ -260,6 +264,7 @@ def _parse_phase(raw: dict[str, Any]) -> Phase:
         body_lean_x_rad=body.get("lean_x_rad", 0.0),
         body_translation=body.get("translation", {}),
         gait=raw.get("gait"),
+        morphs=morphs,
     )
 
 
@@ -329,6 +334,7 @@ class DeclarativeRuntime:
     time: Callable[[], float]
     floor_api: Any | None = None
     physics_lite: Any | None = None
+    morph_api: Any | None = None
     _root_drive: _BoneDrive | None = None
     _bone_drives: dict[str, _BoneDrive] = field(default_factory=dict)
     _phase_starts: list[float] = field(default_factory=list)
@@ -460,6 +466,29 @@ class DeclarativeRuntime:
         self._apply_root(translation, yaw, lean)
         if phase.gait is not None:
             self._apply_gait(phase.gait, phase_elapsed, phase_t)
+        if phase.morphs and self.morph_api is not None:
+            self._apply_morphs(phase.morphs, phase_t, scope)
+
+    def _apply_morphs(
+        self, morphs: dict[str, Any], phase_t: float, scope: dict[str, float],
+    ) -> None:
+        """Evaluate per-phase morph curves and push weights into the API.
+
+        The API is a thin wrapper around either a renderer-driven weight
+        map or a standalone dict (tests). Either way, calling
+        ``set(name, value)`` stores the latest weight for ``name``;
+        downstream code (renderer / morph applier) consumes it on the
+        next render pass.
+        """
+        for name, spec in morphs.items():
+            try:
+                weight = _resolve_value_curve(spec, phase_t, scope)
+            except DeclarativeAnimationError as err:
+                _log.warning(
+                    "declarative: morph %r failed to evaluate: %s", name, err,
+                )
+                continue
+            self.morph_api.set(str(name), float(weight))
 
     def _phase_for(self, elapsed: float) -> tuple[Phase, float, float]:
         for i, phase in enumerate(self.animation.phases):
@@ -699,6 +728,7 @@ def load_animation(
         time=api["time"],
         floor_api=api.get("floor"),
         physics_lite=api.get("physics_lite"),
+        morph_api=api.get("morphs"),
     )
     return runtime.hooks()
 
