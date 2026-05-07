@@ -1,0 +1,184 @@
+"""QApplication bootstrap and main entry."""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+from PySide6.QtWidgets import QApplication
+
+from posecascade.app.main_window import MainWindow
+from posecascade.app.registry import Services, build_services
+from posecascade.assets.types import ImportedScene
+from posecascade.errors import PoseCascadeError
+from posecascade.scripting.sandbox import build_api, load_script
+from posecascade.utils.logging import get_logger
+
+_log = get_logger(__name__)
+
+
+def run_app(scene_path: Path | None = None, script_path: Path | None = None) -> int:
+    """Boot the QApplication, build the main window, and exec the event loop."""
+    app = QApplication.instance() or QApplication(sys.argv)
+    project_root = _detect_project_root()
+    services = build_services(project_root=project_root)
+    window = MainWindow(services=services)
+    window.viewport.set_cloth_host(services.cloth_host)
+    window.resize(1280, 800)
+    window.show()
+
+    if scene_path is not None:
+        attach_scene(window, services, scene_path)
+    if script_path is not None:
+        attach_script(window, services, script_path)
+
+    return app.exec()
+
+
+def attach_scene(window: MainWindow, services: Services, scene_path: Path) -> None:
+    """Load ``scene_path`` via the importer manager and bind it to the viewport.
+
+    Public so the menu's ``File → Open Scene`` can call it on user request.
+    """
+    try:
+        imported: ImportedScene = services.importer_manager.load(scene_path.resolve())
+    except PoseCascadeError as err:
+        _log.error("failed to load scene %s: %s", scene_path, err)
+        return
+    if imported.scene is None:
+        _log.warning("scene %s loaded no nodes", scene_path)
+        return
+    window.viewport.set_scene(imported.scene)
+    services.imported_skins = tuple(imported.skins)
+    services.imported_meshes = tuple(imported.meshes)
+    _bind_meshes_when_ready(window, imported)
+    # Reset hosts so a new scene's chains/cloth don't accumulate behind the old
+    # ones (which would point at deallocated nodes).
+    services.physics_host.reset()
+    services.physics_host.install_default_forces()
+    services.cloth_host.reset()
+    services.cloth_host.install_default_forces()
+    # Auto-rig spring-physics chains tagged on bones by the importer (e.g. ``hair_*``).
+    services.physics_host.register_imported_scene(imported)
+    # Auto-rig cloth pieces tagged with ClothComponent (user marks via script API,
+    # or a future importer pass detects by name pattern).
+    services.cloth_host.register_imported_scene(imported)
+    # Any scripts that already ran their start() hook against the previous
+    # (likely empty) scene need to re-initialise — otherwise their scene.find()
+    # lookups against the new scene's nodes will never happen and the script
+    # appears to do nothing.
+    services.script_host.restart_all()
+    if hasattr(window, "set_scene_path"):
+        window.set_scene_path(scene_path)
+
+
+def _bind_meshes_when_ready(window: MainWindow, imported: ImportedScene) -> None:
+    """Defer mesh upload until the viewport's renderer + GL context are ready.
+
+    Two cases:
+
+    * Renderer not yet initialised (startup ``--scene`` path): connect to the
+      ``initialized`` signal — it fires on the GL thread inside ``initializeGL``,
+      so ``populate_from_scene`` runs with the context already current.
+
+    * Renderer already initialised (``File → Open Scene`` after window.show):
+      we are on the Qt main thread with the context NOT current. Calling
+      ``populate_from_scene`` directly here generates garbage VAOs that crash
+      the next ``paintGL`` with ``GL_INVALID_OPERATION``. Wrap the call in
+      ``viewport.makeCurrent()`` / ``doneCurrent()`` so GL functions see the
+      right context.
+    """
+    def _on_initialized(_gl_context: object) -> None:
+        renderer = window.viewport.renderer
+        if renderer is None:
+            return
+        renderer.populate_from_scene(imported)
+        window.viewport.update()
+
+    viewport = window.viewport
+    if viewport.renderer is None:
+        viewport.initialized.connect(_on_initialized)
+        return
+
+    # Renderer already up — make the context current on this thread for the
+    # duration of the upload, then release it so paintGL can re-acquire normally.
+    try:
+        viewport.makeCurrent()
+        try:
+            _on_initialized(None)
+        finally:
+            viewport.doneCurrent()
+    except RuntimeError as err:
+        _log.error("could not make viewport GL context current for upload: %s", err)
+
+
+def attach_script(window: MainWindow, services: Services, script_path: Path) -> None:
+    """Compile ``script_path`` through the sandbox and register it with the script host.
+
+    Public so the menu's ``File → Open Script`` can call it on user request.
+    Warns when loaded against an empty scene — most demo scripts call
+    ``scene.find(...)`` in their ``start()`` hook and silently no-op when no
+    scene is loaded, which looks like the script does nothing.
+    """
+    if _scene_looks_empty(window):
+        _warn_script_against_empty_scene(window, script_path)
+    try:
+        source = script_path.read_text(encoding="utf-8")
+    except OSError as err:
+        _log.error("failed to read script %s: %s", script_path, err)
+        return
+    api = build_api(
+        scene=window.viewport.scene,
+        time_provider=lambda: window.clock.elapsed,
+        physics_host=services.physics_host,
+        cloth_host=services.cloth_host,
+        foot_planter=services.foot_planter,
+        skins=services.imported_skins,
+        meshes=services.imported_meshes,
+    )
+    try:
+        hooks = load_script(source, str(script_path), api)
+    except PoseCascadeError as err:
+        _log.error("failed to load script %s: %s", script_path, err)
+        return
+    services.script_host.attach(name=script_path.stem, hooks=hooks)
+    if hasattr(window, "set_script_path"):
+        window.set_script_path(script_path)
+
+
+def _scene_looks_empty(window: MainWindow) -> bool:
+    """True if the viewport's scene has no nodes besides the auto-installed root."""
+    scene = window.viewport.scene
+    return scene is None or not scene.root.children
+
+
+def _warn_script_against_empty_scene(window: MainWindow, script_path: Path) -> None:
+    """Show a non-fatal warning so the user understands why the script will be a no-op.
+
+    The script is still attached — it might define helpers or wait for an event.
+    But anything calling ``scene.find(...)`` on first tick gets ``None``, so the
+    warning explains that *load a scene first* is the usual fix.
+    """
+    msg = (
+        f"Script {script_path.name!r} is being loaded into an empty scene.\n\n"
+        "Most demo scripts look up nodes by name in their start() hook — those "
+        "lookups return None against an empty scene and the script silently does "
+        "nothing.\n\nLoad a scene first via File → Open Scene, then re-open the "
+        "script."
+    )
+    _log.warning(msg.replace("\n\n", " | ").replace("\n", " "))
+    try:
+        from PySide6.QtWidgets import QMessageBox  # noqa: PLC0415
+
+        QMessageBox.warning(window, "Empty scene", msg)
+    except (ImportError, RuntimeError) as err:
+        # Headless test runs (no QApplication.exec) or non-Qt callers — log only.
+        _log.debug("could not show empty-scene warning dialog: %s", err)
+
+
+def _detect_project_root() -> Path:
+    """Locate the project root by walking up until ``importers/`` is found."""
+    here = Path(__file__).resolve()
+    for parent in (here, *here.parents):
+        if (parent / "importers").is_dir():
+            return parent
+    return here.parent

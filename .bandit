@@ -1,0 +1,14 @@
+# Bandit configuration for PoseCascade.
+# This file is the canonical skip list. pyproject.toml [tool.bandit] mirrors it.
+# Every skip MUST carry a one-line `# B<NNN>: <reason>` comment.
+
+exclude_dirs:
+  - tests
+  - .venv
+  - build
+  - dist
+
+# No project-wide skips yet. Per-line `# nosec B<NNN>` is preferred — only
+# promote to a project-wide skip after the same false positive recurs in
+# multiple unrelated files.
+skips: []

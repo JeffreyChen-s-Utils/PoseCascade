@@ -1,0 +1,46 @@
+name = "ikeshita_ray"
+fragment_shader = "shaders/effects/ikeshita_ray.frag"
+output_name = "result"
+blend_mode = "add"
+description = """
+Ikeshita_Ray-style god rays. Samples ``main_color`` along a vector
+from the configurable light position, accumulating bright pixels into
+a radial streak then adding back over the scene.
+"""
+
+[[inputs]]
+sampler_name = "u_main_color"
+source = "main_color"
+
+[[uniforms]]
+name = "light_screen_position"
+kind = "vec3_color"
+default = [0.5, 0.7, 0.0]
+description = "Light source in screen-NDC + ignored Z; used as the ray origin."
+
+[[uniforms]]
+name = "decay"
+kind = "scalar"
+default = 0.96
+minimum = 0.5
+maximum = 1.0
+step = 0.005
+description = "Per-step decay along each ray sample."
+
+[[uniforms]]
+name = "weight"
+kind = "scalar"
+default = 0.6
+minimum = 0.0
+maximum = 2.0
+step = 0.05
+description = "Per-sample weight on the accumulated brightness."
+
+[[uniforms]]
+name = "exposure"
+kind = "scalar"
+default = 1.0
+minimum = 0.0
+maximum = 4.0
+step = 0.05
+description = "Final scale on the additive contribution."

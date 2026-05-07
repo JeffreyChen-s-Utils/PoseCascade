@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "posecascade"
+version = "0.0.1"
+description = "PySide6 + OpenGL engine for importing 3D models and driving them with sandboxed scripts."
+requires-python = ">=3.12"
+dependencies = [
+    "PySide6>=6.7",
+    "PyOpenGL>=3.1.7",
+    "numpy>=1.26",
+    "Pillow>=10.0",
+    "defusedxml>=0.7",
+    "pygltflib>=1.16",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-qt>=4.4",
+    "ruff>=0.6",
+    "bandit>=1.7",
+    "scikit-image>=0.24",
+]
+
+[project.scripts]
+posecascade = "posecascade.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["posecascade*"]
+exclude = ["tests*", "importers*", "examples*"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = [".venv", "build", "dist"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",      # pycodestyle
+    "F",           # pyflakes
+    "B",           # flake8-bugbear
+    "I",           # isort
+    "UP",          # pyupgrade
+    "SIM",         # flake8-simplify
+    "S",           # flake8-bandit (subset)
+    "N",           # pep8-naming
+    "C4",          # comprehensions
+    "RET",         # return-statements
+    "PL",          # pylint
+]
+ignore = [
+    "PLR0913",     # too-many-arguments — handled at the dataclass-grouping level case-by-case
+    "S101",        # asserts in tests are fine
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "PLR2004", "PLR0913"]
+"posecascade/scripting/sandbox.py" = ["S102"]   # one allowed exec, gated; bandit nosec on the line
+
+[tool.bandit]
+# Mirror of .bandit — keep in sync. The .bandit file is canonical and carries
+# per-rule justification comments.
+exclude_dirs = ["tests", ".venv", "build", "dist"]
+skips = []  # add only with a same-line justification in .bandit

@@ -1,0 +1,41 @@
+name = "hgshadow"
+fragment_shader = "shaders/effects/hgshadow.frag"
+output_name = "result"
+blend_mode = "multiply"
+description = """
+HgShadow-style improved shadow tint. Reads ``main_depth`` to find
+shadowed regions and darkens them with a configurable colour cast,
+softening the toon pass's hard cell shadow.
+"""
+
+[[inputs]]
+sampler_name = "u_main_color"
+source = "main_color"
+
+[[inputs]]
+sampler_name = "u_main_depth"
+source = "main_depth"
+
+[[uniforms]]
+name = "darken"
+kind = "scalar"
+default = 0.4
+minimum = 0.0
+maximum = 1.0
+step = 0.01
+description = "How aggressively to mute shaded areas (0 disables)."
+
+[[uniforms]]
+name = "shadow_tint"
+kind = "vec3_color"
+default = [0.45, 0.45, 0.55]
+description = "Colour multiplier applied inside shadow regions."
+
+[[uniforms]]
+name = "depth_falloff"
+kind = "scalar"
+default = 0.5
+minimum = 0.0
+maximum = 4.0
+step = 0.1
+description = "Scales the depth-discrimination edge between lit and dark areas."
