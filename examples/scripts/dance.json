@@ -45,38 +45,51 @@
 
   "wind": {
     "direction": [1.0, 0.0, 0.3],
-    "speed": 0.3,
-    "turbulence_amplitude": 0.10,
+    "speed": 0.15,
+    "turbulence_amplitude": 0.05,
     "turbulence_frequency_hz": 1.2
   },
 
   "cloth": [
     {
       "mesh_node": "Object_146",
-      "structural_stiffness": 0.85,
-      "bend_stiffness": 0.12,
+      "structural_stiffness": 0.90,
+      "bend_stiffness": 0.18,
       "anchor_axis": 1,
-      "anchor_fraction": 0.18,
+      "anchor_fraction": 0.32,
       "anchor_mode": "top_axis",
-      "rest_pull": 4.0,
-      "iterations": 8
+      "rest_pull": 8.0,
+      "iterations": 10
     }
   ],
 
   "colliders": [
-    {"kind": "sphere", "follow_bone": "J_Bip_L_Hand", "radius": 0.06},
-    {"kind": "sphere", "follow_bone": "J_Bip_R_Hand", "radius": 0.06},
+    {"kind": "sphere", "follow_bone": "J_Bip_C_Hips",       "radius": 0.10},
+    {"kind": "sphere", "follow_bone": "J_Bip_L_Hand",       "radius": 0.06},
+    {"kind": "sphere", "follow_bone": "J_Bip_R_Hand",       "radius": 0.06},
+    {
+      "kind": "capsule",
+      "follow_bone": "J_Bip_L_UpperLeg",
+      "end_bone":    "J_Bip_L_LowerLeg",
+      "radius":      0.07
+    },
+    {
+      "kind": "capsule",
+      "follow_bone": "J_Bip_R_UpperLeg",
+      "end_bone":    "J_Bip_R_LowerLeg",
+      "radius":      0.07
+    },
     {
       "kind": "capsule",
       "follow_bone": "J_Bip_L_LowerArm",
-      "end_bone": "J_Bip_L_Hand",
-      "radius": 0.045
+      "end_bone":    "J_Bip_L_Hand",
+      "radius":      0.045
     },
     {
       "kind": "capsule",
       "follow_bone": "J_Bip_R_LowerArm",
-      "end_bone": "J_Bip_R_Hand",
-      "radius": 0.045
+      "end_bone":    "J_Bip_R_Hand",
+      "radius":      0.045
     }
   ],
 
