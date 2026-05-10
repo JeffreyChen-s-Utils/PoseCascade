@@ -187,6 +187,34 @@ pushed into the sandbox `morphs` API; the renderer / morph applier
 reads from there. Phases that don't declare `morphs` leave the
 weight map alone, so a previous phase's last weight persists.
 
+### Cross-fade between phases
+
+```json
+{
+  "name": "reach_right",
+  "duration_beats": 4,
+  "blend_out_sec": 0.3,
+  "body": { ... }
+},
+{
+  "name": "reach_left",
+  "duration_beats": 4,
+  "blend_in_sec": 0.3,
+  "body": { ... }
+}
+```
+
+When BOTH the current phase's `blend_out_sec` and the next phase's
+`blend_in_sec` are > 0, the runtime evaluates both phases in the
+overlap window (`min(prev.blend_out_sec, next.blend_in_sec)` seconds
+before the boundary) and lerps between their outputs. Body fields use
+scalar lerp; bone rotations use quaternion slerp; morph weights use
+scalar lerp. Bones present in only one phase blend against rest pose;
+morphs present in only one phase blend against weight 0. **Gait does
+not blend** — the current phase's gait runs continuously up to the
+boundary, then the next phase's takes over. Setting either field to 0
+suppresses blending — the boundary becomes a hard cut.
+
 ### bones
 
 ```json

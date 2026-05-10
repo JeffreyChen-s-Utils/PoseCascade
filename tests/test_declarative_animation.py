@@ -600,6 +600,187 @@ def test_physics_chains_parse_into_dict_of_floats() -> None:
     assert parsed.physics_chains["hair_b"]["stiffness"] == pytest.approx(2 * 3.14159265, abs=1e-3)
 
 
+def test_crossfade_blends_body_yaw_at_boundary() -> None:
+    """Body yaw at the cross-fade window's midpoint is the lerp midpoint
+    of the two phases' yaw curves. This is the most direct test of the
+    blend math — gait and bones add complexity but body fields are
+    pure scalar lerps."""
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["loop_sec"] = 2.0
+    doc["phases"] = [
+        {
+            "name": "a",
+            "duration_sec": 1.0,
+            "blend_out_sec": 0.4,
+            "body": {"yaw_rad": 0.0},
+        },
+        {
+            "name": "b",
+            "duration_sec": 1.0,
+            "blend_in_sec": 0.4,
+            "body": {"yaw_rad": "pi"},
+        },
+    ]
+    parsed = parse_animation(doc)
+    t_now = [0.8]  # 0.2 s remaining in phase a, overlap 0.4 → blend_t = 0.5
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: t_now[0],
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    root = scene.find("Sketchfab_model")
+    # Yaw lerps 0 → π so at blend_t = 0.5 the yaw is π/2.
+    # Quaternion for Y-axis π/2 → (0, sin(π/4), 0, cos(π/4)).
+    np.testing.assert_allclose(
+        root.transform.rotation[1], math.sin(math.pi / 4), atol=1e-3,
+    )
+
+
+def test_crossfade_blends_bones_with_slerp_at_boundary() -> None:
+    """Bone rotation in the cross-fade midpoint matches the slerp
+    midpoint of the two phases' computed deltas — slerp not lerp,
+    so the rotation stays on the unit hypersphere."""
+    from posecascade.scripting.declarative import (  # noqa: PLC0415
+        _euler_zyx_quat,
+    )
+    from posecascade.utils.math3d import quat_slerp  # noqa: PLC0415
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["loop_sec"] = 2.0
+    doc["phases"] = [
+        {
+            "name": "a",
+            "duration_sec": 1.0,
+            "blend_out_sec": 0.4,
+            "bones": {"head": {"x_rad": 0.0}},
+        },
+        {
+            "name": "b",
+            "duration_sec": 1.0,
+            "blend_in_sec": 0.4,
+            "bones": {"head": {"x_rad": 1.0}},
+        },
+    ]
+    parsed = parse_animation(doc)
+    t_now = [0.8]  # blend midpoint
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: t_now[0],
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    head_rot = scene.find("head").transform.rotation
+    # Expected = slerp midpoint between identity and X(1.0).
+    expected = quat_slerp(
+        _euler_zyx_quat(0.0, 0.0, 0.0),
+        _euler_zyx_quat(1.0, 0.0, 0.0),
+        0.5,
+    )
+    np.testing.assert_allclose(head_rot, expected, atol=1e-3)
+
+
+def test_crossfade_blends_morphs_at_boundary() -> None:
+    """Morph weights lerp during the cross-fade window."""
+    from posecascade.scripting.morph_api import MorphApi  # noqa: PLC0415
+    scene = _build_minimal_scene()
+    morph_api = MorphApi()
+    doc = _minimal_doc()
+    doc["loop_sec"] = 2.0
+    doc["phases"] = [
+        {
+            "name": "a",
+            "duration_sec": 1.0,
+            "blend_out_sec": 0.4,
+            "morphs": {"smile": 0.0},
+        },
+        {
+            "name": "b",
+            "duration_sec": 1.0,
+            "blend_in_sec": 0.4,
+            "morphs": {"smile": 1.0},
+        },
+    ]
+    parsed = parse_animation(doc)
+    t_now = [0.8]
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: t_now[0],
+        morph_api=morph_api,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    weights = dict(morph_api.current_weights())
+    assert weights["smile"] == pytest.approx(0.5, abs=1e-3)
+
+
+def test_crossfade_only_when_both_phases_consent() -> None:
+    """If either blend_in_sec or blend_out_sec is 0, no blending happens
+    — the boundary is a hard cut. Authors opt in by setting both."""
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["loop_sec"] = 2.0
+    doc["phases"] = [
+        {
+            "name": "a",
+            "duration_sec": 1.0,
+            "blend_out_sec": 0.4,
+            "body": {"yaw_rad": 0.0},
+        },
+        {
+            "name": "b",
+            "duration_sec": 1.0,
+            # No blend_in_sec → blending suppressed.
+            "body": {"yaw_rad": "pi"},
+        },
+    ]
+    parsed = parse_animation(doc)
+    t_now = [0.999]  # last frame of phase a, no blend → still phase a's yaw
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: t_now[0],
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    root = scene.find("Sketchfab_model")
+    # Phase a's yaw is 0 → identity → quat[1] ≈ 0.
+    np.testing.assert_allclose(root.transform.rotation[1], 0.0, atol=1e-3)
+
+
+def test_crossfade_outside_window_only_current_phase_visible() -> None:
+    """At elapsed times BEFORE the blend_out_sec window, only the
+    current phase's output is visible — no premature blending."""
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["loop_sec"] = 2.0
+    doc["phases"] = [
+        {
+            "name": "a",
+            "duration_sec": 1.0,
+            "blend_out_sec": 0.4,
+            "body": {"yaw_rad": 0.0},
+        },
+        {
+            "name": "b",
+            "duration_sec": 1.0,
+            "blend_in_sec": 0.4,
+            "body": {"yaw_rad": "pi"},
+        },
+    ]
+    parsed = parse_animation(doc)
+    t_now = [0.5]  # Mid phase a, well before blend window starts at t=0.6
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: t_now[0],
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    root = scene.find("Sketchfab_model")
+    # Pure phase a → yaw = 0 → identity.
+    np.testing.assert_allclose(root.transform.rotation[1], 0.0, atol=1e-3)
+
+
 def test_parse_bpm_and_duration_beats_resolve_to_seconds() -> None:
     """A phase declared in beats with bpm=120 has duration_sec = beats / 2."""
     doc = _minimal_doc()

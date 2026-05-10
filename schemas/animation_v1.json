@@ -204,6 +204,16 @@
           "exclusiveMinimum": 0,
           "description": "Phase length in beats. Requires the document-level 'bpm' to be > 0; mutually exclusive with 'duration_sec'."
         },
+        "blend_in_sec": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Cross-fade-in window in seconds. The previous phase's blend_out_sec must also be > 0 for blending to happen; the actual overlap is min(prev.blend_out_sec, this.blend_in_sec)."
+        },
+        "blend_out_sec": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Cross-fade-out window in seconds. The next phase's blend_in_sec must also be > 0 for blending to happen. Body / bones / morphs blend in unison; gait runs from the current phase only."
+        },
         "body": { "$ref": "#/$defs/body" },
         "gait": { "$ref": "#/$defs/gait" },
         "morphs": {

@@ -62,6 +62,7 @@ from posecascade.utils.math3d import (
     quat_from_axis_angle,
     quat_inverse,
     quat_mul,
+    quat_slerp,
     vec3,
 )
 
@@ -75,6 +76,9 @@ _HALF = 0.5
 _DECLARATIVE_SCHEMA_VERSION = 1
 _VEC3_LEN = 3
 _YAW_NEGLIGIBLE = 1e-4
+# Identity rotation for cross-fade blending: a bone present in only one
+# of the two phases being blended is implicitly at rest in the other.
+_IDENTITY_QUAT = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
 # Default Z-tuck that pulls arms from T-pose down to a vertical hang.
 # Slightly less than ±π/2 so arms angle a few degrees out from the torso
 # instead of clipping the rib cage. Matches walk.py's ARM_HANG.
@@ -334,6 +338,14 @@ class Phase:
     # a custom curve (e.g. hold the arm overhead during a finale phase
     # while the walking gait would otherwise swing it).
     bones: dict[str, dict[str, Any]]
+    # Cross-fade windows in seconds. When > 0 AND the next phase's
+    # ``blend_in_sec`` is also > 0, the runtime evaluates BOTH phases'
+    # body / bones / morphs outputs in the overlap window (using the
+    # mutual minimum) and lerps between them. Gait is NOT blended —
+    # only the current phase's gait runs at any given time, since
+    # blending two step-based gaits is ill-defined.
+    blend_in_sec: float
+    blend_out_sec: float
 
 
 @dataclass(frozen=True)
@@ -350,6 +362,65 @@ class DeclarativeAnimation:
     # instead of ``duration_sec``. ``0.0`` means the document has no tempo
     # (durations are seconds and ``beat`` evaluates to 0 in expressions).
     bpm: float
+
+
+@dataclass
+class PhaseOutput:
+    """Computed (not yet applied) per-frame output of a single phase.
+
+    Used by the cross-fade path to blend two phases at boundaries
+    without writing intermediate state into the scene. ``yaw`` /
+    ``lean`` / ``translation`` are scalars / triples, ``bones`` maps
+    bone keys to body-frame quaternion deltas (pre yaw-conjugation),
+    ``morphs`` maps morph names to weights.
+    """
+
+    yaw: float
+    lean: float
+    translation: tuple[float, float, float]
+    bones: dict[str, np.ndarray] = field(default_factory=dict)
+    morphs: dict[str, float] = field(default_factory=dict)
+
+
+def _lerp_translation(
+    a: tuple[float, float, float],
+    b: tuple[float, float, float],
+    t: float,
+) -> tuple[float, float, float]:
+    return (
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    )
+
+
+def _blend_phase_outputs(a: PhaseOutput, b: PhaseOutput, t: float) -> PhaseOutput:
+    """Linearly blend two :class:`PhaseOutput` into one.
+
+    Body fields use scalar lerp. Bone deltas use quaternion slerp so
+    intermediate rotations stay on the unit hypersphere (component lerp
+    drifts off the manifold and the resulting bone wobble is visible).
+    Morph weights use scalar lerp. Bones / morphs that appear in only
+    one of the two outputs are blended against the implicit identity:
+    a missing bone means "rest pose" (identity quaternion); a missing
+    morph means weight 0.
+    """
+    out = PhaseOutput(
+        yaw=a.yaw + (b.yaw - a.yaw) * t,
+        lean=a.lean + (b.lean - a.lean) * t,
+        translation=_lerp_translation(a.translation, b.translation, t),
+    )
+    bone_keys = set(a.bones) | set(b.bones)
+    for key in bone_keys:
+        qa = a.bones.get(key, _IDENTITY_QUAT)
+        qb = b.bones.get(key, _IDENTITY_QUAT)
+        out.bones[key] = quat_slerp(qa, qb, t)
+    morph_keys = set(a.morphs) | set(b.morphs)
+    for key in morph_keys:
+        wa = a.morphs.get(key, 0.0)
+        wb = b.morphs.get(key, 0.0)
+        out.morphs[key] = wa + (wb - wa) * t
+    return out
 
 
 def _parse_rig(raw: dict[str, Any]) -> RigBindings:
@@ -424,6 +495,12 @@ def _parse_phase(raw: dict[str, Any], bpm: float) -> Phase:
     if not isinstance(morphs, dict):
         raise DeclarativeAnimationError("phase 'morphs' must be an object")
     bones = _parse_bones(raw.get("bones", {}))
+    blend_in = float(raw.get("blend_in_sec", 0.0))
+    blend_out = float(raw.get("blend_out_sec", 0.0))
+    if blend_in < 0.0 or blend_out < 0.0:
+        raise DeclarativeAnimationError(
+            "blend_in_sec / blend_out_sec must be non-negative",
+        )
     return Phase(
         name=str(raw.get("name", "")),
         duration_sec=_resolve_phase_duration(raw, bpm),
@@ -433,6 +510,8 @@ def _parse_phase(raw: dict[str, Any], bpm: float) -> Phase:
         gait=raw.get("gait"),
         morphs=morphs,
         bones=bones,
+        blend_in_sec=blend_in,
+        blend_out_sec=blend_out,
     )
 
 
@@ -677,34 +756,37 @@ class DeclarativeRuntime:
     # ----- update -----------------------------------------------------------
     def _update(self, _dt: float) -> None:
         elapsed = self.time() % self.animation.loop_sec
-        phase, phase_t, phase_elapsed = self._phase_for(elapsed)
-        bpm = self.animation.bpm
-        # ``beat`` / ``phase_beat`` only carry meaning when the document
-        # set bpm > 0; otherwise they evaluate to 0 and any expression
-        # using them silently degrades to "no beat-driven motion" rather
-        # than raising — matches what authors expect for documents that
-        # never declared a tempo.
-        beat = elapsed * bpm / _SECONDS_PER_MINUTE if bpm > 0.0 else 0.0
-        phase_beat = (
-            phase_elapsed * bpm / _SECONDS_PER_MINUTE if bpm > 0.0 else 0.0
-        )
-        scope = {
-            "elapsed": float(elapsed),
-            "phase_t": float(phase_t),
-            "phase_elapsed": float(phase_elapsed),
-            "beat": float(beat),
-            "phase_beat": float(phase_beat),
-        }
-        yaw = _resolve_value_curve(phase.body_yaw_rad, phase_t, scope)
-        lean = _resolve_value_curve(phase.body_lean_x_rad, phase_t, scope)
-        translation = _resolve_translation(phase.body_translation, phase_t, scope)
+        phase_idx, phase_t, phase_elapsed = self._phase_index_at(elapsed)
+        phase = self.animation.phases[phase_idx]
+        scope = self._build_scope(elapsed, phase_t, phase_elapsed)
+        output = self._compute_phase_output(phase, scope, phase_t)
+        # Cross-fade with the next phase if both phases consent. The
+        # actual overlap is the mutual minimum of the two consents so
+        # neither phase blends further than it asked. Only happens at
+        # the END of the current phase, so the boundary lands at "100%
+        # next" with no jump as the runtime advances to the next phase.
+        next_idx = phase_idx + 1
+        if (
+            next_idx < len(self.animation.phases)
+            and phase.blend_out_sec > 0.0
+        ):
+            next_phase = self.animation.phases[next_idx]
+            overlap = min(phase.blend_out_sec, next_phase.blend_in_sec)
+            remaining = phase.duration_sec - phase_elapsed
+            if overlap > 0.0 and 0.0 <= remaining < overlap:
+                blend_t = 1.0 - remaining / overlap
+                next_scope = self._build_scope(elapsed, 0.0, 0.0)
+                next_output = self._compute_phase_output(
+                    next_phase, next_scope, 0.0,
+                )
+                output = _blend_phase_outputs(output, next_output, blend_t)
         # Snapshot lock targets BEFORE the body translates this frame —
         # we want the trailing foot pinned to where it was at the end
         # of the previous frame (when it was actually on a stair),
         # not to its REST position under the freshly-translated body.
         if phase.gait is not None:
             self._maybe_refresh_lock_targets(phase.gait, phase_t)
-        self._apply_root(translation, yaw, lean)
+        self._apply_root(output.translation, output.yaw, output.lean)
         # Reset stable bones (head / hip / chest / feet) to their rest
         # rotations before the gait runs. The previous frame's foot
         # planter or analytical IK can leave residual rotations on these
@@ -713,21 +795,76 @@ class DeclarativeRuntime:
         # symptom). walk.py does the same by writing identity-deltas to
         # these bones every frame.
         self._reset_idle_bones()
+        # Gait runs from the CURRENT phase only — blending two step-based
+        # gaits is ill-defined, and authors typically want gait to be
+        # continuous across short crossfades anyway.
         if phase.gait is not None:
-            self._apply_gait(phase.gait, phase_elapsed, phase_t, yaw)
-        if phase.bones:
-            # Composes AFTER gait so an explicit per-bone curve overrides
-            # whatever the gait wrote — lets a phase hold an arm overhead
-            # while the underlying walking gait would otherwise swing it.
-            self._apply_bones(phase.bones, scope, yaw)
-        if phase.morphs and self.morph_api is not None:
-            self._apply_morphs(phase.morphs, phase_t, scope)
+            self._apply_gait(phase.gait, phase_elapsed, phase_t, output.yaw)
+        # Bones override gait (applied after) — same rule as before, but
+        # now sourced from the (possibly blended) computed output.
+        for bone_key, body_delta in output.bones.items():
+            self._set_bone(bone_key, _yaw_to_world(body_delta, output.yaw))
+        if output.morphs and self.morph_api is not None:
+            for name, weight in output.morphs.items():
+                self.morph_api.set(str(name), float(weight))
         # Tell the engine foot planter which way the body is facing so
         # its post-tick toe-twist alignment doesn't fight the gait.
         if self.floor_api is not None:
             self.floor_api.set_body_forward(
-                (math.sin(yaw), 0.0, math.cos(yaw)),
+                (math.sin(output.yaw), 0.0, math.cos(output.yaw)),
             )
+
+    def _build_scope(
+        self, elapsed: float, phase_t: float, phase_elapsed: float,
+    ) -> dict[str, float]:
+        bpm = self.animation.bpm
+        beat = elapsed * bpm / _SECONDS_PER_MINUTE if bpm > 0.0 else 0.0
+        phase_beat = (
+            phase_elapsed * bpm / _SECONDS_PER_MINUTE if bpm > 0.0 else 0.0
+        )
+        return {
+            "elapsed": float(elapsed),
+            "phase_t": float(phase_t),
+            "phase_elapsed": float(phase_elapsed),
+            "beat": float(beat),
+            "phase_beat": float(phase_beat),
+        }
+
+    def _compute_phase_output(
+        self, phase: Phase, scope: dict[str, float], phase_t: float,
+    ) -> PhaseOutput:
+        """Evaluate body / bones / morphs curves into a :class:`PhaseOutput`.
+
+        Pure (no scene writes); cheap to call twice per frame for the
+        cross-fade path. Per-bone evaluation failures are logged and
+        skipped rather than aborting the whole frame so a single bad
+        expression doesn't freeze the timeline.
+        """
+        yaw = _resolve_value_curve(phase.body_yaw_rad, phase_t, scope)
+        lean = _resolve_value_curve(phase.body_lean_x_rad, phase_t, scope)
+        translation = _resolve_translation(phase.body_translation, phase_t, scope)
+        output = PhaseOutput(yaw=yaw, lean=lean, translation=translation)
+        for bone_key, axes in phase.bones.items():
+            try:
+                x = _resolve_value_curve(axes.get("x_rad", 0.0), phase_t, scope)
+                y = _resolve_value_curve(axes.get("y_rad", 0.0), phase_t, scope)
+                z = _resolve_value_curve(axes.get("z_rad", 0.0), phase_t, scope)
+            except DeclarativeAnimationError as err:
+                _log.warning(
+                    "declarative: bones[%r] failed to evaluate: %s", bone_key, err,
+                )
+                continue
+            output.bones[bone_key] = _euler_zyx_quat(x, y, z)
+        for name, spec in phase.morphs.items():
+            try:
+                weight = _resolve_value_curve(spec, phase_t, scope)
+            except DeclarativeAnimationError as err:
+                _log.warning(
+                    "declarative: morph %r failed to evaluate: %s", name, err,
+                )
+                continue
+            output.morphs[str(name)] = float(weight)
+        return output
 
     def _maybe_refresh_lock_targets(
         self, gait: dict[str, Any], phase_t: float,
@@ -765,69 +902,24 @@ class DeclarativeRuntime:
         for drive in self._bone_drives.values():
             drive.node.transform.set_rotation(drive.rest_rotation)
 
-    def _apply_morphs(
-        self, morphs: dict[str, Any], phase_t: float, scope: dict[str, float],
-    ) -> None:
-        """Evaluate per-phase morph curves and push weights into the API.
+    def _phase_index_at(self, elapsed: float) -> tuple[int, float, float]:
+        """Return ``(phase_index, phase_t, phase_elapsed)`` for ``elapsed``.
 
-        The API is a thin wrapper around either a renderer-driven weight
-        map or a standalone dict (tests). Either way, calling
-        ``set(name, value)`` stores the latest weight for ``name``;
-        downstream code (renderer / morph applier) consumes it on the
-        next render pass.
+        The cross-fade path needs the index (so it can peek at the next
+        phase), so the per-phase scan returns it directly. Falls back
+        to the last phase at full progress when ``elapsed`` exceeds the
+        cumulative duration — same behaviour as the previous
+        ``_phase_for`` so existing tests' end-of-loop assertions hold.
         """
-        for name, spec in morphs.items():
-            try:
-                weight = _resolve_value_curve(spec, phase_t, scope)
-            except DeclarativeAnimationError as err:
-                _log.warning(
-                    "declarative: morph %r failed to evaluate: %s", name, err,
-                )
-                continue
-            self.morph_api.set(str(name), float(weight))
-
-    def _apply_bones(
-        self,
-        bones: dict[str, dict[str, Any]],
-        scope: dict[str, float],
-        yaw: float,
-    ) -> None:
-        """Drive arbitrary bones with per-axis curves.
-
-        Each entry under ``bones`` is
-        ``{bone_name: {x_rad?: curve, y_rad?: curve, z_rad?: curve}}``.
-        Curves are evaluated with the per-frame scope (``elapsed`` /
-        ``phase_t`` / ``phase_elapsed``). The composed body-frame delta
-        is ``Rz · Ry · Rx`` (extrinsic XYZ — same convention as authoring
-        a pose by "first pitch around X, then yaw around Y, then roll
-        around Z"). The result is yaw-conjugated to world and parent-
-        local-conjugated through ``_set_bone`` so the same body-frame
-        curve produces the same visible motion regardless of root yaw.
-        """
-        phase_t = scope.get("phase_t", 0.0)
-        for bone_key, axes in bones.items():
-            try:
-                x = _resolve_value_curve(axes.get("x_rad", 0.0), phase_t, scope)
-                y = _resolve_value_curve(axes.get("y_rad", 0.0), phase_t, scope)
-                z = _resolve_value_curve(axes.get("z_rad", 0.0), phase_t, scope)
-            except DeclarativeAnimationError as err:
-                _log.warning(
-                    "declarative: bones[%r] failed to evaluate: %s", bone_key, err,
-                )
-                continue
-            delta = _euler_zyx_quat(x, y, z)
-            self._set_bone(bone_key, _yaw_to_world(delta, yaw))
-
-    def _phase_for(self, elapsed: float) -> tuple[Phase, float, float]:
         for i, phase in enumerate(self.animation.phases):
             start = self._phase_starts[i]
             end = start + phase.duration_sec
             if elapsed < end:
                 local = elapsed - start
                 phase_t = local / phase.duration_sec if phase.duration_sec > 0 else 0.0
-                return phase, phase_t, local
+                return i, phase_t, local
         last = self.animation.phases[-1]
-        return last, 1.0, last.duration_sec
+        return len(self.animation.phases) - 1, 1.0, last.duration_sec
 
     def _apply_root(
         self, translation: tuple[float, float, float], yaw: float, lean: float,

@@ -37,6 +37,8 @@
     {
       "name": "intro_bounce",
       "duration_beats": 4,
+      "blend_in_sec": 0.3,
+      "blend_out_sec": 0.3,
       "body": {
         "yaw_rad": 0.0,
         "lean_x_rad": "0.04 * sin(elapsed * tau / 1.0)",
@@ -68,6 +70,8 @@
     {
       "name": "reach_right",
       "duration_beats": 4,
+      "blend_in_sec": 0.3,
+      "blend_out_sec": 0.3,
       "body": {
         "yaw_rad": 0.0,
         "lean_x_rad": {"kind": "back-out", "from": 0.0, "to": -0.10, "overshoot": 2.5},
@@ -101,6 +105,8 @@
     {
       "name": "reach_left",
       "duration_beats": 4,
+      "blend_in_sec": 0.3,
+      "blend_out_sec": 0.3,
       "body": {
         "yaw_rad": 0.0,
         "lean_x_rad": {"kind": "back-out", "from": 0.0, "to": 0.10, "overshoot": 2.5},
@@ -133,6 +139,8 @@
     {
       "name": "spin_cw",
       "duration_beats": 4,
+      "blend_in_sec": 0.3,
+      "blend_out_sec": 0.3,
       "body": {
         "yaw_rad": {"kind": "ease", "from": 0.0, "to": "tau"},
         "lean_x_rad": 0.05,
@@ -165,6 +173,8 @@
     {
       "name": "hip_pop",
       "duration_beats": 4,
+      "blend_in_sec": 0.3,
+      "blend_out_sec": 0.3,
       "body": {
         "yaw_rad": "tau",
         "lean_x_rad": "0.10 * sin(phase_beat * tau)",
@@ -198,6 +208,8 @@
     {
       "name": "v_arms_up",
       "duration_beats": 4,
+      "blend_in_sec": 0.3,
+      "blend_out_sec": 0.3,
       "body": {
         "yaw_rad": "tau",
         "lean_x_rad": -0.06,
@@ -229,6 +241,8 @@
     {
       "name": "spin_ccw",
       "duration_beats": 4,
+      "blend_in_sec": 0.3,
+      "blend_out_sec": 0.3,
       "body": {
         "yaw_rad": {"kind": "ease", "from": "tau", "to": 0.0},
         "lean_x_rad": -0.05,
@@ -261,6 +275,8 @@
     {
       "name": "finale_pose",
       "duration_beats": 4,
+      "blend_in_sec": 0.3,
+      "blend_out_sec": 0.3,
       "body": {
         "yaw_rad": 0.0,
         "lean_x_rad": {"kind": "ease", "from": 0.0, "to": 0.10},
