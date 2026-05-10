@@ -1095,6 +1095,20 @@ def test_pose_phase_bones_override_preset_per_axis() -> None:
     np.testing.assert_allclose(head_rot[0], 0.0, atol=1e-3)
 
 
+def test_new_pose_presets_register_in_builtin_library() -> None:
+    """The arm-clipping fix added three presets. Pin their names so a
+    rename doesn't silently break dance.json (which references them)."""
+    from posecascade.scripting.pose_library import BUILTIN_POSES  # noqa: PLC0415
+    for name in ("reach_R_soft", "reach_L_soft", "arms_open"):
+        assert name in BUILTIN_POSES, f"missing built-in preset {name!r}"
+    # reach_R_soft / reach_L_soft are mirror — same magnitude, opposite
+    # z_rad sign on the lifted arm so neither hand clips into the body.
+    r = BUILTIN_POSES["reach_R_soft"]
+    l_ = BUILTIN_POSES["reach_L_soft"]
+    assert r["upper_arm_R"]["x_rad"] == pytest.approx(l_["upper_arm_L"]["x_rad"])
+    assert r["upper_arm_R"]["z_rad"] == pytest.approx(-l_["upper_arm_L"]["z_rad"])
+
+
 def test_hide_detaches_named_nodes_from_scene() -> None:
     """Document-root 'hide' detaches each named node from its parent at
     start. Useful for character.glb files that bundle props (Stairs,

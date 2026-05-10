@@ -67,6 +67,33 @@ BUILTIN_POSES: dict[str, PoseSpec] = {
         "upper_arm_R": {"x_rad": -0.40, "z_rad": 0.45},
         "chest": {"x_rad": 0.05},
     },
+    # Soft reach to the right — R arm extends forward-right, body
+    # turns + leans toward it, L arm relaxes slightly back. Shallower
+    # angle than ``point_R`` so it reads as "casual reach" not "stab".
+    # z_rad of -0.20 keeps the arm OUTSIDE the torso (no skirt clip).
+    "reach_R_soft": {
+        "upper_arm_R": {"x_rad": -0.85, "z_rad": -0.20},
+        "upper_arm_L": {"x_rad": 0.05, "z_rad": 0.30},
+        "head": {"y_rad": -0.15, "x_rad": -0.05},
+        "chest": {"x_rad": -0.04, "y_rad": -0.05},
+    },
+    # Mirror of reach_R_soft.
+    "reach_L_soft": {
+        "upper_arm_L": {"x_rad": -0.85, "z_rad": 0.20},
+        "upper_arm_R": {"x_rad": 0.05, "z_rad": -0.30},
+        "head": {"y_rad": 0.15, "x_rad": -0.05},
+        "chest": {"x_rad": -0.04, "y_rad": 0.05},
+    },
+    # Both arms angled outward + slightly raised — "open invitation"
+    # silhouette. Stays clear of the torso because z_rad pulls each
+    # arm away from the body centreline; less raise than v_arms_up so
+    # the elbow stays roughly at shoulder height.
+    "arms_open": {
+        "upper_arm_L": {"x_rad": -0.60, "z_rad": 0.60},
+        "upper_arm_R": {"x_rad": -0.60, "z_rad": -0.60},
+        "head": {"x_rad": -0.08},
+        "chest": {"x_rad": -0.06},
+    },
 }
 
 
