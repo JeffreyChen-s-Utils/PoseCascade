@@ -382,6 +382,23 @@ class CameraKey:
 
 
 @dataclass(frozen=True)
+class AudioSpec:
+    """Audio attachment for a declarative animation.
+
+    ``path`` is the WAV path as written in the JSON; the runtime
+    resolves it relative to the .json's directory at load time.
+    ``offset_sec`` shifts the audio's clock by a constant so the dance
+    can start before / after the audio file's t=0. ``sync_clock`` swaps
+    the runtime's wall-clock time provider for the audio player's
+    playback position so the entire animation drifts with the music.
+    """
+
+    path: str
+    offset_sec: float = 0.0
+    sync_clock: bool = False
+
+
+@dataclass(frozen=True)
 class DeclarativeAnimation:
     name: str
     loop_sec: float
@@ -409,6 +426,9 @@ class DeclarativeAnimation:
     # the viewport's Camera (passed in via ``api['camera']``). Empty
     # tuple → camera is left untouched.
     camera_keys: tuple[CameraKey, ...]
+    # Optional audio attachment. ``None`` keeps the runtime silent and
+    # avoids loading the audio backend entirely.
+    audio: AudioSpec | None
 
 
 @dataclass
@@ -667,6 +687,7 @@ def parse_animation(document: dict[str, Any]) -> DeclarativeAnimation:
         pose_library=_parse_pose_library(document.get("pose_library")),
         hand_library=_parse_hand_library(document.get("hand_library")),
         camera_keys=_parse_camera_keys(document.get("camera"), bpm),
+        audio=_parse_audio(document.get("audio")),
     )
 
 
@@ -790,6 +811,24 @@ def _parse_hand_library(raw: Any) -> dict[str, PoseSpec]:
     return merge_hand_libraries(_parse_pose_dict(raw, "hand_library"))
 
 
+def _parse_audio(raw: Any) -> AudioSpec | None:
+    """Validate the optional document-level ``audio`` block."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise DeclarativeAnimationError("'audio' must be an object or null")
+    path = raw.get("path")
+    if not isinstance(path, str) or not path:
+        raise DeclarativeAnimationError(
+            "audio.path must be a non-empty string",
+        )
+    return AudioSpec(
+        path=path,
+        offset_sec=float(raw.get("offset_sec", 0.0)),
+        sync_clock=bool(raw.get("sync_clock", False)),
+    )
+
+
 def _parse_wind(raw: Any) -> dict[str, Any] | None:
     if raw is None:
         return None
@@ -823,6 +862,16 @@ class DeclarativeRuntime:
     # target / fov_degrees onto this object. ``None`` → camera is
     # untouched (legacy / headless tests / character-only demos).
     camera_api: Any | None = None
+    # Resolution root for paths declared in the JSON (currently just
+    # ``audio.path``). Defaults to None → paths resolve relative to
+    # CWD; the loader sets this to the .json file's parent so audio
+    # can sit next to the dance document.
+    source_dir: Any | None = None
+    # Optional override of the ``AudioPlayer`` factory — tests pass a
+    # stub that records play / pause without touching QtMultimedia.
+    audio_player_factory: Any | None = None
+    _audio_player: Any | None = field(default=None, init=False)
+    _wall_time: Callable[[], float] | None = field(default=None, init=False)
     _root_drive: _BoneDrive | None = None
     _bone_drives: dict[str, _BoneDrive] = field(default_factory=dict)
     _phase_starts: list[float] = field(default_factory=list)
@@ -896,6 +945,9 @@ class DeclarativeRuntime:
             self._bind_foot_planter()
         # Apply physics chain tunings + wind setup if declared.
         self._apply_physics_setup()
+        # Audio: load + start playback, optionally swap the time
+        # provider so phases progress with the music's clock.
+        self._setup_audio()
         # Cache leg-chain nodes for stride lock-target IK.
         for side, chain_names in (
             ("L", self.animation.rig.leg_chain_l),
@@ -906,6 +958,57 @@ class DeclarativeRuntime:
             nodes = tuple(self.scene.find(n) for n in chain_names)
             if all(n is not None for n in nodes):
                 self._leg_chain_nodes[side] = nodes
+
+    def _setup_audio(self) -> None:
+        """Optional audio-player attach + clock swap.
+
+        Document with no audio block → no AudioPlayer instantiated, no
+        Qt audio import, identical behaviour to pre-phase-8 docs. When
+        present, the audio file path is resolved relative to the
+        ``source_dir`` (the .json's parent), the player attempts a
+        QtMultimedia attach (silently falls back to a wall-clock-only
+        mode when the backend isn't available), and ``play()`` runs.
+        With ``sync_clock: true`` the runtime's ``self.time`` is
+        wrapped to return ``audio.current_time_seconds() - offset_sec``
+        so phase scheduling drifts with the music's actual playback
+        rate — same idea as the timeline dock's ``attach_audio`` flow.
+        """
+        spec = self.animation.audio
+        if spec is None:
+            return
+        try:
+            from pathlib import Path  # noqa: PLC0415
+
+            from posecascade.audio.clip import load_wav_file  # noqa: PLC0415
+            from posecascade.audio.player import AudioPlayer  # noqa: PLC0415
+        except ImportError as err:
+            _log.warning("declarative: audio module unavailable: %s", err)
+            return
+        path = Path(spec.path)
+        if self.source_dir is not None and not path.is_absolute():
+            path = Path(self.source_dir) / path
+        try:
+            clip = load_wav_file(path)
+        except (PoseCascadeError, OSError) as err:
+            _log.warning(
+                "declarative: failed to load audio %s: %s", path, err,
+            )
+            return
+        factory = self.audio_player_factory or AudioPlayer
+        self._audio_player = factory(clip=clip)
+        self._audio_player.attach_qt()  # best-effort; falls back to wall clock
+        self._audio_player.play()
+        if spec.sync_clock:
+            # Capture the original time provider so a future on_event
+            # ``reset`` could restore it; not in scope for this phase.
+            self._wall_time = self.time
+            offset = float(spec.offset_sec)
+            player = self._audio_player
+
+            def _audio_clock() -> float:
+                return float(player.current_time_seconds()) - offset
+
+            self.time = _audio_clock
 
     def _apply_physics_setup(self) -> None:
         if self.physics_lite is None:
@@ -1744,6 +1847,9 @@ def load_animation(
             f"failed to parse {filename}: {err.msg} at line {err.lineno}",
         ) from err
     parsed = parse_animation(document)
+    from pathlib import Path  # noqa: PLC0415
+
+    source_dir = Path(filename).resolve().parent if filename else None
     runtime = DeclarativeRuntime(
         animation=parsed,
         scene=api["scene"],
@@ -1752,6 +1858,7 @@ def load_animation(
         physics_lite=api.get("physics_lite"),
         morph_api=api.get("morphs"),
         camera_api=api.get("camera"),
+        source_dir=source_dir,
     )
     return runtime.hooks()
 

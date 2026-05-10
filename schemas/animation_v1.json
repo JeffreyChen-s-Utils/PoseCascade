@@ -39,6 +39,16 @@
         "additionalProperties": { "$ref": "#/$defs/bone_axes_scalars" }
       }
     },
+    "audio": {
+      "type": "object",
+      "required": ["path"],
+      "properties": {
+        "path": { "type": "string", "description": "WAV file path. Resolves relative to the .json document's directory; absolute paths accepted." },
+        "offset_sec": { "type": "number", "description": "Constant offset added to the audio's clock before phase scheduling reads it. Use a negative value to make the dance start before the music." },
+        "sync_clock": { "type": "boolean", "description": "When true, the runtime's wall-clock time provider is replaced by the audio player's playback position. The whole animation drifts with the music's actual rate." }
+      },
+      "description": "Optional audio attachment. When present, the runtime loads the WAV and starts playback at start; missing field → no audio module touched."
+    },
     "camera": {
       "type": "array",
       "description": "Camera animation keyframes (sorted by time). Each entry: {at_sec | at_beat, position: [x,y,z], target: [x,y,z], fov?: degrees}. Runtime lerps between bracketing keyframes per frame and writes onto the viewport's Camera. Times before the first keyframe / after the last hold to that keyframe.",

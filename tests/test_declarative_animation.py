@@ -600,6 +600,109 @@ def test_physics_chains_parse_into_dict_of_floats() -> None:
     assert parsed.physics_chains["hair_b"]["stiffness"] == pytest.approx(2 * 3.14159265, abs=1e-3)
 
 
+class _StubAudioPlayer:
+    """In-memory AudioPlayer-shaped stub for declarative audio tests.
+
+    Captures play / pause calls and returns a configurable
+    ``current_time_seconds`` so sync_clock tests can pin the audio
+    clock without spinning up QtMultimedia.
+    """
+
+    def __init__(self, *, clip: object) -> None:  # noqa: ARG002
+        self.played = False
+        self.attached = False
+        self._t = 0.0
+
+    def attach_qt(self) -> bool:
+        self.attached = True
+        return False  # simulate headless mode
+
+    def play(self) -> None:
+        self.played = True
+
+    def current_time_seconds(self) -> float:
+        return self._t
+
+
+def test_audio_loads_and_plays_when_spec_present(tmp_path) -> None:
+    """When the document declares an audio block AND the WAV exists,
+    the runtime instantiates an AudioPlayer (via the factory hook)
+    and calls play() at start."""
+    wav_path = tmp_path / "song.wav"
+    _write_minimal_wav(wav_path)
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["audio"] = {"path": "song.wav"}
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+        source_dir=tmp_path,
+        audio_player_factory=_StubAudioPlayer,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    player = runtime._audio_player
+    assert isinstance(player, _StubAudioPlayer)
+    assert player.played
+    assert player.attached
+
+
+def test_audio_sync_clock_replaces_time_provider(tmp_path) -> None:
+    """With sync_clock: true, runtime.time() returns
+    audio.current_time_seconds() - offset_sec."""
+    wav_path = tmp_path / "song.wav"
+    _write_minimal_wav(wav_path)
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["audio"] = {"path": "song.wav", "offset_sec": 0.5, "sync_clock": True}
+    parsed = parse_animation(doc)
+
+    def _player_factory(*, clip: object) -> _StubAudioPlayer:
+        p = _StubAudioPlayer(clip=clip)
+        p._t = 1.5  # noqa: SLF001 — test seam
+        return p
+
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 99.0,
+        source_dir=tmp_path,
+        audio_player_factory=_player_factory,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    # After start, runtime.time should read from the audio clock (1.5)
+    # minus the offset (0.5) → 1.0, NOT the wall-clock 99.0.
+    assert runtime.time() == pytest.approx(1.0, abs=1e-3)
+
+
+def test_audio_missing_file_logs_and_continues(tmp_path) -> None:
+    """A bogus audio path doesn't crash the animation — logs a warning
+    and falls back to no audio."""
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["audio"] = {"path": "nonexistent.wav"}
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+        source_dir=tmp_path,
+        audio_player_factory=_StubAudioPlayer,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()  # must not raise
+    assert runtime._audio_player is None
+
+
+def _write_minimal_wav(path) -> None:
+    """Write a 0.1-second mono 16-bit silence WAV — enough for
+    AudioClip.load_wav_file to parse without hitting actual audio."""
+    import wave  # noqa: PLC0415
+
+    with wave.open(str(path), "wb") as f:
+        f.setnchannels(1)
+        f.setsampwidth(2)
+        f.setframerate(44100)
+        f.writeframes(b"\x00\x00" * 4410)
+
+
 def _build_finger_scene() -> Scene:
     """Minimal scene with body bones plus a few VRoid-style finger bones
     so hand-preset tests have something to write to."""

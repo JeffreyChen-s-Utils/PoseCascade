@@ -187,6 +187,30 @@ pushed into the sandbox `morphs` API; the renderer / morph applier
 reads from there. Phases that don't declare `morphs` leave the
 weight map alone, so a previous phase's last weight persists.
 
+### Audio playback (optional)
+
+```json
+"audio": {
+  "path": "song.wav",
+  "offset_sec": 0.0,
+  "sync_clock": true
+}
+```
+
+Optional document-root audio attachment. `path` is a WAV file
+resolved relative to the .json document's directory (absolute paths
+also accepted). When present, the runtime loads the clip and starts
+playback at start. With `sync_clock: true`, the runtime's wall-clock
+time provider is replaced by the audio player's playback position —
+the entire animation drifts with the music's actual rate, so retiming
+the music retimes the dance. `offset_sec` shifts the audio clock by
+a constant.
+
+Gating: missing `audio` → no audio module loaded, no behaviour change.
+A present `audio` block with a missing file or unavailable Qt audio
+backend logs a warning and falls back silently (the dance continues
+with the wall-clock time).
+
 ### Camera animation
 
 ```json
