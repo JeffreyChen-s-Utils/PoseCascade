@@ -141,10 +141,23 @@ Two kinds:
   "trailing_back_rad": 0.25,
   "knee_bend_rad": 0.30,
   "arm_swing_amplitude_rad": 0.40,
+  "arm_hang_rad": -1.45,
   "knee_bell": [0.10, 0.65],
   "forward_bell": [0.10, 0.65]
 }
 ```
+
+Both gait kinds also accept `arm_hang_rad` — the world-Z rotation that
+flips the arms from a rig-rest T-pose down to a vertical hang. Mirrored
+per side, so a single value drives both arms. Defaults to `-1.45` (~-83°)
+which suits VRoid / Galaxia rigs whose upper arms rest along ±X. Set to
+`0.0` if your rig's arms already rest at the sides.
+
+Body-frame deltas in either gait are conjugated by the current frame's
+body yaw, so a single `+0.50` `leg_swing_amplitude` reads as "body-forward"
+both when the character faces -Z (yaw=π) and when it faces +Z (yaw=0).
+The runtime handles the cross-yaw sign flip — authors only ever write the
+amplitude they want in body-frame.
 
 ### morphs
 
@@ -159,6 +172,44 @@ Per-phase morph-name → value curve. Each frame's resolved weight is
 pushed into the sandbox `morphs` API; the renderer / morph applier
 reads from there. Phases that don't declare `morphs` leave the
 weight map alone, so a previous phase's last weight persists.
+
+### bones
+
+```json
+"bones": {
+  "head": {
+    "y_rad": "0.30 * sin(elapsed * tau / 2.0)",
+    "x_rad": 0.10
+  },
+  "chest": {
+    "x_rad": {"kind": "ease", "from": 0.0, "to": 0.18}
+  },
+  "upper_arm_L": {
+    "x_rad": 1.20
+  }
+}
+```
+
+Per-phase **arbitrary bone driver**. Each entry is `{bone_name: {x_rad?:
+curve, y_rad?: curve, z_rad?: curve}}`; missing axes default to zero.
+The runtime composes `Rz · Ry · Rx` (extrinsic XYZ) in body frame,
+yaw-conjugates to world, then parent-local-conjugates so the same
+authored curve produces the same visible motion regardless of root yaw.
+
+Composition order each frame:
+
+1. `_apply_root` — body translation / yaw / lean.
+2. `_reset_idle_bones` — cached bones snapped back to rest.
+3. `_apply_gait` — walking / stride writes legs / arms.
+4. **`_apply_bones`** — explicit per-bone curves overwrite whatever the
+   gait wrote on the same bone. Lets a phase hold an arm overhead while
+   the underlying walking gait would otherwise swing it.
+5. `_apply_morphs` — morph weights pushed to the API.
+
+Bone names go through the rig's `body_bones` alias map, so a single
+JSON document can target rigs with different naming conventions
+(VRoid `J_Bip_*` vs Sketchfab `upper_arm_L` etc.) by remapping in one
+place.
 
 ## Value curves
 

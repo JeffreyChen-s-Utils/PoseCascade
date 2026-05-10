@@ -35,11 +35,11 @@ Schema overview (see ``schema_v1`` below for full JSON-schema):
       ]
     }
 
-Stage 1 (this module): phase timing, body trajectory, walking gait,
-stair_ground binding, foot planter auto-binding. Stride / lock-target
-gait, physics chain tunings, and morph timeline are stage 2 — declared
-in schema for forward-compat but currently parsed-and-ignored with a
-warning.
+Covered: phase timing, body trajectory (incl. stair shortcut), walking
++ stride gaits with body-yaw conjugation and T-pose→hang composition,
+ground binding + auto-bound foot planter, physics chain tunings, wind
+setup, per-phase morph curves, lock-target IK on the trailing foot,
+and an inline expression DSL for value curves.
 """
 from __future__ import annotations
 
@@ -60,6 +60,7 @@ from posecascade.scripting.expressions import (
 from posecascade.utils.logging import get_logger
 from posecascade.utils.math3d import (
     quat_from_axis_angle,
+    quat_inverse,
     quat_mul,
     vec3,
 )
@@ -73,6 +74,17 @@ _TWO = 2.0
 _HALF = 0.5
 _DECLARATIVE_SCHEMA_VERSION = 1
 _VEC3_LEN = 3
+_YAW_NEGLIGIBLE = 1e-4
+# Default Z-tuck that pulls arms from T-pose down to a vertical hang.
+# Slightly less than ±π/2 so arms angle a few degrees out from the torso
+# instead of clipping the rib cage. Matches walk.py's ARM_HANG.
+_DEFAULT_ARM_HANG_RAD = -1.45
+# Frames over which a released lock target decays its IK pull. ~6
+# frames at 60 FPS = 0.1 s — long enough that the trailing foot
+# tracks the body softly across the step boundary, short enough
+# that it's free to lift before the new stride's leading-leg envelope
+# starts ramping at step_t ≈ 0.10.
+_LOCK_RELEASE_FRAMES = 6
 
 
 class DeclarativeAnimationError(PoseCascadeError):
@@ -201,6 +213,11 @@ class Phase:
     body_translation: dict[str, Any]
     gait: dict[str, Any] | None
     morphs: dict[str, Any]  # name → value-curve spec
+    # bone_key → {"x_rad"?: curve, "y_rad"?: curve, "z_rad"?: curve}.
+    # Composed AFTER gait so authors can override a gait-driven bone with
+    # a custom curve (e.g. hold the arm overhead during a finale phase
+    # while the walking gait would otherwise swing it).
+    bones: dict[str, dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -257,6 +274,7 @@ def _parse_phase(raw: dict[str, Any]) -> Phase:
     morphs = raw.get("morphs", {})
     if not isinstance(morphs, dict):
         raise DeclarativeAnimationError("phase 'morphs' must be an object")
+    bones = _parse_bones(raw.get("bones", {}))
     return Phase(
         name=str(raw.get("name", "")),
         duration_sec=float(raw.get("duration_sec", 0.0)),
@@ -265,7 +283,36 @@ def _parse_phase(raw: dict[str, Any]) -> Phase:
         body_translation=body.get("translation", {}),
         gait=raw.get("gait"),
         morphs=morphs,
+        bones=bones,
     )
+
+
+_BONE_AXES = ("x_rad", "y_rad", "z_rad")
+
+
+def _parse_bones(raw: Any) -> dict[str, dict[str, Any]]:
+    """Validate the per-phase ``bones`` block.
+
+    Each entry is ``{bone_name: {x_rad?: curve, y_rad?: curve, z_rad?: curve}}``.
+    Unknown axes are rejected loudly so a typo (``x_red``) surfaces at parse
+    time instead of silently producing a still pose at runtime.
+    """
+    if not isinstance(raw, dict):
+        raise DeclarativeAnimationError("phase 'bones' must be an object")
+    out: dict[str, dict[str, Any]] = {}
+    for bone_name, axes in raw.items():
+        if not isinstance(axes, dict):
+            raise DeclarativeAnimationError(
+                f"bones[{bone_name!r}] must be an object of axis curves",
+            )
+        unknown = set(axes) - set(_BONE_AXES)
+        if unknown:
+            raise DeclarativeAnimationError(
+                f"bones[{bone_name!r}] has unknown axes {sorted(unknown)}; "
+                f"expected any of {list(_BONE_AXES)}",
+            )
+        out[str(bone_name)] = dict(axes)
+    return out
 
 
 def parse_animation(document: dict[str, Any]) -> DeclarativeAnimation:
@@ -340,6 +387,14 @@ class DeclarativeRuntime:
     _phase_starts: list[float] = field(default_factory=list)
     _last_step_idx: dict[str, int] = field(default_factory=dict)
     _foot_lock: dict[str, np.ndarray] = field(default_factory=dict)
+    # Side → (release_target_world, frames_remaining). When the leading /
+    # trailing parity flips at a step boundary, the previously-pinned
+    # foot doesn't snap free immediately — it stays IK'd toward its old
+    # world position for a few frames, decaying to no IK. This smooths
+    # the visible "feet swap" jump where the trailing foot otherwise
+    # teleports from its old stair to a rest pose under the freshly-
+    # translated body.
+    _foot_release: dict[str, tuple[np.ndarray, int]] = field(default_factory=dict)
     _leg_chain_nodes: dict[str, tuple[Any, Any, Any]] = field(default_factory=dict)
 
     # ----- Hook surface (matches ScriptHost expectations) -------------------
@@ -363,11 +418,11 @@ class DeclarativeRuntime:
                         root_node.transform.rotation, dtype=np.float32,
                     ).copy(),
                 )
-        # Cache rest rotations for any bones referenced by gait drivers.
+        # Cache rest rotations for any bones referenced by gait drivers OR
+        # the per-phase ``bones`` block. Both paths use ``_set_bone`` which
+        # composes a delta against the cached rest rotation.
         for phase in self.animation.phases:
-            if phase.gait is None:
-                continue
-            for bone_name in _gait_target_bones(phase.gait, self.animation.rig):
+            for bone_name in _phase_target_bones(phase, self.animation.rig):
                 if bone_name in self._bone_drives:
                     continue
                 node = self.scene.find(bone_name)
@@ -476,11 +531,72 @@ class DeclarativeRuntime:
         yaw = _resolve_value_curve(phase.body_yaw_rad, phase_t, scope)
         lean = _resolve_value_curve(phase.body_lean_x_rad, phase_t, scope)
         translation = _resolve_translation(phase.body_translation, phase_t, scope)
-        self._apply_root(translation, yaw, lean)
+        # Snapshot lock targets BEFORE the body translates this frame —
+        # we want the trailing foot pinned to where it was at the end
+        # of the previous frame (when it was actually on a stair),
+        # not to its REST position under the freshly-translated body.
         if phase.gait is not None:
-            self._apply_gait(phase.gait, phase_elapsed, phase_t)
+            self._maybe_refresh_lock_targets(phase.gait, phase_t)
+        self._apply_root(translation, yaw, lean)
+        # Reset stable bones (head / hip / chest / feet) to their rest
+        # rotations before the gait runs. The previous frame's foot
+        # planter or analytical IK can leave residual rotations on these
+        # bones — without an explicit reset they accumulate and the
+        # foot eventually points sideways or backward (the "腳反過來"
+        # symptom). walk.py does the same by writing identity-deltas to
+        # these bones every frame.
+        self._reset_idle_bones()
+        if phase.gait is not None:
+            self._apply_gait(phase.gait, phase_elapsed, phase_t, yaw)
+        if phase.bones:
+            # Composes AFTER gait so an explicit per-bone curve overrides
+            # whatever the gait wrote — lets a phase hold an arm overhead
+            # while the underlying walking gait would otherwise swing it.
+            self._apply_bones(phase.bones, scope, yaw)
         if phase.morphs and self.morph_api is not None:
             self._apply_morphs(phase.morphs, phase_t, scope)
+        # Tell the engine foot planter which way the body is facing so
+        # its post-tick toe-twist alignment doesn't fight the gait.
+        if self.floor_api is not None:
+            self.floor_api.set_body_forward(
+                (math.sin(yaw), 0.0, math.cos(yaw)),
+            )
+
+    def _maybe_refresh_lock_targets(
+        self, gait: dict[str, Any], phase_t: float,
+    ) -> None:
+        """Snapshot trailing-foot world position at each step boundary.
+
+        Runs at the TOP of the frame, before ``_apply_root`` translates
+        the body. Captures where the foot is sitting *now* (= end of
+        previous frame, after that frame's IK / planter ran) so the
+        lock target is on the stair surface, not on a rest-pose foot
+        position floating ahead of the body.
+        """
+        if gait.get("kind") != "stride":
+            self._foot_lock.clear()
+            self._foot_release.clear()
+            self._last_step_idx.clear()
+            return
+        step_count = int(gait.get("step_count", 1))
+        if step_count <= 0:
+            return
+        step_pos = phase_t * step_count
+        step_idx = min(int(step_pos), step_count - 1)
+        leading_l = (step_idx % 2 == 0)
+        self._refresh_lock_target(gait, step_idx, leading_l)
+
+    def _reset_idle_bones(self) -> None:
+        """Snap every cached bone back to its rest local rotation.
+
+        Bones the gait writes to are overwritten immediately afterward
+        — the reset is a no-op for them. Bones the gait does NOT write
+        to (foot_L/R, head, hip, chest in the default vocabulary) get
+        their previous-frame planter / IK rotations cleared so they
+        track the lower-leg (and parent-chain yaw) cleanly.
+        """
+        for drive in self._bone_drives.values():
+            drive.node.transform.set_rotation(drive.rest_rotation)
 
     def _apply_morphs(
         self, morphs: dict[str, Any], phase_t: float, scope: dict[str, float],
@@ -502,6 +618,38 @@ class DeclarativeRuntime:
                 )
                 continue
             self.morph_api.set(str(name), float(weight))
+
+    def _apply_bones(
+        self,
+        bones: dict[str, dict[str, Any]],
+        scope: dict[str, float],
+        yaw: float,
+    ) -> None:
+        """Drive arbitrary bones with per-axis curves.
+
+        Each entry under ``bones`` is
+        ``{bone_name: {x_rad?: curve, y_rad?: curve, z_rad?: curve}}``.
+        Curves are evaluated with the per-frame scope (``elapsed`` /
+        ``phase_t`` / ``phase_elapsed``). The composed body-frame delta
+        is ``Rz · Ry · Rx`` (extrinsic XYZ — same convention as authoring
+        a pose by "first pitch around X, then yaw around Y, then roll
+        around Z"). The result is yaw-conjugated to world and parent-
+        local-conjugated through ``_set_bone`` so the same body-frame
+        curve produces the same visible motion regardless of root yaw.
+        """
+        phase_t = scope.get("phase_t", 0.0)
+        for bone_key, axes in bones.items():
+            try:
+                x = _resolve_value_curve(axes.get("x_rad", 0.0), phase_t, scope)
+                y = _resolve_value_curve(axes.get("y_rad", 0.0), phase_t, scope)
+                z = _resolve_value_curve(axes.get("z_rad", 0.0), phase_t, scope)
+            except DeclarativeAnimationError as err:
+                _log.warning(
+                    "declarative: bones[%r] failed to evaluate: %s", bone_key, err,
+                )
+                continue
+            delta = _euler_zyx_quat(x, y, z)
+            self._set_bone(bone_key, _yaw_to_world(delta, yaw))
 
     def _phase_for(self, elapsed: float) -> tuple[Phase, float, float]:
         for i, phase in enumerate(self.animation.phases):
@@ -529,12 +677,14 @@ class DeclarativeRuntime:
             vec3(*translation),
         )
 
-    def _apply_gait(self, gait: dict[str, Any], phase_elapsed: float, phase_t: float) -> None:
+    def _apply_gait(
+        self, gait: dict[str, Any], phase_elapsed: float, phase_t: float, yaw: float,
+    ) -> None:
         kind = gait.get("kind", "")
         if kind == "walking":
-            self._apply_walking_gait(gait, phase_elapsed)
+            self._apply_walking_gait(gait, phase_elapsed, yaw)
         elif kind == "stride":
-            self._apply_stride_gait(gait, phase_t)
+            self._apply_stride_gait(gait, phase_t, yaw)
         else:
             _log.debug("declarative: unknown gait kind %r", kind)
 
@@ -566,35 +716,95 @@ class DeclarativeRuntime:
             return
         foot = chain[2]
         self._foot_lock[side] = _world_position(foot)
-        # The OTHER side is leading — release any stale lock so the IK
-        # pass doesn't keep dragging it backwards once it lifts off.
+        # The OTHER side is leading now. Don't pop its lock outright —
+        # park it in the release queue so its IK decays over a few
+        # frames instead of snapping the foot from its old stair to
+        # the rest pose under the new body position.
         opposite = "L" if side == "R" else "R"
-        self._foot_lock.pop(opposite, None)
+        old_lock = self._foot_lock.pop(opposite, None)
+        if old_lock is not None:
+            self._foot_release[opposite] = (old_lock, _LOCK_RELEASE_FRAMES)
+        # Fresh hard lock on the new trailing side overrides any
+        # in-flight release on the same side.
+        self._foot_release.pop(side, None)
 
     def _apply_lock_targets(self) -> None:
-        """Run analytical 2-bone IK on each foot that has an active lock target."""
-        if not self._foot_lock or not self._leg_chain_nodes:
+        """Run CCD 2-bone IK on each foot with an active lock or release.
+
+        Uses CCD (with the rig's knee hinge limits) instead of the
+        analytical solve so the knee bends on its anatomical hinge axis
+        — the analytical solver picks an arbitrary perpendicular axis
+        when the current knee is colinear with hip→target, which can
+        twist the knee sideways or backward and produce the "腳反過來"
+        symptom on a stair stride. Mirrors walk.py's lock-target IK.
+
+        Hard locks (``_foot_lock``) pull the trailing foot fully toward
+        its frozen world position. Soft releases (``_foot_release``)
+        carry over a decaying number of frames — the foot blends from
+        its old lock toward the natural rest position, so the leading
+        leg doesn't snap off the previous stair the instant parity
+        flips at a step boundary.
+        """
+        if not self._leg_chain_nodes:
             return
+        if not self._foot_lock and not self._foot_release:
+            return
+        try:
+            from posecascade.animation.ik import (  # noqa: PLC0415
+                solve_two_bone,
+            )
+        except ImportError:
+            return
+        knee_min = self.animation.rig.knee_limit_min
+        knee_max = self.animation.rig.knee_limit_max
         for side, target_world in list(self._foot_lock.items()):
             chain = self._leg_chain_nodes.get(side)
             if chain is None:
                 continue
             root, mid, end = chain
-            try:
-                from posecascade.animation.ik import (  # noqa: PLC0415
-                    solve_two_bone_analytic,
-                )
-            except ImportError:
-                return
-            solve_two_bone_analytic(root, mid, end, target_world.astype(np.float32))
+            solve_two_bone(
+                root, mid, end, target_world.astype(np.float32),
+                iterations=8,
+                step_radian=0.6,
+                mid_limit_min=knee_min,
+                mid_limit_max=knee_max,
+            )
+        for side, (old_target, frames_left) in list(self._foot_release.items()):
+            chain = self._leg_chain_nodes.get(side)
+            if chain is None:
+                self._foot_release.pop(side, None)
+                continue
+            root, mid, end = chain
+            current = _world_position(end)
+            # Blend toward the natural (no-IK) foot position over the
+            # release window. weight=1 at start, 0 at end.
+            weight = float(frames_left) / float(_LOCK_RELEASE_FRAMES)
+            blended = old_target * weight + current * (1.0 - weight)
+            solve_two_bone(
+                root, mid, end, blended.astype(np.float32),
+                iterations=8,
+                step_radian=0.6,
+                mid_limit_min=knee_min,
+                mid_limit_max=knee_max,
+            )
+            new_frames = frames_left - 1
+            if new_frames <= 0:
+                self._foot_release.pop(side, None)
+            else:
+                self._foot_release[side] = (old_target, new_frames)
 
-    def _apply_stride_gait(self, gait: dict[str, Any], phase_t: float) -> None:
+    def _apply_stride_gait(
+        self, gait: dict[str, Any], phase_t: float, yaw: float,
+    ) -> None:
         """Step-based stair stride: leading leg lifts forward, trailing back-pedals.
 
         Maps phase_t into ``step_count`` discrete strides; within each stride
         the gait blends through bell envelopes to drive upper-leg / knee /
         arm angles. Cross-body coordination flips per stride (parity of
-        step index).
+        step index). Body-frame deltas are conjugated by ``yaw`` so the
+        sign convention stays consistent across yaw-flipped phases (e.g.
+        the same ``leading_lift_rad`` value reads as "body-forward" both
+        when facing -Z and when facing +Z).
         """
         step_count = int(gait.get("step_count", 1))
         if step_count <= 0:
@@ -603,15 +813,18 @@ class DeclarativeRuntime:
         trailing_back = _resolve_scalar(gait.get("trailing_back_rad", 0.0))
         knee_bend = _resolve_scalar(gait.get("knee_bend_rad", 0.0))
         arm_amp = _resolve_scalar(gait.get("arm_swing_amplitude_rad", 0.0))
+        arm_hang = _resolve_scalar(
+            gait.get("arm_hang_rad", _DEFAULT_ARM_HANG_RAD),
+        )
         knee_bell = gait.get("knee_bell", [0.10, 0.65])
         forward_bell = gait.get("forward_bell", [0.10, 0.65])
         step_pos = phase_t * step_count
         step_idx = min(int(step_pos), step_count - 1)
         step_t = step_pos - step_idx
         leading_l = (step_idx % 2 == 0)
-        # Snapshot trailing foot at each step boundary BEFORE the gait
-        # rewrites the trailing leg's pose.
-        self._refresh_lock_target(gait, step_idx, leading_l)
+        # Lock-target refresh happens earlier in ``_update`` (before
+        # ``_apply_root`` translates the body) — see
+        # ``_maybe_refresh_lock_targets``.
         knee_env = _bell(step_t, float(knee_bell[0]), float(knee_bell[1]))
         forward_env = _bell(step_t, float(forward_bell[0]), float(forward_bell[1]))
         leading_upper = leading_lift * forward_env
@@ -625,24 +838,29 @@ class DeclarativeRuntime:
             upper_l, upper_r = trailing_upper, leading_upper
             knee_l, knee_r = trailing_knee, leading_knee
         arm_swing = (+arm_amp if leading_l else -arm_amp) * forward_env
-        self._set_world_x_delta("upper_leg_L", upper_l)
-        self._set_world_x_delta("upper_leg_R", upper_r)
-        self._set_world_x_delta("lower_leg_L", knee_l)
-        self._set_world_x_delta("lower_leg_R", knee_r)
-        self._set_world_y_delta("upper_arm_L", arm_swing)
-        self._set_world_y_delta("upper_arm_R", arm_swing)
+        self._set_body_x_delta("upper_leg_L", upper_l, yaw)
+        self._set_body_x_delta("upper_leg_R", upper_r, yaw)
+        self._set_body_x_delta("lower_leg_L", knee_l, yaw)
+        self._set_body_x_delta("lower_leg_R", knee_r, yaw)
+        self._set_arm("upper_arm_L", arm_swing, +1, arm_hang, yaw)
+        self._set_arm("upper_arm_R", arm_swing, -1, arm_hang, yaw)
         # AFTER gait writes the leg poses, drag the trailing foot back
         # to its locked world position via analytical IK. Engine's
         # foot_planter still runs (post-script) as the safety net.
         self._apply_lock_targets()
 
-    def _apply_walking_gait(self, gait: dict[str, Any], phase_elapsed: float) -> None:
+    def _apply_walking_gait(
+        self, gait: dict[str, Any], phase_elapsed: float, yaw: float,
+    ) -> None:
         cycle_sec = float(gait.get("step_cycle_sec", 1.0))
         if cycle_sec <= 0.0:
             return
         leg_amp = _resolve_scalar(gait.get("leg_swing_amplitude", 0.0))
         knee_bend = _resolve_scalar(gait.get("knee_bend", 0.0))
         arm_amp = _resolve_scalar(gait.get("arm_swing_amplitude", 0.0))
+        arm_hang = _resolve_scalar(
+            gait.get("arm_hang_rad", _DEFAULT_ARM_HANG_RAD),
+        )
         phase = phase_elapsed * _TAU / cycle_sec
         cycle = math.sin(phase)
         cos_phase = math.cos(phase)
@@ -650,29 +868,74 @@ class DeclarativeRuntime:
         knee_r = knee_bend * _HALF * (1.0 + cos_phase)
         leg_l = leg_amp * cycle
         leg_r = -leg_amp * cycle
-        arm_swing = arm_amp * cycle
-        self._set_world_x_delta("upper_leg_L", leg_l)
-        self._set_world_x_delta("upper_leg_R", leg_r)
-        self._set_world_x_delta("lower_leg_L", knee_l)
-        self._set_world_x_delta("lower_leg_R", knee_r)
-        self._set_world_y_delta("upper_arm_L", arm_swing)
-        self._set_world_y_delta("upper_arm_R", arm_swing)
+        # Cross-body: when L leg is body-back (cycle=+1), L arm swings
+        # body-forward — that's NEGATIVE swing on the post-hang arm.
+        # The L/R sign is handled by ``_set_arm``'s ``side`` argument.
+        arm_swing = -arm_amp * cycle
+        self._set_body_x_delta("upper_leg_L", leg_l, yaw)
+        self._set_body_x_delta("upper_leg_R", leg_r, yaw)
+        self._set_body_x_delta("lower_leg_L", knee_l, yaw)
+        self._set_body_x_delta("lower_leg_R", knee_r, yaw)
+        self._set_arm("upper_arm_L", arm_swing, +1, arm_hang, yaw)
+        self._set_arm("upper_arm_R", arm_swing, -1, arm_hang, yaw)
 
-    def _set_world_x_delta(self, bone_key: str, angle: float) -> None:
-        delta = quat_axis_angle(vec3(1.0, 0.0, 0.0), angle)
-        self._set_bone(bone_key, delta)
+    def _set_body_x_delta(self, bone_key: str, angle: float, yaw: float) -> None:
+        body_delta = quat_axis_angle(vec3(1.0, 0.0, 0.0), angle)
+        self._set_bone(bone_key, _yaw_to_world(body_delta, yaw))
 
-    def _set_world_y_delta(self, bone_key: str, angle: float) -> None:
-        delta = quat_axis_angle(vec3(0.0, 1.0, 0.0), angle)
-        self._set_bone(bone_key, delta)
+    def _set_arm(
+        self,
+        bone_key: str,
+        swing: float,
+        side: int,
+        arm_hang: float,
+        yaw: float,
+    ) -> None:
+        """Compose the T-pose→hang Z-tuck with a forward/back X swing.
+
+        Galaxia (and most VRoid rigs) rest in T-pose along world ±X. The
+        Z-tuck rotates each arm down to a vertical hang at -Y, after
+        which a rotation around X is the natural pendulum swing. ``side``
+        flips the Z and X signs so the L/R arms mirror without needing
+        per-side amplitudes. The composed body-frame delta is then
+        yaw-conjugated to world before going through ``_set_bone``.
+        """
+        body_delta = quat_mul(
+            quat_axis_angle(vec3(1.0, 0.0, 0.0), side * swing),
+            quat_axis_angle(vec3(0.0, 0.0, 1.0), side * arm_hang),
+        )
+        self._set_bone(bone_key, _yaw_to_world(body_delta, yaw))
 
     def _set_bone(self, bone_key: str, delta_world: np.ndarray) -> None:
+        """Apply ``delta_world`` to the named bone, conjugated to parent-local.
+
+        World-space deltas don't compose directly with a bone whose parent
+        chain is itself rotated — the same world delta would mean different
+        body-frame motion depending on the parent's accumulated rotation.
+        Walking up the parent chain to compute the parent's WORLD rotation
+        and conjugating into parent-local frame keeps the runtime's "+x =
+        world-forward" sign convention robust against rigs whose parents
+        carry baked rest rotations (VRoid hip 180°-Z, root Y-up→Z-up).
+        """
         bone_name = self.animation.rig.body_bones.get(bone_key, bone_key)
         drive = self._bone_drives.get(bone_name)
         if drive is None:
             return
+        parent_world = quat_axis_angle(vec3(1.0, 0.0, 0.0), 0.0)
+        chain: list[np.ndarray] = []
+        cur = drive.node.parent
+        while cur is not None:
+            chain.append(cur.transform.rotation)
+            cur = cur.parent
+        for r in reversed(chain):
+            parent_world = quat_mul(parent_world, r)
+        parent_world_inv = quat_inverse(parent_world)
+        delta_local = quat_mul(
+            quat_mul(parent_world_inv, delta_world),
+            parent_world,
+        )
         drive.node.transform.set_rotation(
-            quat_mul(delta_world, drive.rest_rotation).astype(np.float32, copy=False),
+            quat_mul(delta_local, drive.rest_rotation).astype(np.float32, copy=False),
         )
 
     # ----- on_event ---------------------------------------------------------
@@ -685,18 +948,55 @@ class DeclarativeRuntime:
 
 
 def _gait_target_bones(gait: dict[str, Any], rig: RigBindings) -> tuple[str, ...]:
-    """List bone names that a gait's drivers will write to."""
+    """List bone names the runtime caches rest rotations for.
+
+    Includes both the bones the gait actively drives (legs / arms) AND
+    the "stable" bones that get reset to rest each frame (feet / head /
+    hip / chest) so previous-frame IK / planter rotations don't leak
+    into the next frame.
+    """
     bones: set[str] = set()
     kind = gait.get("kind", "")
     if kind in ("walking", "stride"):
-        # Default leg / arm names — overridable via rig.body_bones[bone_key].
         for key in (
             "upper_leg_L", "upper_leg_R",
             "lower_leg_L", "lower_leg_R",
             "upper_arm_L", "upper_arm_R",
+            "foot_L", "foot_R",
+            "head", "hip", "chest",
         ):
             bones.add(rig.body_bones.get(key, key))
     return tuple(bones)
+
+
+def _phase_target_bones(phase: Phase, rig: RigBindings) -> tuple[str, ...]:
+    """All bone names a phase needs rest rotations cached for.
+
+    Union of the gait's reset-set and any bone keyed in ``phase.bones``.
+    Both go through the rig's alias map so authors can rename bones in
+    one place without touching every phase.
+    """
+    names: set[str] = set()
+    if phase.gait is not None:
+        names.update(_gait_target_bones(phase.gait, rig))
+    for bone_key in phase.bones:
+        names.add(rig.body_bones.get(bone_key, bone_key))
+    return tuple(names)
+
+
+def _euler_zyx_quat(x: float, y: float, z: float) -> np.ndarray:
+    """Compose ``Rz · Ry · Rx`` as a single quaternion.
+
+    Extrinsic XYZ Euler order (== intrinsic ZYX). Matches the natural
+    "first pitch, then yaw, then roll in the same fixed frame" mental
+    model authors use when describing a pose. Identity if all three
+    angles are zero (no allocation cost difference — quat_axis_angle
+    handles the 0-angle case cleanly).
+    """
+    qx = quat_axis_angle(vec3(1.0, 0.0, 0.0), x)
+    qy = quat_axis_angle(vec3(0.0, 1.0, 0.0), y)
+    qz = quat_axis_angle(vec3(0.0, 0.0, 1.0), z)
+    return quat_mul(qz, quat_mul(qy, qx))
 
 
 def _bell(t: float, start: float, end: float) -> float:
@@ -704,6 +1004,23 @@ def _bell(t: float, start: float, end: float) -> float:
     if t <= start or t >= end or end <= start:
         return 0.0
     return math.sin(((t - start) / (end - start)) * math.pi)
+
+
+def _yaw_to_world(body_delta: np.ndarray, yaw: float) -> np.ndarray:
+    """Conjugate a body-frame rotation by ``yaw`` to get a world delta.
+
+    When the character root is rotated by ``yaw`` around world Y, a
+    bone delta authored in body-frame coordinates does not directly
+    apply as a world delta — Y-axis rotations commute (no change),
+    but X- and Z-axis rotations flip sign under yaw=π. Conjugating
+    keeps the runtime's "+X = body-forward" sign convention robust
+    across yaw-flipped phases.
+    """
+    if abs(yaw) < _YAW_NEGLIGIBLE:
+        return body_delta
+    yaw_q = quat_axis_angle(vec3(0.0, 1.0, 0.0), yaw)
+    yaw_inv = quat_inverse(yaw_q)
+    return quat_mul(yaw_q, quat_mul(body_delta, yaw_inv))
 
 
 def _world_position(node: Any) -> np.ndarray:

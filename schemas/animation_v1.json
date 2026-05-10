@@ -174,7 +174,23 @@
           "type": "object",
           "additionalProperties": { "$ref": "#/$defs/value_curve" },
           "description": "Morph-name → curve. Evaluated per frame; weight is written into the script's morphs API."
+        },
+        "bones": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/bone_axes" },
+          "description": "Bone-name → per-axis curves. Drives any rig bone by composing Rz·Ry·Rx (extrinsic XYZ) in body frame, yaw-conjugated to world. Composes AFTER gait so an explicit per-bone curve overrides whatever the gait wrote on the same bone — useful for holding an arm overhead while a walking gait would otherwise swing it. Bone names go through the rig's body_bones alias map."
         }
+      }
+    },
+
+    "bone_axes": {
+      "type": "object",
+      "description": "Per-axis curves for one bone. All three are optional; missing axes are zero (identity rotation around that axis).",
+      "additionalProperties": false,
+      "properties": {
+        "x_rad": { "$ref": "#/$defs/value_curve" },
+        "y_rad": { "$ref": "#/$defs/value_curve" },
+        "z_rad": { "$ref": "#/$defs/value_curve" }
       }
     },
 
@@ -234,7 +250,11 @@
             "step_cycle_sec": { "$ref": "#/$defs/scalar" },
             "leg_swing_amplitude": { "$ref": "#/$defs/scalar" },
             "knee_bend": { "$ref": "#/$defs/scalar" },
-            "arm_swing_amplitude": { "$ref": "#/$defs/scalar" }
+            "arm_swing_amplitude": { "$ref": "#/$defs/scalar" },
+            "arm_hang_rad": {
+              "$ref": "#/$defs/scalar",
+              "description": "World-Z rotation that flips the arms from rest T-pose down to a vertical hang. Mirrored per side. Defaults to -1.45 (~-83°), suitable for VRoid / Galaxia rigs whose upper arms rest along ±X. Set to 0 to keep arms in their rig rest pose."
+            }
           }
         },
         {
@@ -247,6 +267,10 @@
             "trailing_back_rad": { "$ref": "#/$defs/scalar" },
             "knee_bend_rad": { "$ref": "#/$defs/scalar" },
             "arm_swing_amplitude_rad": { "$ref": "#/$defs/scalar" },
+            "arm_hang_rad": {
+              "$ref": "#/$defs/scalar",
+              "description": "World-Z rotation that flips the arms from rest T-pose down to a vertical hang. Mirrored per side. Defaults to -1.45 (~-83°). Set to 0 to keep arms in their rig rest pose."
+            },
             "knee_bell": {
               "type": "array",
               "items": { "type": "number" },

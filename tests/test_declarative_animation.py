@@ -496,6 +496,97 @@ def test_value_curve_kind_expression_is_supported() -> None:
     np.testing.assert_allclose(rot[1], math.sin(math.pi / 4), atol=1e-3)
 
 
+def test_walking_gait_arm_hang_produces_mirrored_z_rotation() -> None:
+    """``arm_hang_rad`` composes a Z-axis tuck on each arm that mirrors
+    across L / R — the rotation that flips a T-pose rest from horizontal
+    ±X to a vertical hang at -Y. With swing=0 only the hang is visible
+    in the bone rotation, and the L / R Z-quaternion components should
+    have opposite signs of equal magnitude."""
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["loop_sec"] = 1.0
+    doc["phases"][0]["duration_sec"] = 1.0
+    doc["phases"][0]["gait"] = {
+        "kind": "walking", "step_cycle_sec": 1.0,
+        "leg_swing_amplitude": 0.0, "knee_bend": 0.0,
+        "arm_swing_amplitude": 0.0, "arm_hang_rad": -1.45,
+    }
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    arm_l = scene.find("upper_arm_L").transform.rotation
+    arm_r = scene.find("upper_arm_R").transform.rotation
+    np.testing.assert_allclose(arm_l[2], -arm_r[2], atol=1e-3)
+    assert abs(arm_l[2]) > 0.5, (
+        f"arm_l Z too small for arm_hang=-1.45: arm_l={arm_l}"
+    )
+
+
+def test_walking_gait_arms_swing_cross_body() -> None:
+    """At peak swing the L and R arms have OPPOSITE-sign body-frame X
+    swings — cross-body coordination falls out of the L / R amplitude
+    flip in ``_set_arm``. Without the side flip, both arms would swing
+    in unison (the T-pose-arms-flailing bug from the previous runtime)."""
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["loop_sec"] = 1.0
+    doc["phases"][0]["duration_sec"] = 1.0
+    doc["phases"][0]["gait"] = {
+        "kind": "walking", "step_cycle_sec": 1.0,
+        "leg_swing_amplitude": 0.0, "knee_bend": 0.0,
+        "arm_swing_amplitude": 0.4, "arm_hang_rad": 0.0,
+    }
+    parsed = parse_animation(doc)
+    t_now = [0.25]  # sin(π/2) = 1, peak swing
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: t_now[0],
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    arm_l = scene.find("upper_arm_L").transform.rotation
+    arm_r = scene.find("upper_arm_R").transform.rotation
+    assert arm_l[0] * arm_r[0] < 0, (
+        f"arms swing in unison instead of cross-body: arm_L={arm_l}, arm_R={arm_r}"
+    )
+
+
+def test_yaw_conjugation_isolates_bone_to_body_frame() -> None:
+    """A body-frame X delta should produce the SAME bone-local rotation
+    whether the body yaw is 0 or π. This is the core invariance behind
+    yaw_to_world + parent-local conjugation: authors write a single
+    amplitude that means "body-forward" at any orientation, and the
+    runtime adjusts the world-frame composition so the visible motion
+    matches that intent."""
+    def _leg_l_local_rotation(yaw_value: object) -> np.ndarray:
+        scene = _build_minimal_scene()
+        doc = _minimal_doc()
+        doc["loop_sec"] = 1.0
+        doc["phases"][0]["duration_sec"] = 1.0
+        doc["phases"][0]["body"]["yaw_rad"] = yaw_value
+        doc["phases"][0]["gait"] = {
+            "kind": "walking", "step_cycle_sec": 1.0,
+            "leg_swing_amplitude": 0.5, "knee_bend": 0.0,
+            "arm_swing_amplitude": 0.0, "arm_hang_rad": 0.0,
+        }
+        parsed = parse_animation(doc)
+        t_now = [0.25]  # peak sin
+        runtime = DeclarativeRuntime(
+            animation=parsed, scene=scene, time=lambda: t_now[0],
+        )
+        hooks = runtime.hooks()
+        hooks["start"]()
+        hooks["update"](0.0)
+        return scene.find("upper_leg_L").transform.rotation.copy()
+    rot_zero = _leg_l_local_rotation(0.0)
+    rot_pi = _leg_l_local_rotation("pi")
+    np.testing.assert_allclose(rot_zero, rot_pi, atol=1e-3)
+
+
 def test_physics_chains_parse_into_dict_of_floats() -> None:
     """``physics_chains`` parses param-by-param, converting symbolic
     floats and rejecting non-object entries."""
@@ -507,3 +598,202 @@ def test_physics_chains_parse_into_dict_of_floats() -> None:
     parsed = parse_animation(doc)
     assert parsed.physics_chains["hair_a"] == {"stiffness": 14.0, "damping": 0.45}
     assert parsed.physics_chains["hair_b"]["stiffness"] == pytest.approx(2 * 3.14159265, abs=1e-3)
+
+
+def test_parse_bones_section_accepts_per_axis_curves() -> None:
+    """Minimal ``bones`` block parses; unknown axes raise."""
+    doc = _minimal_doc()
+    doc["phases"][0]["bones"] = {
+        "head": {"y_rad": 0.5, "x_rad": "0.1 * sin(elapsed * tau)"},
+    }
+    parsed = parse_animation(doc)
+    assert "head" in parsed.phases[0].bones
+    assert parsed.phases[0].bones["head"]["y_rad"] == 0.5
+
+    doc_bad = _minimal_doc()
+    doc_bad["phases"][0]["bones"] = {"head": {"x_red": 0.5}}  # typo
+    with pytest.raises(DeclarativeAnimationError, match="unknown axes"):
+        parse_animation(doc_bad)
+
+
+def test_parse_bones_rejects_non_dict_entry() -> None:
+    """``bones[name]`` must itself be an object — not a scalar."""
+    doc = _minimal_doc()
+    doc["phases"][0]["bones"] = {"head": 0.5}
+    with pytest.raises(DeclarativeAnimationError, match="must be an object"):
+        parse_animation(doc)
+
+
+def test_runtime_bones_drives_x_rotation_on_named_bone() -> None:
+    """A constant ``x_rad`` curve produces a matching X-axis rotation on the bone."""
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["phases"][0]["bones"] = {"head": {"x_rad": 0.5}}
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    head_rot = scene.find("head").transform.rotation
+    # Quaternion (sin(0.25), 0, 0, cos(0.25)) for X rotation by 0.5 rad.
+    expected_x = math.sin(0.25)
+    np.testing.assert_allclose(head_rot[0], expected_x, atol=1e-3)
+    np.testing.assert_allclose(head_rot[1], 0.0, atol=1e-3)
+    np.testing.assert_allclose(head_rot[2], 0.0, atol=1e-3)
+
+
+def test_runtime_bones_axes_compose_in_zyx_order() -> None:
+    """Multi-axis curves compose as ``Rz · Ry · Rx``.
+
+    Verified by checking against ``_euler_zyx_quat`` directly — that
+    helper IS the spec, and the runtime must apply it identically so
+    authors can predict the resulting orientation.
+    """
+    from posecascade.scripting.declarative import (  # noqa: PLC0415
+        _euler_zyx_quat,
+    )
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["phases"][0]["bones"] = {
+        "head": {"x_rad": 0.3, "y_rad": 0.2, "z_rad": 0.1},
+    }
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    expected = _euler_zyx_quat(0.3, 0.2, 0.1)
+    actual = scene.find("head").transform.rotation
+    np.testing.assert_allclose(actual, expected, atol=1e-3)
+
+
+def test_runtime_bones_overrides_gait_when_same_bone() -> None:
+    """When both gait and bones write the same bone, bones wins.
+
+    Walking gait swings ``upper_arm_L`` per its amplitude; an explicit
+    ``bones`` entry on the same bone with a constant curve must end up
+    on the bone after the frame, not the gait's swing. This is the core
+    "hold-pose-while-others-walk" use case.
+    """
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["phases"][0]["gait"] = {
+        "kind": "walking", "step_cycle_sec": 1.0,
+        "leg_swing_amplitude": 0.0, "knee_bend": 0.0,
+        "arm_swing_amplitude": 0.6, "arm_hang_rad": 0.0,
+    }
+    doc["phases"][0]["bones"] = {
+        "upper_arm_L": {"x_rad": 1.2},  # held overhead
+    }
+    parsed = parse_animation(doc)
+    t_now = [0.25]  # peak swing time — gait would normally write a big delta here
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: t_now[0],
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    arm_l = scene.find("upper_arm_L").transform.rotation
+    # Bones wrote pure X rotation by 1.2 rad → q = (sin(0.6), 0, 0, cos(0.6)).
+    np.testing.assert_allclose(arm_l[0], math.sin(0.6), atol=1e-3)
+    np.testing.assert_allclose(arm_l[2], 0.0, atol=1e-3)
+
+
+def test_runtime_bones_curve_uses_frame_scope_variables() -> None:
+    """Bone-axis curves are evaluated against the per-frame scope so
+    expressions referencing ``elapsed`` / ``phase_t`` work."""
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["loop_sec"] = 1.0
+    doc["phases"][0]["duration_sec"] = 1.0
+    doc["phases"][0]["bones"] = {
+        "head": {"y_rad": "phase_t * pi"},
+    }
+    parsed = parse_animation(doc)
+    t_now = [0.5]  # phase_t = 0.5 → angle = π/2
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: t_now[0],
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    head_rot = scene.find("head").transform.rotation
+    # Y-axis rotation by π/2 → q = (0, sin(π/4), 0, cos(π/4))
+    np.testing.assert_allclose(head_rot[1], math.sin(math.pi / 4), atol=1e-3)
+
+
+def test_runtime_bones_yaw_conjugation_invariant_to_root_yaw() -> None:
+    """The same body-frame ``x_rad`` curve produces the same bone-local
+    rotation under any root yaw — the conjugation pass cancels yaw out
+    in body frame, mirroring the gait's invariance."""
+    def _head_local_rotation(yaw_value: object) -> np.ndarray:
+        scene = _build_minimal_scene()
+        doc = _minimal_doc()
+        doc["loop_sec"] = 1.0
+        doc["phases"][0]["duration_sec"] = 1.0
+        doc["phases"][0]["body"]["yaw_rad"] = yaw_value
+        doc["phases"][0]["bones"] = {"head": {"x_rad": 0.4}}
+        parsed = parse_animation(doc)
+        runtime = DeclarativeRuntime(
+            animation=parsed, scene=scene, time=lambda: 0.0,
+        )
+        hooks = runtime.hooks()
+        hooks["start"]()
+        hooks["update"](0.0)
+        return scene.find("head").transform.rotation.copy()
+
+    rot_zero = _head_local_rotation(0.0)
+    rot_pi = _head_local_rotation("pi")
+    np.testing.assert_allclose(rot_zero, rot_pi, atol=1e-3)
+
+
+def test_runtime_phase_without_bones_is_backward_compatible() -> None:
+    """An old document with no ``bones`` field still parses and ticks
+    cleanly — the field defaults to an empty dict and the runtime skips
+    ``_apply_bones`` entirely."""
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()  # no bones key
+    parsed = parse_animation(doc)
+    assert parsed.phases[0].bones == {}
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)  # must not raise
+
+
+def test_dance_example_runs_full_loop_without_errors() -> None:
+    """The shipped MMD-style dance JSON parses, binds, and runs every
+    frame of its 16 s loop without raising. Guards the per-phase
+    expression DSL inside body translation / yaw / lean / morph fields
+    so a typo in the example would surface as a test failure rather
+    than silently breaking the demo."""
+    from pathlib import Path  # noqa: PLC0415
+
+    from posecascade.scripting.morph_api import MorphApi  # noqa: PLC0415
+    scene = _build_minimal_scene()
+    morph_api = MorphApi()
+    api = {
+        "scene": scene,
+        "time": lambda: t_now[0],
+        "morphs": morph_api,
+    }
+    source = (
+        Path(__file__).parent.parent / "examples" / "scripts" / "dance.json"
+    ).read_text(encoding="utf-8")
+    hooks = load_animation(source, "dance.json", api)
+    t_now = [0.0]
+    hooks["start"]()
+    fps = 30
+    total_seconds = 16.0
+    for i in range(int(total_seconds * fps)):
+        t_now[0] = i / fps
+        hooks["update"](1.0 / fps)
+    weights = dict(morph_api.current_weights())
+    assert "smile" in weights
+    assert weights["smile"] == pytest.approx(1.0, abs=1e-2)

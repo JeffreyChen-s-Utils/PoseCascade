@@ -1,0 +1,292 @@
+{
+  "schema_version": 1,
+  "name": "mmd_dance_declarative_demo",
+  "loop_sec": 16.0,
+
+  "rig": {
+    "character_root": "Sketchfab_model",
+    "leg_chain_l": ["upper_leg_L", "lower_leg_L", "foot_L"],
+    "leg_chain_r": ["upper_leg_R", "lower_leg_R", "foot_R"],
+    "knee_limit_min": [-2.4, 0, 0],
+    "knee_limit_max": [0.1, 0, 0]
+  },
+
+  "ground": {
+    "kind": "flat",
+    "y": 0.0
+  },
+
+  "physics_chains": {
+    "hair_C":  {"stiffness": 14.0, "damping": 0.45, "inertia": 0.015},
+    "hair_L":  {"stiffness": 12.0, "damping": 0.40, "inertia": 0.015},
+    "hair_R":  {"stiffness": 12.0, "damping": 0.40, "inertia": 0.015},
+    "hair_LL": {"stiffness":  8.5, "damping": 0.30, "inertia": 0.020},
+    "hair_RR": {"stiffness":  8.5, "damping": 0.30, "inertia": 0.020},
+    "orn":     {"stiffness": 22.0, "damping": 0.80, "inertia": 0.020}
+  },
+
+  "wind": {
+    "direction": [1.0, 0.0, 0.3],
+    "speed": 0.5,
+    "turbulence_amplitude": 0.18,
+    "turbulence_frequency_hz": 1.6
+  },
+
+  "phases": [
+    {
+      "name": "intro_bounce",
+      "duration_sec": 2.0,
+      "body": {
+        "yaw_rad": 0.0,
+        "lean_x_rad": "0.04 * sin(elapsed * tau / 1.0)",
+        "translation": {
+          "x": "0.04 * sin(elapsed * tau / 1.0)",
+          "y": 0.0,
+          "z": 0.0
+        }
+      },
+      "gait": {
+        "kind": "walking",
+        "step_cycle_sec": 1.0,
+        "leg_swing_amplitude": 0.18,
+        "knee_bend": -0.20,
+        "arm_swing_amplitude": 0.30,
+        "arm_hang_rad": -1.45
+      },
+      "bones": {
+        "head": {"y_rad": "0.20 * sin(elapsed * tau / 2.0)"},
+        "chest": {"x_rad": "0.06 * sin(elapsed * tau / 1.0)"},
+        "hip": {"y_rad": "0.10 * sin(elapsed * tau / 1.0)"}
+      },
+      "morphs": {
+        "blink": "0.5 + 0.5 * sin(elapsed * tau / 3.0)",
+        "smile": {"kind": "ease", "from": 0.0, "to": 0.5}
+      }
+    },
+
+    {
+      "name": "reach_right",
+      "duration_sec": 2.0,
+      "body": {
+        "yaw_rad": 0.0,
+        "lean_x_rad": -0.10,
+        "translation": {
+          "x": -0.05,
+          "y": 0.0,
+          "z": 0.0
+        }
+      },
+      "gait": {
+        "kind": "walking",
+        "step_cycle_sec": 1.0,
+        "leg_swing_amplitude": 0.10,
+        "knee_bend": -0.20,
+        "arm_swing_amplitude": 0.0,
+        "arm_hang_rad": -1.45
+      },
+      "bones": {
+        "upper_arm_R": {"x_rad": {"kind": "ease", "from": 0.0, "to": -1.20}, "z_rad": -0.20},
+        "upper_arm_L": {"x_rad": 0.30, "z_rad": 0.40},
+        "head": {"y_rad": -0.30, "x_rad": -0.10},
+        "chest": {"x_rad": -0.12},
+        "hip": {"y_rad": -0.20}
+      },
+      "morphs": {
+        "blink": "0.5 + 0.5 * sin(elapsed * tau / 3.0)",
+        "smile": 0.7
+      }
+    },
+
+    {
+      "name": "reach_left",
+      "duration_sec": 2.0,
+      "body": {
+        "yaw_rad": 0.0,
+        "lean_x_rad": 0.10,
+        "translation": {
+          "x": 0.05,
+          "y": 0.0,
+          "z": 0.0
+        }
+      },
+      "gait": {
+        "kind": "walking",
+        "step_cycle_sec": 1.0,
+        "leg_swing_amplitude": 0.10,
+        "knee_bend": -0.20,
+        "arm_swing_amplitude": 0.0,
+        "arm_hang_rad": -1.45
+      },
+      "bones": {
+        "upper_arm_L": {"x_rad": {"kind": "ease", "from": 0.0, "to": -1.20}, "z_rad": 0.20},
+        "upper_arm_R": {"x_rad": 0.30, "z_rad": -0.40},
+        "head": {"y_rad": 0.30, "x_rad": -0.10},
+        "chest": {"x_rad": -0.12},
+        "hip": {"y_rad": 0.20}
+      },
+      "morphs": {
+        "smile": 0.7
+      }
+    },
+
+    {
+      "name": "spin_cw",
+      "duration_sec": 2.0,
+      "body": {
+        "yaw_rad": {"kind": "ease", "from": 0.0, "to": "tau"},
+        "lean_x_rad": 0.05,
+        "translation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        }
+      },
+      "gait": {
+        "kind": "walking",
+        "step_cycle_sec": 1.0,
+        "leg_swing_amplitude": 0.12,
+        "knee_bend": -0.20,
+        "arm_swing_amplitude": 0.0,
+        "arm_hang_rad": -1.45
+      },
+      "bones": {
+        "upper_arm_L": {"x_rad": -0.80, "z_rad": 0.50},
+        "upper_arm_R": {"x_rad": -0.80, "z_rad": -0.50},
+        "head": {"y_rad": "0.40 * sin(phase_t * tau)"},
+        "chest": {"x_rad": -0.08}
+      },
+      "morphs": {
+        "blink": "0.5 + 0.5 * sin(elapsed * tau / 3.0)",
+        "smile": 0.6
+      }
+    },
+
+    {
+      "name": "hip_pop",
+      "duration_sec": 2.0,
+      "body": {
+        "yaw_rad": "tau",
+        "lean_x_rad": "0.10 * sin(phase_elapsed * tau / 0.5)",
+        "translation": {
+          "x": "0.06 * sin(phase_elapsed * tau / 0.5)",
+          "y": 0.0,
+          "z": 0.0
+        }
+      },
+      "gait": {
+        "kind": "walking",
+        "step_cycle_sec": 0.5,
+        "leg_swing_amplitude": 0.20,
+        "knee_bend": -0.30,
+        "arm_swing_amplitude": 0.0,
+        "arm_hang_rad": -1.20
+      },
+      "bones": {
+        "hip": {"y_rad": "0.32 * sin(phase_elapsed * tau / 0.5)"},
+        "chest": {"y_rad": "-0.18 * sin(phase_elapsed * tau / 0.5)", "x_rad": 0.05},
+        "head": {"y_rad": "0.20 * sin(phase_elapsed * tau / 0.5)"},
+        "upper_arm_L": {"x_rad": "0.40 * sin(phase_elapsed * tau / 0.5)", "z_rad": 0.30},
+        "upper_arm_R": {"x_rad": "-0.40 * sin(phase_elapsed * tau / 0.5)", "z_rad": -0.30}
+      },
+      "morphs": {
+        "smile": 0.85,
+        "blink": "0.5 + 0.5 * sin(elapsed * tau / 2.0)"
+      }
+    },
+
+    {
+      "name": "v_arms_up",
+      "duration_sec": 2.0,
+      "body": {
+        "yaw_rad": "tau",
+        "lean_x_rad": -0.06,
+        "translation": {
+          "x": 0.0,
+          "y": "max(0.0, 0.04 * sin(phase_elapsed * tau / 0.5))",
+          "z": 0.0
+        }
+      },
+      "gait": {
+        "kind": "walking",
+        "step_cycle_sec": 0.5,
+        "leg_swing_amplitude": 0.10,
+        "knee_bend": -0.20,
+        "arm_swing_amplitude": 0.0,
+        "arm_hang_rad": -1.45
+      },
+      "bones": {
+        "upper_arm_L": {"x_rad": -1.30, "z_rad": 0.55},
+        "upper_arm_R": {"x_rad": -1.30, "z_rad": -0.55},
+        "head": {"x_rad": -0.18, "y_rad": "0.10 * sin(phase_elapsed * tau / 0.5)"},
+        "chest": {"x_rad": -0.10}
+      },
+      "morphs": {
+        "smile": 0.9
+      }
+    },
+
+    {
+      "name": "spin_ccw",
+      "duration_sec": 2.0,
+      "body": {
+        "yaw_rad": {"kind": "ease", "from": "tau", "to": 0.0},
+        "lean_x_rad": -0.05,
+        "translation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        }
+      },
+      "gait": {
+        "kind": "walking",
+        "step_cycle_sec": 1.0,
+        "leg_swing_amplitude": 0.12,
+        "knee_bend": -0.20,
+        "arm_swing_amplitude": 0.0,
+        "arm_hang_rad": -1.45
+      },
+      "bones": {
+        "upper_arm_L": {"x_rad": 0.30, "z_rad": 0.60},
+        "upper_arm_R": {"x_rad": 0.30, "z_rad": -0.60},
+        "head": {"y_rad": "-0.40 * sin(phase_t * tau)"},
+        "chest": {"x_rad": 0.06}
+      },
+      "morphs": {
+        "smile": 0.7,
+        "blink": "0.5 + 0.5 * sin(elapsed * tau / 3.0)"
+      }
+    },
+
+    {
+      "name": "finale_pose",
+      "duration_sec": 2.0,
+      "body": {
+        "yaw_rad": 0.0,
+        "lean_x_rad": {"kind": "ease", "from": 0.0, "to": 0.10},
+        "translation": {
+          "x": 0.0,
+          "y": "max(0.0, 0.03 * sin(phase_elapsed * tau / 1.0))",
+          "z": 0.0
+        }
+      },
+      "gait": {
+        "kind": "walking",
+        "step_cycle_sec": 1.5,
+        "leg_swing_amplitude": 0.08,
+        "knee_bend": -0.20,
+        "arm_swing_amplitude": 0.0,
+        "arm_hang_rad": -1.45
+      },
+      "bones": {
+        "upper_arm_L": {"x_rad": {"kind": "ease", "from": 0.0, "to": -1.10}, "z_rad": 0.45},
+        "upper_arm_R": {"x_rad": {"kind": "ease", "from": 0.0, "to": -1.10}, "z_rad": -0.45},
+        "head": {"x_rad": -0.15, "y_rad": "0.12 * sin(phase_elapsed * tau / 1.5)"},
+        "chest": {"x_rad": -0.10},
+        "hip": {"y_rad": "0.10 * sin(phase_elapsed * tau / 1.5)"}
+      },
+      "morphs": {
+        "smile": {"kind": "ease", "from": 0.85, "to": 1.0}
+      }
+    }
+  ]
+}
