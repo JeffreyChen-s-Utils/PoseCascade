@@ -39,6 +39,21 @@
         "additionalProperties": { "$ref": "#/$defs/bone_axes_scalars" }
       }
     },
+    "lyrics": {
+      "type": "array",
+      "description": "Karaoke-style lyric lines drawn as a 2D overlay on the viewport. Each entry: {at_sec | at_beat, text, duration_sec? | duration_beats?}. Default duration is 1 second when neither is set. Lines may overlap; the first matching line in array order wins per frame. Documents without a 'lyrics' field never touch the overlay.",
+      "items": {
+        "type": "object",
+        "required": ["text"],
+        "properties": {
+          "at_sec": { "type": "number", "minimum": 0 },
+          "at_beat": { "type": "number", "minimum": 0 },
+          "text": { "type": "string" },
+          "duration_sec": { "type": "number", "exclusiveMinimum": 0 },
+          "duration_beats": { "type": "number", "exclusiveMinimum": 0 }
+        }
+      }
+    },
     "audio": {
       "type": "object",
       "required": ["path"],

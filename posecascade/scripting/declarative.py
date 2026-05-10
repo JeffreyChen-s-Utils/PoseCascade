@@ -382,6 +382,15 @@ class CameraKey:
 
 
 @dataclass(frozen=True)
+class LyricLine:
+    """One lyric line with absolute start / end times in seconds."""
+
+    start_sec: float
+    end_sec: float
+    text: str
+
+
+@dataclass(frozen=True)
 class AudioSpec:
     """Audio attachment for a declarative animation.
 
@@ -429,6 +438,11 @@ class DeclarativeAnimation:
     # Optional audio attachment. ``None`` keeps the runtime silent and
     # avoids loading the audio backend entirely.
     audio: AudioSpec | None
+    # Optional karaoke-style lyric lines. Each frame the runtime finds
+    # the active line (start_sec ≤ elapsed < end_sec) and pushes its
+    # text through ``api['overlay']``. Empty tuple → overlay never
+    # touched (legacy / no-lyrics docs).
+    lyrics: tuple[LyricLine, ...]
 
 
 @dataclass
@@ -688,6 +702,7 @@ def parse_animation(document: dict[str, Any]) -> DeclarativeAnimation:
         hand_library=_parse_hand_library(document.get("hand_library")),
         camera_keys=_parse_camera_keys(document.get("camera"), bpm),
         audio=_parse_audio(document.get("audio")),
+        lyrics=_parse_lyrics(document.get("lyrics"), bpm),
     )
 
 
@@ -811,6 +826,95 @@ def _parse_hand_library(raw: Any) -> dict[str, PoseSpec]:
     return merge_hand_libraries(_parse_pose_dict(raw, "hand_library"))
 
 
+_DEFAULT_LYRIC_DURATION_SEC = 1.0
+
+
+def _parse_lyrics(raw: Any, bpm: float) -> tuple[LyricLine, ...]:
+    """Validate the document-level ``lyrics`` array.
+
+    Each entry needs exactly one of ``at_sec`` / ``at_beat`` for its
+    start and at most one of ``duration_sec`` / ``duration_beats`` for
+    its length (defaults to a 1-second flash if neither is set —
+    matches the typical "show line for one beat" karaoke convention).
+    Output is sorted by start time so the per-frame active-lyric scan
+    is a simple bisect-style walk.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise DeclarativeAnimationError("'lyrics' must be an array")
+    out: list[LyricLine] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise DeclarativeAnimationError(
+                "each lyric entry must be an object",
+            )
+        out.append(_parse_lyric_line(entry, bpm))
+    out.sort(key=lambda line: line.start_sec)
+    return tuple(out)
+
+
+def _parse_lyric_line(entry: dict[str, Any], bpm: float) -> LyricLine:
+    text = entry.get("text")
+    if not isinstance(text, str):
+        raise DeclarativeAnimationError(
+            "lyric entry needs a string 'text' field",
+        )
+    start_sec = _resolve_time_field(
+        entry, "at_sec", "at_beat", bpm, "lyric.start",
+    )
+    duration_sec = _DEFAULT_LYRIC_DURATION_SEC
+    has_dur_sec = "duration_sec" in entry
+    has_dur_beats = "duration_beats" in entry
+    if has_dur_sec and has_dur_beats:
+        raise DeclarativeAnimationError(
+            "lyric entry has both 'duration_sec' and 'duration_beats'; "
+            "specify exactly one",
+        )
+    if has_dur_beats:
+        if bpm <= 0.0:
+            raise DeclarativeAnimationError(
+                "lyric uses 'duration_beats' but the document has no "
+                "positive 'bpm' to convert it",
+            )
+        duration_sec = float(entry["duration_beats"]) * _SECONDS_PER_MINUTE / bpm
+    elif has_dur_sec:
+        duration_sec = float(entry["duration_sec"])
+    return LyricLine(
+        start_sec=start_sec,
+        end_sec=start_sec + duration_sec,
+        text=text,
+    )
+
+
+def _resolve_time_field(
+    entry: dict[str, Any],
+    sec_key: str,
+    beat_key: str,
+    bpm: float,
+    label: str,
+) -> float:
+    """Pick exactly one of ``sec_key`` / ``beat_key`` and return seconds.
+
+    Used by camera keyframes and lyric lines — both share the
+    "specify time in either seconds or beats" convention.
+    """
+    has_sec = sec_key in entry
+    has_beat = beat_key in entry
+    if has_sec == has_beat:
+        raise DeclarativeAnimationError(
+            f"{label} needs exactly one of {sec_key!r} or {beat_key!r}",
+        )
+    if has_beat:
+        if bpm <= 0.0:
+            raise DeclarativeAnimationError(
+                f"{label} uses {beat_key!r} but the document has no "
+                f"positive 'bpm' to convert it",
+            )
+        return float(entry[beat_key]) * _SECONDS_PER_MINUTE / bpm
+    return float(entry[sec_key])
+
+
 def _parse_audio(raw: Any) -> AudioSpec | None:
     """Validate the optional document-level ``audio`` block."""
     if raw is None:
@@ -862,6 +966,11 @@ class DeclarativeRuntime:
     # target / fov_degrees onto this object. ``None`` → camera is
     # untouched (legacy / headless tests / character-only demos).
     camera_api: Any | None = None
+    # Optional callable ``set_text(str) -> None`` for the karaoke
+    # overlay. Called each frame with the active lyric (or empty
+    # string when no lyric is active). Bootstrap wires this to
+    # ``viewport.set_overlay_text``; tests pass a list-collecting stub.
+    overlay_api: Callable[[str], None] | None = None
     # Resolution root for paths declared in the JSON (currently just
     # ``audio.path``). Defaults to None → paths resolve relative to
     # CWD; the loader sets this to the .json file's parent so audio
@@ -872,6 +981,7 @@ class DeclarativeRuntime:
     audio_player_factory: Any | None = None
     _audio_player: Any | None = field(default=None, init=False)
     _wall_time: Callable[[], float] | None = field(default=None, init=False)
+    _last_lyric_text: str = field(default="", init=False)
     _root_drive: _BoneDrive | None = None
     _bone_drives: dict[str, _BoneDrive] = field(default_factory=dict)
     _phase_starts: list[float] = field(default_factory=list)
@@ -1134,6 +1244,8 @@ class DeclarativeRuntime:
         # declared or no Camera object was wired into the runtime.
         if self.animation.camera_keys and self.camera_api is not None:
             self._apply_camera(elapsed)
+        if self.animation.lyrics and self.overlay_api is not None:
+            self._apply_lyrics(elapsed)
 
     def _apply_camera(self, elapsed: float) -> None:
         """Lerp between bracketing camera keyframes and write to ``camera_api``.
@@ -1161,6 +1273,29 @@ class DeclarativeRuntime:
                 t = (elapsed - a.at_sec) / span if span > 0 else 0.0
                 self._blend_camera_keys(a, b, t)
                 return
+
+    def _apply_lyrics(self, elapsed: float) -> None:
+        """Look up the active lyric for ``elapsed`` and push it to overlay.
+
+        Lyrics are pre-sorted by start_sec; lines are non-overlapping
+        in the typical karaoke case, but if two lines do overlap the
+        FIRST one in the array wins (predictable for the author).
+        Nothing-active resolves to the empty string so the overlay
+        clears between lines. Last-text is cached so we only call
+        ``overlay_api`` when the active text actually changes —
+        avoids re-painting the viewport overlay every frame for
+        sub-second flickers.
+        """
+        active = ""
+        for line in self.animation.lyrics:
+            if line.start_sec <= elapsed < line.end_sec:
+                active = line.text
+                break
+            if line.start_sec > elapsed:
+                break  # array is sorted; no point scanning further
+        if active != self._last_lyric_text:
+            self._last_lyric_text = active
+            self.overlay_api(active)
 
     def _write_camera(self, key: CameraKey) -> None:
         self.camera_api.position = vec3(*key.position)
@@ -1858,6 +1993,7 @@ def load_animation(
         physics_lite=api.get("physics_lite"),
         morph_api=api.get("morphs"),
         camera_api=api.get("camera"),
+        overlay_api=api.get("overlay"),
         source_dir=source_dir,
     )
     return runtime.hooks()

@@ -600,6 +600,103 @@ def test_physics_chains_parse_into_dict_of_floats() -> None:
     assert parsed.physics_chains["hair_b"]["stiffness"] == pytest.approx(2 * 3.14159265, abs=1e-3)
 
 
+def test_lyrics_active_line_pushed_to_overlay() -> None:
+    """At a moment inside a lyric line's window, that line's text is
+    sent through the overlay callback."""
+    scene = _build_minimal_scene()
+    captured: list[str] = []
+    doc = _minimal_doc()
+    doc["loop_sec"] = 4.0
+    doc["phases"][0]["duration_sec"] = 4.0
+    doc["lyrics"] = [
+        {"at_sec": 0.0, "text": "first line", "duration_sec": 1.0},
+        {"at_sec": 2.0, "text": "second line", "duration_sec": 1.0},
+    ]
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 2.5,
+        overlay_api=captured.append,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    assert captured == ["second line"]
+
+
+def test_lyrics_clears_overlay_between_lines() -> None:
+    """Outside any lyric window, the overlay receives an empty string
+    so previous text doesn't linger."""
+    scene = _build_minimal_scene()
+    captured: list[str] = []
+    doc = _minimal_doc()
+    doc["loop_sec"] = 4.0
+    doc["phases"][0]["duration_sec"] = 4.0
+    doc["lyrics"] = [
+        {"at_sec": 0.0, "text": "hi", "duration_sec": 0.5},
+    ]
+    parsed = parse_animation(doc)
+    t_now = [0.2]
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: t_now[0],
+        overlay_api=captured.append,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)  # active "hi"
+    t_now[0] = 1.0  # past the line's end_sec (0.5)
+    hooks["update"](0.0)
+    assert captured == ["hi", ""]
+
+
+def test_lyrics_only_pushes_on_change_not_every_frame() -> None:
+    """Repeated updates inside the same active line don't re-push
+    the same string — the overlay only sees transitions."""
+    scene = _build_minimal_scene()
+    captured: list[str] = []
+    doc = _minimal_doc()
+    doc["loop_sec"] = 4.0
+    doc["phases"][0]["duration_sec"] = 4.0
+    doc["lyrics"] = [
+        {"at_sec": 0.0, "text": "x", "duration_sec": 2.0},
+    ]
+    parsed = parse_animation(doc)
+    t_now = [0.1]
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: t_now[0],
+        overlay_api=captured.append,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    for sample in (0.1, 0.5, 1.0, 1.5):
+        t_now[0] = sample
+        hooks["update"](0.0)
+    assert captured == ["x"]
+
+
+def test_lyrics_at_beat_resolves_via_bpm() -> None:
+    """``at_beat`` and ``duration_beats`` both resolve via the
+    document-level bpm into seconds at parse time."""
+    scene = _build_minimal_scene()
+    captured: list[str] = []
+    doc = _minimal_doc()
+    doc["bpm"] = 120.0
+    doc["loop_sec"] = 4.0
+    doc["phases"][0]["duration_sec"] = 4.0
+    doc["lyrics"] = [
+        # 2 beats @ 120 bpm = 1.0 sec start; 2 beats = 1.0 sec duration
+        {"at_beat": 2, "text": "beat-locked", "duration_beats": 2},
+    ]
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 1.5,
+        overlay_api=captured.append,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    assert captured == ["beat-locked"]
+
+
 class _StubAudioPlayer:
     """In-memory AudioPlayer-shaped stub for declarative audio tests.
 

@@ -187,6 +187,28 @@ pushed into the sandbox `morphs` API; the renderer / morph applier
 reads from there. Phases that don't declare `morphs` leave the
 weight map alone, so a previous phase's last weight persists.
 
+### Lyrics overlay (optional)
+
+```json
+"lyrics": [
+  { "at_beat": 0, "text": "Now's the time to dance", "duration_beats": 4 },
+  { "at_beat": 8, "text": "Feel the rhythm flow",    "duration_beats": 4 }
+]
+```
+
+Karaoke-style lyric lines drawn as a 2D text overlay on the viewport.
+Each entry needs `text` plus exactly one of `at_sec` / `at_beat` for
+the start and at most one of `duration_sec` / `duration_beats`
+(defaults to a 1-second flash). The runtime finds the active line per
+frame and pushes its text through `viewport.set_overlay_text(...)`;
+between lines the overlay clears.
+
+The `Viewport.paintEvent` override draws the text via `QPainter` after
+the GL pass — a single line, bottom-centred, white bold, 22pt by
+default. Lines may overlap; the first matching entry in array order
+wins per frame (predictable). Documents without a `lyrics` field
+never touch the overlay machinery.
+
 ### Audio playback (optional)
 
 ```json

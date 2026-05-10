@@ -44,6 +44,11 @@ _DRAG_NONE = "none"
 _DRAG_ORBIT = "orbit"
 _DRAG_PAN = "pan"
 _DRAG_TRANSLATE = "translate"
+# Karaoke overlay typography. Pulled to module-level constants per
+# the magic-number lint rule and to make tweaking the overlay's look
+# a one-line change.
+_OVERLAY_FONT_PT = 22
+_OVERLAY_BOTTOM_MARGIN_PX = 32
 _VEC_NORMALIZE_EPS = 1.0e-6     # treat shorter vectors as degenerate
 _DEGENERATE_DISTANCE = 1.0e-4   # camera offset shorter than this is treated as zero
 
@@ -67,6 +72,9 @@ class Viewport(QOpenGLWidget):
         self._orbit_yaw: float = 0.0
         self._orbit_pitch: float = 0.0
         self._orbit_distance: float = 1.0
+        # Karaoke overlay text drawn on top of the GL pass each frame.
+        # Empty string → overlay pass skipped.
+        self._overlay_text: str = ""
 
     def set_scene(self, scene: Scene) -> None:
         self._scene = scene
@@ -117,6 +125,43 @@ class Viewport(QOpenGLWidget):
             self._camera,
             (int(size.width()), int(size.height())),
         )
+
+    def set_overlay_text(self, text: str) -> None:
+        """Set the karaoke / debug overlay text drawn on top of the GL pass.
+
+        Empty string clears the overlay. Triggers a repaint so the new
+        text shows on the next frame without waiting for the timer's
+        scheduled tick.
+        """
+        if text == self._overlay_text:
+            return
+        self._overlay_text = text
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 — Qt override
+        """Run the GL pass, then draw the karaoke overlay on top.
+
+        ``QOpenGLWidget.paintEvent`` dispatches ``paintGL`` for the 3D
+        content; we open a ``QPainter`` on the widget afterward for a
+        2D text pass. Skips entirely when no overlay text is set so
+        the empty / no-lyric case stays a single-pass paint.
+        """
+        super().paintEvent(event)
+        if not self._overlay_text:
+            return
+        from PySide6.QtCore import Qt as _Qt  # noqa: PLC0415
+        from PySide6.QtGui import QColor, QFont, QPainter  # noqa: PLC0415
+        painter = QPainter(self)
+        try:
+            painter.setFont(QFont("Arial", _OVERLAY_FONT_PT, QFont.Weight.Bold))
+            painter.setPen(QColor(255, 255, 255))
+            painter.drawText(
+                self.rect().adjusted(0, 0, 0, -_OVERLAY_BOTTOM_MARGIN_PX),
+                _Qt.AlignmentFlag.AlignBottom | _Qt.AlignmentFlag.AlignHCenter,
+                self._overlay_text,
+            )
+        finally:
+            painter.end()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 — Qt override
         button = event.button()

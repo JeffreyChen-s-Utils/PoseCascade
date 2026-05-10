@@ -135,6 +135,7 @@ def attach_script(window: MainWindow, services: Services, script_path: Path) -> 
         skins=services.imported_skins,
         meshes=services.imported_meshes,
         camera=window.viewport.camera,
+        overlay=window.viewport.set_overlay_text,
     )
     try:
         if script_path.suffix.lower() == ".json":

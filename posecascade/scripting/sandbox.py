@@ -71,6 +71,7 @@ def build_api(
     skins: Any = (),
     meshes: Any = (),
     camera: Any | None = None,
+    overlay: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Construct the curated API dict that user scripts receive as globals.
 
@@ -91,6 +92,8 @@ def build_api(
         api["floor"] = FloorApi(foot_planter, skins=skins, meshes=meshes)
     if camera is not None:
         api["camera"] = camera
+    if overlay is not None:
+        api["overlay"] = overlay
     from posecascade.scripting.morph_api import MorphApi  # noqa: PLC0415
     api["morphs"] = MorphApi()
     return api
