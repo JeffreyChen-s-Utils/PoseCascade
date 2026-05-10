@@ -600,6 +600,106 @@ def test_physics_chains_parse_into_dict_of_floats() -> None:
     assert parsed.physics_chains["hair_b"]["stiffness"] == pytest.approx(2 * 3.14159265, abs=1e-3)
 
 
+def test_pose_preset_applies_builtin_bones() -> None:
+    """Setting ``pose: 'v_arms_up'`` writes the built-in preset's bone
+    rotations through the runtime — verified by sampling the head's
+    x_rad against the preset table."""
+    from posecascade.scripting.pose_library import BUILTIN_POSES  # noqa: PLC0415
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["phases"][0]["pose"] = "v_arms_up"
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    head_rot = scene.find("head").transform.rotation
+    expected_x = BUILTIN_POSES["v_arms_up"]["head"]["x_rad"]
+    # X rotation by expected_x → quat[0] = sin(expected_x/2)
+    np.testing.assert_allclose(
+        head_rot[0], math.sin(expected_x / 2.0), atol=1e-3,
+    )
+
+
+def test_pose_user_library_overrides_builtin() -> None:
+    """A document-level ``pose_library`` entry with the same name as
+    a built-in preset replaces it."""
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["pose_library"] = {
+        "v_arms_up": {"head": {"x_rad": 0.5}},
+    }
+    doc["phases"][0]["pose"] = "v_arms_up"
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    head_rot = scene.find("head").transform.rotation
+    np.testing.assert_allclose(head_rot[0], math.sin(0.25), atol=1e-3)
+
+
+def test_pose_weight_scales_preset_rotations() -> None:
+    """Object form ``pose: {name, weight: 0.5}`` scales the preset's
+    rotations by 0.5 each frame — useful for easing in/out of a pose."""
+    from posecascade.scripting.pose_library import BUILTIN_POSES  # noqa: PLC0415
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["phases"][0]["pose"] = {"name": "v_arms_up", "weight": 0.5}
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    head_rot = scene.find("head").transform.rotation
+    half_x = BUILTIN_POSES["v_arms_up"]["head"]["x_rad"] * 0.5
+    np.testing.assert_allclose(head_rot[0], math.sin(half_x / 2.0), atol=1e-3)
+
+
+def test_pose_phase_bones_override_preset_per_axis() -> None:
+    """``phase.bones[bone][axis]`` wins over the preset's same axis;
+    other axes from the preset survive untouched."""
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["phases"][0]["pose"] = "v_arms_up"
+    # v_arms_up's head has x_rad: -0.18. Override only x_rad to 0.0.
+    doc["phases"][0]["bones"] = {"head": {"x_rad": 0.0}}
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    head_rot = scene.find("head").transform.rotation
+    # x_rad now 0 → quat[0] ≈ 0.
+    np.testing.assert_allclose(head_rot[0], 0.0, atol=1e-3)
+
+
+def test_pose_unknown_name_logged_and_skipped() -> None:
+    """An unknown pose name doesn't raise — it's logged and the
+    runtime continues with no preset contribution."""
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["phases"][0]["pose"] = "no_such_pose"
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)  # must not raise
+    # Head stays at rest.
+    head_rot = scene.find("head").transform.rotation
+    np.testing.assert_allclose(head_rot, [0, 0, 0, 1], atol=1e-3)
+
+
 def test_crossfade_blends_body_yaw_at_boundary() -> None:
     """Body yaw at the cross-fade window's midpoint is the lerp midpoint
     of the two phases' yaw curves. This is the most direct test of the

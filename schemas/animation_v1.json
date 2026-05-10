@@ -23,6 +23,14 @@
       "minimum": 0,
       "description": "Beats per minute. When > 0, phases may use 'duration_beats' instead of 'duration_sec', and the expression DSL gains 'beat' (= elapsed * bpm / 60) and 'phase_beat' variables. Defaults to 0 (tempo-less)."
     },
+    "pose_library": {
+      "type": "object",
+      "description": "Custom pose presets keyed by name. Each entry is {bone_name: {x_rad?, y_rad?, z_rad?: number}}. Overlays the built-in library (v_arms_up, arms_to_chest, hip_pop_L, hip_pop_R, point_L, point_R, hands_clasp); user entries with a built-in name replace it.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": { "$ref": "#/$defs/bone_axes_scalars" }
+      }
+    },
     "rig": { "$ref": "#/$defs/rig" },
     "ground": {
       "anyOf": [
@@ -225,6 +233,20 @@
           "type": "object",
           "additionalProperties": { "$ref": "#/$defs/bone_axes" },
           "description": "Bone-name → per-axis curves. Drives any rig bone by composing Rz·Ry·Rx (extrinsic XYZ) in body frame, yaw-conjugated to world. Composes AFTER gait so an explicit per-bone curve overrides whatever the gait wrote on the same bone — useful for holding an arm overhead while a walking gait would otherwise swing it. Bone names go through the rig's body_bones alias map."
+        },
+        "pose": {
+          "anyOf": [
+            { "type": "string" },
+            {
+              "type": "object",
+              "required": ["name"],
+              "properties": {
+                "name": { "type": "string" },
+                "weight": { "$ref": "#/$defs/value_curve" }
+              }
+            }
+          ],
+          "description": "Pose preset to apply UNDER the phase's bones (phase.bones overrides on a per-axis basis). Built-in names: v_arms_up, arms_to_chest, hip_pop_L, hip_pop_R, point_L, point_R, hands_clasp. The object form lets a phase ease the preset in/out via a per-frame weight curve."
         }
       }
     },
@@ -237,6 +259,17 @@
         "x_rad": { "$ref": "#/$defs/value_curve" },
         "y_rad": { "$ref": "#/$defs/value_curve" },
         "z_rad": { "$ref": "#/$defs/value_curve" }
+      }
+    },
+
+    "bone_axes_scalars": {
+      "type": "object",
+      "description": "Per-axis scalars for one bone in a pose preset. Numbers only (presets are static silhouettes; the per-frame weight curve scales them).",
+      "additionalProperties": false,
+      "properties": {
+        "x_rad": { "type": "number" },
+        "y_rad": { "type": "number" },
+        "z_rad": { "type": "number" }
       }
     },
 

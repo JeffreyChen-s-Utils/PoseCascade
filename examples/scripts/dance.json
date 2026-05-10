@@ -68,10 +68,11 @@
     },
 
     {
-      "name": "reach_right",
+      "name": "point_right",
       "duration_beats": 4,
       "blend_in_sec": 0.3,
       "blend_out_sec": 0.3,
+      "pose": {"name": "point_R", "weight": {"kind": "back-out", "from": 0.0, "to": 1.0, "overshoot": 2.0}},
       "body": {
         "yaw_rad": 0.0,
         "lean_x_rad": {"kind": "back-out", "from": 0.0, "to": -0.10, "overshoot": 2.5},
@@ -89,13 +90,6 @@
         "arm_swing_amplitude": 0.0,
         "arm_hang_rad": -1.45
       },
-      "bones": {
-        "upper_arm_R": {"x_rad": {"kind": "back-out", "from": 0.0, "to": -1.20, "overshoot": 2.0}, "z_rad": -0.20},
-        "upper_arm_L": {"x_rad": 0.30, "z_rad": 0.40},
-        "head": {"y_rad": {"kind": "quad-out", "from": 0.0, "to": -0.30}, "x_rad": -0.10},
-        "chest": {"x_rad": -0.12},
-        "hip": {"y_rad": {"kind": "quad-out", "from": 0.0, "to": -0.20}}
-      },
       "morphs": {
         "blink": "0.5 + 0.5 * sin(elapsed * tau / 3.0)",
         "smile": 0.7
@@ -103,10 +97,11 @@
     },
 
     {
-      "name": "reach_left",
+      "name": "point_left",
       "duration_beats": 4,
       "blend_in_sec": 0.3,
       "blend_out_sec": 0.3,
+      "pose": {"name": "point_L", "weight": {"kind": "back-out", "from": 0.0, "to": 1.0, "overshoot": 2.0}},
       "body": {
         "yaw_rad": 0.0,
         "lean_x_rad": {"kind": "back-out", "from": 0.0, "to": 0.10, "overshoot": 2.5},
@@ -123,13 +118,6 @@
         "knee_bend": -0.20,
         "arm_swing_amplitude": 0.0,
         "arm_hang_rad": -1.45
-      },
-      "bones": {
-        "upper_arm_L": {"x_rad": {"kind": "back-out", "from": 0.0, "to": -1.20, "overshoot": 2.0}, "z_rad": 0.20},
-        "upper_arm_R": {"x_rad": 0.30, "z_rad": -0.40},
-        "head": {"y_rad": {"kind": "quad-out", "from": 0.0, "to": 0.30}, "x_rad": -0.10},
-        "chest": {"x_rad": -0.12},
-        "hip": {"y_rad": {"kind": "quad-out", "from": 0.0, "to": 0.20}}
       },
       "morphs": {
         "smile": 0.7
@@ -175,6 +163,7 @@
       "duration_beats": 4,
       "blend_in_sec": 0.3,
       "blend_out_sec": 0.3,
+      "pose": {"name": "hip_pop_L", "weight": "abs(sin(phase_beat * tau))"},
       "body": {
         "yaw_rad": "tau",
         "lean_x_rad": "0.10 * sin(phase_beat * tau)",
@@ -193,9 +182,6 @@
         "arm_hang_rad": -1.20
       },
       "bones": {
-        "hip": {"y_rad": "0.32 * sin(phase_beat * tau)"},
-        "chest": {"y_rad": "-0.18 * sin(phase_beat * tau)", "x_rad": 0.05},
-        "head": {"y_rad": "0.20 * sin(phase_beat * tau)"},
         "upper_arm_L": {"x_rad": "0.40 * sin(phase_beat * tau)", "z_rad": 0.30},
         "upper_arm_R": {"x_rad": "-0.40 * sin(phase_beat * tau)", "z_rad": -0.30}
       },
@@ -210,6 +196,7 @@
       "duration_beats": 4,
       "blend_in_sec": 0.3,
       "blend_out_sec": 0.3,
+      "pose": {"name": "v_arms_up", "weight": {"kind": "back-out", "from": 0.0, "to": 1.0, "overshoot": 2.5}},
       "body": {
         "yaw_rad": "tau",
         "lean_x_rad": -0.06,
@@ -228,10 +215,7 @@
         "arm_hang_rad": -1.45
       },
       "bones": {
-        "upper_arm_L": {"x_rad": {"kind": "back-out", "from": 0.0, "to": -1.30, "overshoot": 2.5}, "z_rad": {"kind": "quad-out", "from": 0.0, "to": 0.55}},
-        "upper_arm_R": {"x_rad": {"kind": "back-out", "from": 0.0, "to": -1.30, "overshoot": 2.5}, "z_rad": {"kind": "quad-out", "from": 0.0, "to": -0.55}},
-        "head": {"x_rad": -0.18, "y_rad": "0.10 * sin(phase_elapsed * tau / 0.5)"},
-        "chest": {"x_rad": -0.10}
+        "head": {"y_rad": "0.10 * sin(phase_beat * tau)"}
       },
       "morphs": {
         "smile": 0.9

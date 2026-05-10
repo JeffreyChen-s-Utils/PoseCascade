@@ -187,6 +187,45 @@ pushed into the sandbox `morphs` API; the renderer / morph applier
 reads from there. Phases that don't declare `morphs` leave the
 weight map alone, so a previous phase's last weight persists.
 
+### Pose presets
+
+```json
+{
+  "name": "finale",
+  "duration_beats": 4,
+  "pose": "v_arms_up",
+  "bones": {
+    "head": {"y_rad": "0.10 * sin(phase_beat * tau)"}
+  }
+}
+```
+
+Or with a per-frame weight curve so the preset eases in:
+
+```json
+"pose": {"name": "v_arms_up", "weight": {"kind": "ease", "from": 0.0, "to": 1.0}}
+```
+
+The phase loads the named preset's bone rotations as a starting
+silhouette, then `phase.bones` overrides on a **per-axis** basis —
+the preset's `head` `x_rad` is kept while the phase's `head` `y_rad`
+is added on top. Built-in presets: `v_arms_up`, `arms_to_chest`,
+`hip_pop_L`, `hip_pop_R`, `point_L`, `point_R`, `hands_clasp`.
+
+The document may declare its own `pose_library` to override built-ins
+or add new presets:
+
+```json
+"pose_library": {
+  "my_finale": {
+    "upper_arm_L": {"x_rad": -1.40, "z_rad": 0.60},
+    "upper_arm_R": {"x_rad": -1.40, "z_rad": -0.60}
+  }
+}
+```
+
+User entries with the same name as a built-in win wholesale.
+
 ### Cross-fade between phases
 
 ```json

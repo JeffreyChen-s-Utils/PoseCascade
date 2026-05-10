@@ -57,6 +57,7 @@ from posecascade.scripting.expressions import (
     evaluate_expression,
     looks_like_expression,
 )
+from posecascade.scripting.pose_library import PoseSpec, merge_libraries
 from posecascade.utils.logging import get_logger
 from posecascade.utils.math3d import (
     quat_from_axis_angle,
@@ -346,6 +347,14 @@ class Phase:
     # blending two step-based gaits is ill-defined.
     blend_in_sec: float
     blend_out_sec: float
+    # Optional pose preset name to compose UNDER the phase's bones —
+    # the preset's per-axis values become the starting silhouette,
+    # then ``bones`` overrides any axis the phase explicitly authors.
+    # ``pose_weight`` is an optional value-curve scaling the preset's
+    # values per frame (0 = preset disabled, 1 = preset at full
+    # strength). Lets a phase ease in / out of a preset.
+    pose: str | None
+    pose_weight: Any  # value-curve spec; defaults to 1.0
 
 
 @dataclass(frozen=True)
@@ -362,6 +371,10 @@ class DeclarativeAnimation:
     # instead of ``duration_sec``. ``0.0`` means the document has no tempo
     # (durations are seconds and ``beat`` evaluates to 0 in expressions).
     bpm: float
+    # Pose presets keyed by name — built-ins overlaid with whatever the
+    # document declared in ``pose_library`` (user entries win). Phases
+    # reference these via ``pose: "name"``.
+    pose_library: dict[str, PoseSpec]
 
 
 @dataclass
@@ -501,6 +514,7 @@ def _parse_phase(raw: dict[str, Any], bpm: float) -> Phase:
         raise DeclarativeAnimationError(
             "blend_in_sec / blend_out_sec must be non-negative",
         )
+    pose, pose_weight = _parse_pose(raw.get("pose"))
     return Phase(
         name=str(raw.get("name", "")),
         duration_sec=_resolve_phase_duration(raw, bpm),
@@ -512,6 +526,33 @@ def _parse_phase(raw: dict[str, Any], bpm: float) -> Phase:
         bones=bones,
         blend_in_sec=blend_in,
         blend_out_sec=blend_out,
+        pose=pose,
+        pose_weight=pose_weight,
+    )
+
+
+def _parse_pose(raw: Any) -> tuple[str | None, Any]:
+    """Validate the ``pose`` field on a phase.
+
+    Two shapes:
+    - ``"name"`` — preset at full weight.
+    - ``{"name": "name", "weight": curve}`` — preset with a per-frame
+      weight curve. Resolution against the actual library happens at
+      runtime so the user can omit a preset name and we just no-op.
+    """
+    if raw is None:
+        return None, 1.0
+    if isinstance(raw, str):
+        return raw, 1.0
+    if isinstance(raw, dict):
+        name = raw.get("name")
+        if not isinstance(name, str):
+            raise DeclarativeAnimationError(
+                "phase 'pose' object must have a string 'name' field",
+            )
+        return name, raw.get("weight", 1.0)
+    raise DeclarativeAnimationError(
+        f"phase 'pose' must be a string or object, got {type(raw).__name__}",
     )
 
 
@@ -573,6 +614,7 @@ def parse_animation(document: dict[str, Any]) -> DeclarativeAnimation:
         physics_chains=_parse_physics_chains(document.get("physics_chains", {})),
         wind=_parse_wind(document.get("wind")),
         bpm=bpm,
+        pose_library=_parse_pose_library(document.get("pose_library")),
     )
 
 
@@ -587,6 +629,35 @@ def _parse_physics_chains(raw: Any) -> dict[str, dict[str, float]]:
             )
         out[str(chain_name)] = {k: _resolve_scalar(v) for k, v in params.items()}
     return out
+
+
+def _parse_pose_library(raw: Any) -> dict[str, PoseSpec]:
+    """Validate the document-level ``pose_library`` and merge with built-ins."""
+    if raw is None:
+        return merge_libraries(None)
+    if not isinstance(raw, dict):
+        raise DeclarativeAnimationError("'pose_library' must be an object")
+    user: dict[str, PoseSpec] = {}
+    for name, spec in raw.items():
+        if not isinstance(spec, dict):
+            raise DeclarativeAnimationError(
+                f"pose_library[{name!r}] must be an object of bones",
+            )
+        bones: PoseSpec = {}
+        for bone, axes in spec.items():
+            if not isinstance(axes, dict):
+                raise DeclarativeAnimationError(
+                    f"pose_library[{name!r}][{bone!r}] must be an axis object",
+                )
+            unknown = set(axes) - set(_BONE_AXES)
+            if unknown:
+                raise DeclarativeAnimationError(
+                    f"pose_library[{name!r}][{bone!r}] has unknown axes "
+                    f"{sorted(unknown)}; expected any of {list(_BONE_AXES)}",
+                )
+            bones[str(bone)] = {str(k): float(v) for k, v in axes.items()}
+        user[str(name)] = bones
+    return merge_libraries(user)
 
 
 def _parse_wind(raw: Any) -> dict[str, Any] | None:
@@ -656,7 +727,9 @@ class DeclarativeRuntime:
         # the per-phase ``bones`` block. Both paths use ``_set_bone`` which
         # composes a delta against the cached rest rotation.
         for phase in self.animation.phases:
-            for bone_name in _phase_target_bones(phase, self.animation.rig):
+            for bone_name in _phase_target_bones(
+                phase, self.animation.rig, self.animation.pose_library,
+            ):
                 if bone_name in self._bone_drives:
                     continue
                 node = self.scene.find(bone_name)
@@ -839,22 +912,25 @@ class DeclarativeRuntime:
         cross-fade path. Per-bone evaluation failures are logged and
         skipped rather than aborting the whole frame so a single bad
         expression doesn't freeze the timeline.
+
+        Pose preset composition: if ``phase.pose`` names a preset in
+        the document's pose library, the preset's per-bone axis values
+        are loaded first (scaled by ``pose_weight`` evaluated each
+        frame), then ``phase.bones`` overrides on a per-axis basis —
+        the preset gives a starting silhouette, the phase tweaks any
+        axis it needs.
         """
         yaw = _resolve_value_curve(phase.body_yaw_rad, phase_t, scope)
         lean = _resolve_value_curve(phase.body_lean_x_rad, phase_t, scope)
         translation = _resolve_translation(phase.body_translation, phase_t, scope)
         output = PhaseOutput(yaw=yaw, lean=lean, translation=translation)
-        for bone_key, axes in phase.bones.items():
-            try:
-                x = _resolve_value_curve(axes.get("x_rad", 0.0), phase_t, scope)
-                y = _resolve_value_curve(axes.get("y_rad", 0.0), phase_t, scope)
-                z = _resolve_value_curve(axes.get("z_rad", 0.0), phase_t, scope)
-            except DeclarativeAnimationError as err:
-                _log.warning(
-                    "declarative: bones[%r] failed to evaluate: %s", bone_key, err,
-                )
-                continue
-            output.bones[bone_key] = _euler_zyx_quat(x, y, z)
+        merged = self._merged_bone_axes(phase, scope, phase_t)
+        for bone_key, axes in merged.items():
+            output.bones[bone_key] = _euler_zyx_quat(
+                axes.get("x_rad", 0.0),
+                axes.get("y_rad", 0.0),
+                axes.get("z_rad", 0.0),
+            )
         for name, spec in phase.morphs.items():
             try:
                 weight = _resolve_value_curve(spec, phase_t, scope)
@@ -865,6 +941,50 @@ class DeclarativeRuntime:
                 continue
             output.morphs[str(name)] = float(weight)
         return output
+
+    def _merged_bone_axes(
+        self, phase: Phase, scope: dict[str, float], phase_t: float,
+    ) -> dict[str, dict[str, float]]:
+        """Compose preset (scaled by weight) with phase.bones overrides.
+
+        Returns a flat ``{bone_key: {axis: scalar}}`` dict ready to feed
+        into :func:`_euler_zyx_quat` per bone. Phase-level bones win
+        per-axis: a preset's ``upper_arm_L`` ``z_rad`` keeps its value
+        unless the phase's ``bones.upper_arm_L`` also declares
+        ``z_rad``.
+        """
+        merged: dict[str, dict[str, float]] = {}
+        if phase.pose:
+            preset = self.animation.pose_library.get(phase.pose)
+            if preset is None:
+                _log.warning(
+                    "declarative: pose %r not in pose_library; skipping",
+                    phase.pose,
+                )
+            else:
+                weight = _resolve_value_curve(phase.pose_weight, phase_t, scope)
+                for bone_key, axes in preset.items():
+                    merged[bone_key] = {
+                        axis: float(v) * weight for axis, v in axes.items()
+                    }
+        for bone_key, axes_spec in phase.bones.items():
+            try:
+                bone_axes = {
+                    axis: _resolve_value_curve(
+                        axes_spec.get(axis, 0.0), phase_t, scope,
+                    )
+                    for axis in _BONE_AXES
+                    if axis in axes_spec
+                }
+            except DeclarativeAnimationError as err:
+                _log.warning(
+                    "declarative: bones[%r] failed to evaluate: %s", bone_key, err,
+                )
+                continue
+            existing = merged.get(bone_key, {})
+            existing.update(bone_axes)
+            merged[bone_key] = existing
+        return merged
 
     def _maybe_refresh_lock_targets(
         self, gait: dict[str, Any], phase_t: float,
@@ -1228,18 +1348,27 @@ def _gait_target_bones(gait: dict[str, Any], rig: RigBindings) -> tuple[str, ...
     return tuple(bones)
 
 
-def _phase_target_bones(phase: Phase, rig: RigBindings) -> tuple[str, ...]:
+def _phase_target_bones(
+    phase: Phase, rig: RigBindings, pose_library: dict[str, PoseSpec] | None = None,
+) -> tuple[str, ...]:
     """All bone names a phase needs rest rotations cached for.
 
-    Union of the gait's reset-set and any bone keyed in ``phase.bones``.
-    Both go through the rig's alias map so authors can rename bones in
-    one place without touching every phase.
+    Union of the gait's reset-set, any bone keyed in ``phase.bones``,
+    and any bone driven by the phase's pose preset (when the preset is
+    present in the document's pose_library). All go through the rig's
+    alias map so authors can rename bones in one place without touching
+    every phase.
     """
     names: set[str] = set()
     if phase.gait is not None:
         names.update(_gait_target_bones(phase.gait, rig))
     for bone_key in phase.bones:
         names.add(rig.body_bones.get(bone_key, bone_key))
+    if phase.pose and pose_library is not None:
+        preset = pose_library.get(phase.pose)
+        if preset is not None:
+            for bone_key in preset:
+                names.add(rig.body_bones.get(bone_key, bone_key))
     return tuple(names)
 
 
