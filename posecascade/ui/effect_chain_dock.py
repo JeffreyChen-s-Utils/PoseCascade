@@ -122,14 +122,25 @@ class EffectChainDock(QDockWidget):
         controls = QVBoxLayout()
         self._up_button = QPushButton("↑")
         self._up_button.clicked.connect(self.move_selected_up)
+        self._up_button.setToolTip(
+            "Move the selected effect one slot earlier in the chain. "
+            "Earlier = applied first to the source image.",
+        )
         controls.addWidget(self._up_button)
 
         self._down_button = QPushButton("↓")
         self._down_button.clicked.connect(self.move_selected_down)
+        self._down_button.setToolTip(
+            "Move the selected effect one slot later in the chain.",
+        )
         controls.addWidget(self._down_button)
 
         self._remove_button = QPushButton("Remove")
         self._remove_button.clicked.connect(self.remove_selected)
+        self._remove_button.setToolTip(
+            "Remove the selected effect from the chain. Use the Effects "
+            "menu to add new ones.",
+        )
         controls.addWidget(self._remove_button)
 
         controls.addStretch(1)
@@ -149,6 +160,10 @@ class EffectChainDock(QDockWidget):
         row_layout.setContentsMargins(4, 2, 4, 2)
         enabled = QCheckBox()
         enabled.setChecked(entry.enabled)
+        enabled.setToolTip(
+            "Enable / disable this effect. Disabled effects keep their "
+            "uniform values but are skipped during rendering.",
+        )
         enabled.toggled.connect(
             lambda checked, idx=index: self._on_enable_toggled(idx, checked),
         )
@@ -195,6 +210,7 @@ class EffectChainDock(QDockWidget):
         if uniform.step is not None:
             spin.setSingleStep(float(uniform.step))
         spin.setValue(float(value if value is not None else uniform.default))   # type: ignore[arg-type]
+        spin.setToolTip(_uniform_tooltip(uniform))
         spin.valueChanged.connect(
             lambda v, name=uniform.name: self._set_uniform(entry_index, name, float(v)),
         )
@@ -205,6 +221,7 @@ class EffectChainDock(QDockWidget):
     ) -> QCheckBox:
         check = QCheckBox()
         check.setChecked(bool(value if value is not None else uniform.default))
+        check.setToolTip(_uniform_tooltip(uniform))
         check.toggled.connect(
             lambda checked, name=uniform.name: self._set_uniform(entry_index, name, bool(checked)),
         )
@@ -218,12 +235,15 @@ class EffectChainDock(QDockWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         components: list[QDoubleSpinBox] = []
         current = tuple(value if value is not None else uniform.default)        # type: ignore[arg-type]
-        for component_value in current:
+        axis_labels = ("R / X", "G / Y", "B / Z", "A / W")
+        for axis_index, component_value in enumerate(current):
             spin = QDoubleSpinBox()
             spin.setRange(-1.0e6, 1.0e6)
             spin.setDecimals(_VECTOR_DECIMALS)
             spin.setSingleStep(_VECTOR_STEP)
             spin.setValue(float(component_value))
+            axis_hint = axis_labels[axis_index] if axis_index < len(axis_labels) else "?"
+            spin.setToolTip(f"{_uniform_tooltip(uniform)} — {axis_hint} component")
             spin.valueChanged.connect(
                 lambda _v, name=uniform.name, spins=components:
                     self._set_uniform(
@@ -248,3 +268,28 @@ class EffectChainDock(QDockWidget):
     def _after_chain_edit(self) -> None:
         self.refresh()
         self.chain_changed.emit()
+
+
+def _uniform_tooltip(uniform: EffectUniform) -> str:
+    """Build a hover tooltip for one effect uniform.
+
+    Falls back to the uniform's name + range / step hints when the
+    descriptor doesn't ship a docstring; the result is always non-empty
+    so hover discoverability is consistent across the dock.
+    """
+    parts: list[str] = []
+    description = getattr(uniform, "description", None)
+    if description:
+        parts.append(str(description))
+    else:
+        parts.append(uniform.name)
+    range_bits: list[str] = []
+    if uniform.minimum is not None:
+        range_bits.append(f"min {uniform.minimum}")
+    if uniform.maximum is not None:
+        range_bits.append(f"max {uniform.maximum}")
+    if uniform.step is not None:
+        range_bits.append(f"step {uniform.step}")
+    if range_bits:
+        parts.append("(" + ", ".join(range_bits) + ")")
+    return " ".join(parts)

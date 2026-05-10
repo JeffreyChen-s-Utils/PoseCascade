@@ -75,6 +75,12 @@ class Viewport(QOpenGLWidget):
         # Karaoke overlay text drawn on top of the GL pass each frame.
         # Empty string → overlay pass skipped.
         self._overlay_text: str = ""
+        self.setToolTip(
+            "3D viewport. Left-click to select a node. Right-click + drag "
+            "to orbit; Shift + right-click + drag to pan; mouse wheel to "
+            "zoom. The selected node is highlighted and editable in the "
+            "Inspector.",
+        )
 
     def set_scene(self, scene: Scene) -> None:
         self._scene = scene

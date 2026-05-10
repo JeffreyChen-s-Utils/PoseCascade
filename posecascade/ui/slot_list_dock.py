@@ -91,6 +91,10 @@ class SlotListDock(QDockWidget):
 
         visibility = QCheckBox()
         visibility.setChecked(slot.visible)
+        visibility.setToolTip(
+            f"Show / hide '{slot.name}' in the viewport. Hidden slots "
+            "still tick their physics + animation; only the draw is skipped.",
+        )
         visibility.toggled.connect(
             lambda checked, name=slot.name: self._on_visibility_toggled(name, checked),
         )
@@ -99,7 +103,12 @@ class SlotListDock(QDockWidget):
         row_layout.addWidget(QLabel(slot.name), 1)
 
         translation_spins = self._build_translation_spins(slot)
-        for spin in translation_spins:
+        axis_labels = ("X", "Y", "Z")
+        for axis_label, spin in zip(axis_labels, translation_spins, strict=True):
+            spin.setToolTip(
+                f"'{slot.name}' world {axis_label} translation. "
+                "Positions the slot's root before its own animation runs.",
+            )
             row_layout.addWidget(spin)
 
         item = QListWidgetItem()

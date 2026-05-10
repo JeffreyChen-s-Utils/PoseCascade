@@ -36,6 +36,11 @@ class OutlinerDock(QDockWidget):
         self._tree = QTreeWidget()
         self._tree.setHeaderHidden(True)
         self._tree.setUniformRowHeights(True)
+        self._tree.setToolTip(
+            "Scene hierarchy. Click a node to inspect / edit it on the right. "
+            "Right-click for actions. Press Delete to remove the selected "
+            "node and its descendants.",
+        )
         self._tree.itemSelectionChanged.connect(self._on_selection_changed)
         # Right-click menu for delete.
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)

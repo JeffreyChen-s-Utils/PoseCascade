@@ -83,8 +83,14 @@ class ExportDialog(QDialog):
         button_row = QHBoxLayout()
         self._cancel_button = QPushButton("Cancel")
         self._cancel_button.clicked.connect(self.reject)
+        self._cancel_button.setToolTip("Close the dialog without exporting.")
         self._ok_button = QPushButton("Export")
         self._ok_button.clicked.connect(self._on_ok)
+        self._ok_button.setToolTip(
+            "Run the export described by the active tab. Validates the "
+            "output path before starting; nothing is written if validation "
+            "fails.",
+        )
         button_row.addStretch(1)
         button_row.addWidget(self._cancel_button)
         button_row.addWidget(self._ok_button)
@@ -95,6 +101,10 @@ class ExportDialog(QDialog):
         form = QFormLayout(widget)
         self._vmd_path = QLineEdit()
         self._vmd_path.setPlaceholderText("/path/to/output.vmd")
+        self._vmd_path.setToolTip(
+            "Destination .vmd path. The exporter writes a binary MMD motion "
+            "file containing every visible track's keyframes.",
+        )
         form.addRow("Output", self._vmd_path)
         self._tabs.addTab(widget, "VMD")
 
@@ -103,21 +113,39 @@ class ExportDialog(QDialog):
         form = QFormLayout(widget)
         self._sequence_dir = QLineEdit()
         self._sequence_dir.setPlaceholderText("/path/to/output_dir")
+        self._sequence_dir.setToolTip(
+            "Directory the per-frame PNGs are written to. Created if it "
+            "doesn't exist; existing files in the range are overwritten.",
+        )
         form.addRow("Output dir", self._sequence_dir)
         self._sequence_start = QSpinBox()
         self._sequence_start.setRange(0, _MAX_FRAME)
         self._sequence_start.setValue(0)
+        self._sequence_start.setToolTip(
+            "First frame to render (inclusive). Use the timeline to scrub "
+            "and find the right frame numbers.",
+        )
         form.addRow("Start frame", self._sequence_start)
         self._sequence_end = QSpinBox()
         self._sequence_end.setRange(0, _MAX_FRAME)
         self._sequence_end.setValue(DEFAULT_END_FRAME)
+        self._sequence_end.setToolTip(
+            "Last frame to render (inclusive).",
+        )
         form.addRow("End frame", self._sequence_end)
         self._sequence_padding = QSpinBox()
         self._sequence_padding.setRange(1, 8)
         self._sequence_padding.setValue(DEFAULT_PADDING)
+        self._sequence_padding.setToolTip(
+            "Zero-pad width for filenames. 4 → frame_0001.png, 6 → frame_000001.png.",
+        )
         form.addRow("Filename padding", self._sequence_padding)
         self._sequence_post_effects = QCheckBox("Include post-effect chain")
         self._sequence_post_effects.setChecked(True)
+        self._sequence_post_effects.setToolTip(
+            "Apply the viewport's post-effect chain (bloom, tonemap, etc.) "
+            "to each rendered frame. Uncheck to export the raw scene render.",
+        )
         form.addRow(self._sequence_post_effects)
         self._tabs.addTab(widget, "Image sequence")
 
@@ -126,24 +154,42 @@ class ExportDialog(QDialog):
         form = QFormLayout(widget)
         self._video_path = QLineEdit()
         self._video_path.setPlaceholderText("/path/to/output.mp4")
+        self._video_path.setToolTip(
+            "Destination video file path. Container is inferred from the "
+            "extension (.mp4, .mov, .webm) and must match the codec.",
+        )
         form.addRow("Output", self._video_path)
         self._video_start = QSpinBox()
         self._video_start.setRange(0, _MAX_FRAME)
+        self._video_start.setToolTip("First frame to encode (inclusive).")
         form.addRow("Start frame", self._video_start)
         self._video_end = QSpinBox()
         self._video_end.setRange(0, _MAX_FRAME)
         self._video_end.setValue(DEFAULT_END_FRAME)
+        self._video_end.setToolTip("Last frame to encode (inclusive).")
         form.addRow("End frame", self._video_end)
         self._video_fps = QSpinBox()
         self._video_fps.setRange(1, 120)
         self._video_fps.setValue(DEFAULT_FPS)
+        self._video_fps.setToolTip(
+            "Output video framerate. Must match the timeline's playback "
+            "rate to keep audio sync; 30 / 60 are the common choices.",
+        )
         form.addRow("FPS", self._video_fps)
         self._video_codec = QComboBox()
         for codec in _DEFAULT_VIDEO_CODECS:
             self._video_codec.addItem(codec)
+        self._video_codec.setToolTip(
+            "Video codec. h264 = wide compatibility, prores = lossless / "
+            "editing-friendly but huge files, vp9 = good for web.",
+        )
         form.addRow("Codec", self._video_codec)
         self._video_post_effects = QCheckBox("Include post-effect chain")
         self._video_post_effects.setChecked(True)
+        self._video_post_effects.setToolTip(
+            "Apply the viewport's post-effect chain to each encoded frame. "
+            "Uncheck for a raw scene capture.",
+        )
         form.addRow(self._video_post_effects)
         self._tabs.addTab(widget, "Video")
 

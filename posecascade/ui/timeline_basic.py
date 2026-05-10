@@ -136,11 +136,17 @@ class TimelineDock(QDockWidget):
         self._slider.setRange(0, _DEFAULT_FRAME_RANGE)
         self._slider.setSingleStep(1)
         self._slider.valueChanged.connect(self._on_slider_changed)
+        self._slider.setToolTip(
+            "Scrub the playhead. Drag to preview a frame; release to settle.",
+        )
         slider_row.addWidget(self._slider, 1)
 
         self._frame_spin = QSpinBox()
         self._frame_spin.setRange(0, _DEFAULT_FRAME_RANGE)
         self._frame_spin.valueChanged.connect(self._on_frame_spin_changed)
+        self._frame_spin.setToolTip(
+            "Current frame number. Type a number to jump straight there.",
+        )
         slider_row.addWidget(self._frame_spin)
         layout.addLayout(slider_row)
 
@@ -148,12 +154,19 @@ class TimelineDock(QDockWidget):
         self._play_button = QPushButton("Play")
         self._play_button.clicked.connect(self.toggle_play)
         self._play_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._play_button.setToolTip(
+            "Toggle playback. When playing, the playhead advances at the "
+            "scene's FPS (or in sync with attached audio).",
+        )
         controls.addWidget(self._play_button)
 
         controls.addWidget(QLabel("Range:"))
         self._range_start = QSpinBox()
         self._range_start.setRange(0, _MAX_FRAME_RANGE)
         self._range_start.valueChanged.connect(self._on_range_start_changed)
+        self._range_start.setToolTip(
+            "Playback range start frame. Playback wraps to here when looping.",
+        )
         controls.addWidget(self._range_start)
 
         controls.addWidget(QLabel("→"))
@@ -161,6 +174,10 @@ class TimelineDock(QDockWidget):
         self._range_end.setRange(0, _MAX_FRAME_RANGE)
         self._range_end.setValue(_DEFAULT_FRAME_RANGE)
         self._range_end.valueChanged.connect(self._on_range_end_changed)
+        self._range_end.setToolTip(
+            "Playback range end frame. Playback stops (or wraps) at this "
+            "frame.",
+        )
         controls.addWidget(self._range_end)
 
         controls.addStretch(1)
@@ -168,6 +185,10 @@ class TimelineDock(QDockWidget):
         self._loop_checkbox = QCheckBox("Loop")
         self._loop_checkbox.setChecked(self._loop)
         self._loop_checkbox.toggled.connect(self._on_loop_toggled)
+        self._loop_checkbox.setToolTip(
+            "When checked, playback wraps from end → start instead of "
+            "stopping at the range end.",
+        )
         controls.addWidget(self._loop_checkbox)
 
         layout.addLayout(controls)

@@ -95,9 +95,19 @@ class BezierHandleEditor(QWidget):
         layout.setContentsMargins(4, 4, 4, 4)
         form_host = QWidget()
         form = QFormLayout(form_host)
+        # MMD-style cubic Bezier: two interior handles (X1,Y1) and
+        # (X2,Y2) shape the in / out tangent. 0 / 127 = endpoints
+        # (linear); raise X to delay, raise Y to overshoot.
+        handle_tooltips = {
+            "X1": "First handle X (0–127). Lower = faster start; higher = ease-in.",
+            "Y1": "First handle Y (0–127). Higher = overshoot at the start.",
+            "X2": "Second handle X (0–127). Lower = ease-out; higher = late-arriving end.",
+            "Y2": "Second handle Y (0–127). Lower = undershoot near the end.",
+        }
         for label in ("X1", "Y1", "X2", "Y2"):
             spin = QSpinBox()
             spin.setRange(0, _BEZIER_RANGE_MAX)
+            spin.setToolTip(handle_tooltips[label])
             spin.valueChanged.connect(self._on_spin_changed)
             self._spins.append(spin)
             form.addRow(label, spin)

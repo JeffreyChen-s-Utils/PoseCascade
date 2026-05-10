@@ -85,9 +85,17 @@ class InspectorDock(QDockWidget):
             "Scale", _SCALE_MIN, _SCALE_MAX,
         )
 
-        self._layout.addWidget(QLabel("Components:"))
+        components_label = QLabel("Components:")
+        components_label.setToolTip(
+            "Components attached to this node — physics chains, cloth pieces, "
+            "skin references etc. Tuners for each component appear below.",
+        )
+        self._layout.addWidget(components_label)
         self._components_list = QListWidget()
         self._components_list.setMaximumHeight(120)
+        self._components_list.setToolTip(
+            "Read-only list of component types on this node.",
+        )
         self._layout.addWidget(self._components_list)
 
         # Container for component-specific tuners. Re-created each time selection
@@ -116,7 +124,15 @@ class InspectorDock(QDockWidget):
         row = QHBoxLayout()
         row.addWidget(QLabel(label))
         spinboxes = tuple(_make_spinbox(lo, hi) for _ in range(3))
-        for sb in spinboxes:
+        # Tooltip per axis so hovering each spinbox makes clear which
+        # axis it edits — important because the row's "Translation"
+        # label only appears at the start, easily off-screen on
+        # narrow docks.
+        axis_hints = (
+            f"{label} — X axis", f"{label} — Y axis", f"{label} — Z axis",
+        )
+        for sb, hint in zip(spinboxes, axis_hints, strict=True):
+            sb.setToolTip(hint)
             row.addWidget(sb)
         wrapper = QWidget()
         wrapper.setLayout(row)
@@ -258,9 +274,27 @@ def _spring_chain_editor(
             for joint in live_chain.joints:  # type: ignore[attr-defined]
                 joint.inertia = float(value)
 
-    _add_param_row(form, "Stiffness", component.stiffness, 0.0, 200.0, stiffness_setter)
-    _add_param_row(form, "Damping", component.damping, 0.0, 50.0, damping_setter)
-    _add_param_row(form, "Inertia", component.inertia, 1.0e-4, 10.0, inertia_setter)
+    _add_param_row(
+        form, "Stiffness", component.stiffness, 0.0, 200.0, stiffness_setter,
+        tooltip=(
+            "Spring constant pulling each joint back to its rest pose. "
+            "Higher = stiffer hair / cloth, less sway. Typical 8–20."
+        ),
+    )
+    _add_param_row(
+        form, "Damping", component.damping, 0.0, 50.0, damping_setter,
+        tooltip=(
+            "Velocity damping each frame. Higher = less ringing after an "
+            "impulse. Typical 0.3–0.8."
+        ),
+    )
+    _add_param_row(
+        form, "Inertia", component.inertia, 1.0e-4, 10.0, inertia_setter,
+        tooltip=(
+            "Per-joint mass — heavier joints respond more slowly to wind / "
+            "head motion. Typical 0.01–0.05 for hair."
+        ),
+    )
     return box
 
 
@@ -280,14 +314,38 @@ def _cloth_editor(
                 setattr(live_piece.params, attr, float(value))  # type: ignore[attr-defined]
         return setter
 
-    _add_param_row(form, "Stiffness", component.structural_stiffness, 0.0, 1.0,
-                   make_setter("structural_stiffness"))
-    _add_param_row(form, "Bend", component.bend_stiffness, 0.0, 1.0,
-                   make_setter("bend_stiffness"))
-    _add_param_row(form, "Damping", component.linear_damping, 0.5, 1.0,
-                   make_setter("linear_damping"))
-    _add_param_row(form, "Rest pull", component.rest_pull, 0.0, 200.0,
-                   make_setter("rest_pull"))
+    _add_param_row(
+        form, "Stiffness", component.structural_stiffness, 0.0, 1.0,
+        make_setter("structural_stiffness"),
+        tooltip=(
+            "How rigidly the cloth resists stretching along its weave (PBD "
+            "structural constraint). 0 = rubbery, 1 = rigid. Typical 0.6–0.9."
+        ),
+    )
+    _add_param_row(
+        form, "Bend", component.bend_stiffness, 0.0, 1.0,
+        make_setter("bend_stiffness"),
+        tooltip=(
+            "Resistance to folding / wrinkling. 0 = limp, 1 = card-stiff. "
+            "Typical 0.1–0.3 for cloth, higher for leather."
+        ),
+    )
+    _add_param_row(
+        form, "Damping", component.linear_damping, 0.5, 1.0,
+        make_setter("linear_damping"),
+        tooltip=(
+            "Per-frame velocity multiplier (1 = no damping, 0.5 = aggressive "
+            "damp). Lower = faster settle after an impulse."
+        ),
+    )
+    _add_param_row(
+        form, "Rest pull", component.rest_pull, 0.0, 200.0,
+        make_setter("rest_pull"),
+        tooltip=(
+            "Force pulling vertices back toward their rest position each "
+            "frame. Prevents drift / sag accumulation. Typical 5–40."
+        ),
+    )
     return box
 
 
@@ -298,6 +356,8 @@ def _add_param_row(
     lo: float,
     hi: float,
     setter: Callable[[float], None],
+    *,
+    tooltip: str | None = None,
 ) -> None:
     sb = QDoubleSpinBox()
     sb.setRange(lo, hi)
@@ -306,4 +366,6 @@ def _add_param_row(
     sb.setKeyboardTracking(False)
     sb.setValue(float(initial))
     sb.valueChanged.connect(setter)
+    if tooltip is not None:
+        sb.setToolTip(tooltip)
     form.addRow(label, sb)

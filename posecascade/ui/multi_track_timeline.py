@@ -196,18 +196,31 @@ class MultiTrackTimelineDock(QDockWidget):
         controls = QHBoxLayout()
         self._insert_button = QPushButton("Insert")
         self._insert_button.clicked.connect(self.insert_keyframe_at_current_frame)
+        self._insert_button.setToolTip(
+            "Insert a keyframe at the current playhead frame on the active "
+            "track. Shortcut: I.",
+        )
         controls.addWidget(self._insert_button)
 
         self._delete_button = QPushButton("Delete")
         self._delete_button.clicked.connect(lambda: self.delete_selected_keyframe(None))
+        self._delete_button.setToolTip(
+            "Delete the currently selected keyframe. Shortcut: Delete.",
+        )
         controls.addWidget(self._delete_button)
 
         self._undo_button = QPushButton("Undo")
         self._undo_button.clicked.connect(self.undo)
+        self._undo_button.setToolTip(
+            "Undo the last keyframe insert / delete / move on this timeline.",
+        )
         controls.addWidget(self._undo_button)
 
         self._redo_button = QPushButton("Redo")
         self._redo_button.clicked.connect(self.redo)
+        self._redo_button.setToolTip(
+            "Redo the last undone timeline edit.",
+        )
         controls.addWidget(self._redo_button)
 
         controls.addStretch(1)
