@@ -2,6 +2,7 @@
   "schema_version": 1,
   "name": "mmd_dance_declarative_demo",
   "loop_sec": 16.0,
+  "bpm": 120,
 
   "rig": {
     "character_root": "Sketchfab_model",
@@ -35,7 +36,7 @@
   "phases": [
     {
       "name": "intro_bounce",
-      "duration_sec": 2.0,
+      "duration_beats": 4,
       "body": {
         "yaw_rad": 0.0,
         "lean_x_rad": "0.04 * sin(elapsed * tau / 1.0)",
@@ -66,7 +67,7 @@
 
     {
       "name": "reach_right",
-      "duration_sec": 2.0,
+      "duration_beats": 4,
       "body": {
         "yaw_rad": 0.0,
         "lean_x_rad": {"kind": "back-out", "from": 0.0, "to": -0.10, "overshoot": 2.5},
@@ -99,7 +100,7 @@
 
     {
       "name": "reach_left",
-      "duration_sec": 2.0,
+      "duration_beats": 4,
       "body": {
         "yaw_rad": 0.0,
         "lean_x_rad": {"kind": "back-out", "from": 0.0, "to": 0.10, "overshoot": 2.5},
@@ -131,7 +132,7 @@
 
     {
       "name": "spin_cw",
-      "duration_sec": 2.0,
+      "duration_beats": 4,
       "body": {
         "yaw_rad": {"kind": "ease", "from": 0.0, "to": "tau"},
         "lean_x_rad": 0.05,
@@ -163,12 +164,12 @@
 
     {
       "name": "hip_pop",
-      "duration_sec": 2.0,
+      "duration_beats": 4,
       "body": {
         "yaw_rad": "tau",
-        "lean_x_rad": "0.10 * sin(phase_elapsed * tau / 0.5)",
+        "lean_x_rad": "0.10 * sin(phase_beat * tau)",
         "translation": {
-          "x": "0.06 * sin(phase_elapsed * tau / 0.5)",
+          "x": "0.06 * sin(phase_beat * tau)",
           "y": 0.0,
           "z": 0.0
         }
@@ -182,21 +183,21 @@
         "arm_hang_rad": -1.20
       },
       "bones": {
-        "hip": {"y_rad": "0.32 * sin(phase_elapsed * tau / 0.5)"},
-        "chest": {"y_rad": "-0.18 * sin(phase_elapsed * tau / 0.5)", "x_rad": 0.05},
-        "head": {"y_rad": "0.20 * sin(phase_elapsed * tau / 0.5)"},
-        "upper_arm_L": {"x_rad": "0.40 * sin(phase_elapsed * tau / 0.5)", "z_rad": 0.30},
-        "upper_arm_R": {"x_rad": "-0.40 * sin(phase_elapsed * tau / 0.5)", "z_rad": -0.30}
+        "hip": {"y_rad": "0.32 * sin(phase_beat * tau)"},
+        "chest": {"y_rad": "-0.18 * sin(phase_beat * tau)", "x_rad": 0.05},
+        "head": {"y_rad": "0.20 * sin(phase_beat * tau)"},
+        "upper_arm_L": {"x_rad": "0.40 * sin(phase_beat * tau)", "z_rad": 0.30},
+        "upper_arm_R": {"x_rad": "-0.40 * sin(phase_beat * tau)", "z_rad": -0.30}
       },
       "morphs": {
         "smile": 0.85,
-        "blink": "0.5 + 0.5 * sin(elapsed * tau / 2.0)"
+        "blink": "0.5 + 0.5 * sin(beat * tau / 4)"
       }
     },
 
     {
       "name": "v_arms_up",
-      "duration_sec": 2.0,
+      "duration_beats": 4,
       "body": {
         "yaw_rad": "tau",
         "lean_x_rad": -0.06,
@@ -227,7 +228,7 @@
 
     {
       "name": "spin_ccw",
-      "duration_sec": 2.0,
+      "duration_beats": 4,
       "body": {
         "yaw_rad": {"kind": "ease", "from": "tau", "to": 0.0},
         "lean_x_rad": -0.05,
@@ -259,7 +260,7 @@
 
     {
       "name": "finale_pose",
-      "duration_sec": 2.0,
+      "duration_beats": 4,
       "body": {
         "yaw_rad": 0.0,
         "lean_x_rad": {"kind": "ease", "from": 0.0, "to": 0.10},

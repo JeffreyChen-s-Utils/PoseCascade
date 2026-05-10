@@ -345,6 +345,11 @@ class DeclarativeAnimation:
     phases: tuple[Phase, ...]
     physics_chains: dict[str, dict[str, float]]
     wind: dict[str, Any] | None
+    # Beats per minute. Used for the ``beat`` / ``phase_beat`` expression-DSL
+    # variables and for resolving any phase that declared ``duration_beats``
+    # instead of ``duration_sec``. ``0.0`` means the document has no tempo
+    # (durations are seconds and ``beat`` evaluates to 0 in expressions).
+    bpm: float
 
 
 def _parse_rig(raw: dict[str, Any]) -> RigBindings:
@@ -381,7 +386,35 @@ def _parse_ground(raw: Any) -> GroundSpec | None:
     return GroundSpec(kind=str(kind), params={k: v for k, v in raw.items() if k != "kind"})
 
 
-def _parse_phase(raw: dict[str, Any]) -> Phase:
+_SECONDS_PER_MINUTE = 60.0
+
+
+def _resolve_phase_duration(raw: dict[str, Any], bpm: float) -> float:
+    """Resolve a phase's duration into seconds.
+
+    Authors may write ``duration_sec`` (always valid) OR ``duration_beats``
+    (requires the document-level ``bpm`` to be > 0). Mixing both in the
+    same phase is rejected so the source of truth is unambiguous; pure
+    backward compat for documents that only ever wrote ``duration_sec``.
+    """
+    has_sec = "duration_sec" in raw
+    has_beats = "duration_beats" in raw
+    if has_sec and has_beats:
+        raise DeclarativeAnimationError(
+            "phase has both 'duration_sec' and 'duration_beats'; "
+            "specify exactly one",
+        )
+    if has_beats:
+        if bpm <= 0.0:
+            raise DeclarativeAnimationError(
+                "phase uses 'duration_beats' but the document has no "
+                "positive 'bpm' to convert it",
+            )
+        return float(raw["duration_beats"]) * _SECONDS_PER_MINUTE / bpm
+    return float(raw.get("duration_sec", 0.0))
+
+
+def _parse_phase(raw: dict[str, Any], bpm: float) -> Phase:
     if not isinstance(raw, dict):
         raise DeclarativeAnimationError("each phase must be an object")
     body = raw.get("body", {})
@@ -393,7 +426,7 @@ def _parse_phase(raw: dict[str, Any]) -> Phase:
     bones = _parse_bones(raw.get("bones", {}))
     return Phase(
         name=str(raw.get("name", "")),
-        duration_sec=float(raw.get("duration_sec", 0.0)),
+        duration_sec=_resolve_phase_duration(raw, bpm),
         body_yaw_rad=body.get("yaw_rad", 0.0),
         body_lean_x_rad=body.get("lean_x_rad", 0.0),
         body_translation=body.get("translation", {}),
@@ -444,7 +477,12 @@ def parse_animation(document: dict[str, Any]) -> DeclarativeAnimation:
     phases_raw = document.get("phases", [])
     if not isinstance(phases_raw, list):
         raise DeclarativeAnimationError("'phases' must be an array")
-    phases = tuple(_parse_phase(p) for p in phases_raw)
+    bpm = float(document.get("bpm", 0.0))
+    if bpm < 0.0:
+        raise DeclarativeAnimationError(
+            f"'bpm' must be non-negative, got {bpm}",
+        )
+    phases = tuple(_parse_phase(p, bpm) for p in phases_raw)
     if not phases:
         raise DeclarativeAnimationError("animation must have at least one phase")
     return DeclarativeAnimation(
@@ -455,6 +493,7 @@ def parse_animation(document: dict[str, Any]) -> DeclarativeAnimation:
         phases=phases,
         physics_chains=_parse_physics_chains(document.get("physics_chains", {})),
         wind=_parse_wind(document.get("wind")),
+        bpm=bpm,
     )
 
 
@@ -639,10 +678,22 @@ class DeclarativeRuntime:
     def _update(self, _dt: float) -> None:
         elapsed = self.time() % self.animation.loop_sec
         phase, phase_t, phase_elapsed = self._phase_for(elapsed)
+        bpm = self.animation.bpm
+        # ``beat`` / ``phase_beat`` only carry meaning when the document
+        # set bpm > 0; otherwise they evaluate to 0 and any expression
+        # using them silently degrades to "no beat-driven motion" rather
+        # than raising — matches what authors expect for documents that
+        # never declared a tempo.
+        beat = elapsed * bpm / _SECONDS_PER_MINUTE if bpm > 0.0 else 0.0
+        phase_beat = (
+            phase_elapsed * bpm / _SECONDS_PER_MINUTE if bpm > 0.0 else 0.0
+        )
         scope = {
             "elapsed": float(elapsed),
             "phase_t": float(phase_t),
             "phase_elapsed": float(phase_elapsed),
+            "beat": float(beat),
+            "phase_beat": float(phase_beat),
         }
         yaw = _resolve_value_curve(phase.body_yaw_rad, phase_t, scope)
         lean = _resolve_value_curve(phase.body_lean_x_rad, phase_t, scope)

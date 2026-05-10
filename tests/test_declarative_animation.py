@@ -600,6 +600,89 @@ def test_physics_chains_parse_into_dict_of_floats() -> None:
     assert parsed.physics_chains["hair_b"]["stiffness"] == pytest.approx(2 * 3.14159265, abs=1e-3)
 
 
+def test_parse_bpm_and_duration_beats_resolve_to_seconds() -> None:
+    """A phase declared in beats with bpm=120 has duration_sec = beats / 2."""
+    doc = _minimal_doc()
+    doc["bpm"] = 120.0
+    doc["loop_sec"] = 4.0
+    doc["phases"][0].pop("duration_sec", None)
+    doc["phases"][0]["duration_beats"] = 8.0  # 8 beats @ 120 bpm = 4.0 s
+    parsed = parse_animation(doc)
+    assert parsed.bpm == pytest.approx(120.0)
+    assert parsed.phases[0].duration_sec == pytest.approx(4.0)
+
+
+def test_parse_rejects_duration_beats_without_bpm() -> None:
+    """duration_beats requires document-level bpm > 0."""
+    doc = _minimal_doc()
+    doc["phases"][0].pop("duration_sec", None)
+    doc["phases"][0]["duration_beats"] = 4.0
+    with pytest.raises(DeclarativeAnimationError, match="bpm"):
+        parse_animation(doc)
+
+
+def test_parse_rejects_both_duration_sec_and_beats() -> None:
+    """Specifying both is ambiguous and rejected at parse time."""
+    doc = _minimal_doc()
+    doc["bpm"] = 120.0
+    doc["phases"][0]["duration_beats"] = 4.0  # already has duration_sec
+    with pytest.raises(DeclarativeAnimationError, match="exactly one"):
+        parse_animation(doc)
+
+
+def test_runtime_beat_variable_in_expression_scope() -> None:
+    """Expressions can reference ``beat`` (= elapsed * bpm / 60) and
+    ``phase_beat`` (= phase_elapsed * bpm / 60); both come from the
+    document-level bpm."""
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["bpm"] = 120.0
+    doc["loop_sec"] = 4.0
+    doc["phases"][0]["duration_sec"] = 4.0
+    doc["phases"][0]["body"] = {
+        # At elapsed=1.0s with bpm=120, beat=2.0; sin(2 * tau / 4) = sin(π) = 0
+        "yaw_rad": "sin(beat * tau / 4)",
+        "translation": {"x": "phase_beat / 4.0", "y": 0.0, "z": 0.0},
+    }
+    parsed = parse_animation(doc)
+    t_now = [1.0]  # beat = 2.0, phase_beat = 2.0
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: t_now[0],
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    root = scene.find("Sketchfab_model")
+    # yaw = sin(π) ≈ 0 → quaternion W ≈ 1, others ≈ 0
+    np.testing.assert_allclose(
+        root.transform.rotation[1], 0.0, atol=1e-3,
+    )
+    # x translation = phase_beat / 4 = 0.5
+    np.testing.assert_allclose(
+        root.transform.translation[0], 0.5, atol=1e-3,
+    )
+
+
+def test_runtime_beat_zero_when_bpm_unset() -> None:
+    """Documents without bpm get beat=0 in scope so legacy expressions
+    referencing it (unlikely but possible) get a defined value rather
+    than a NameError."""
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["phases"][0]["body"] = {
+        "yaw_rad": "beat * pi",  # bpm unset → beat is 0 → yaw is 0
+    }
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 1.0,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    root = scene.find("Sketchfab_model")
+    np.testing.assert_allclose(root.transform.rotation[1], 0.0, atol=1e-3)
+
+
 def test_curve_step_returns_from_then_to_at_threshold() -> None:
     """``step`` is the discrete-jump curve: ``from`` strictly below
     the ``at`` threshold, ``to`` at or above it."""

@@ -20,6 +20,7 @@ sandbox flow.
   "schema_version": 1,
   "name": "stair_walk",
   "loop_sec": 16.0,
+  "bpm": 120,
   "rig": { ... },
   "ground": { ... },
   "physics_chains": { ... },
@@ -30,6 +31,19 @@ sandbox flow.
 
 `schema_version` is required and currently must be `1`. The runtime
 rejects unknown versions to give us room to evolve the format.
+
+`bpm` is optional. When set to a positive number, two things change:
+
+- Each phase may use `duration_beats` instead of `duration_sec` —
+  authors think in beats, the runtime resolves to seconds at parse
+  time. Mixing both in one phase is rejected.
+- The expression DSL gains two variables: `beat` (= `elapsed * bpm /
+  60`) and `phase_beat` (= `phase_elapsed * bpm / 60`). Drop a
+  `"sin(beat * tau / 4)"` into a curve to phase-lock motion to a
+  4-beat cycle.
+
+Without `bpm`, `beat` and `phase_beat` evaluate to `0` so legacy
+documents keep working.
 
 ## Rig bindings
 

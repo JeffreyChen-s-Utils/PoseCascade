@@ -18,6 +18,11 @@
       "type": "number",
       "description": "Total animation length. Defaults to the sum of phase durations."
     },
+    "bpm": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Beats per minute. When > 0, phases may use 'duration_beats' instead of 'duration_sec', and the expression DSL gains 'beat' (= elapsed * bpm / 60) and 'phase_beat' variables. Defaults to 0 (tempo-less)."
+    },
     "rig": { "$ref": "#/$defs/rig" },
     "ground": {
       "anyOf": [
@@ -186,10 +191,19 @@
 
     "phase": {
       "type": "object",
-      "required": ["name", "duration_sec"],
+      "required": ["name"],
+      "oneOf": [
+        { "required": ["duration_sec"] },
+        { "required": ["duration_beats"] }
+      ],
       "properties": {
         "name": { "type": "string" },
         "duration_sec": { "type": "number", "exclusiveMinimum": 0 },
+        "duration_beats": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Phase length in beats. Requires the document-level 'bpm' to be > 0; mutually exclusive with 'duration_sec'."
+        },
         "body": { "$ref": "#/$defs/body" },
         "gait": { "$ref": "#/$defs/gait" },
         "morphs": {
