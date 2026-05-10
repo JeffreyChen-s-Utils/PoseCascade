@@ -136,17 +136,152 @@ def _resolve_scalar(value: Any, scope: dict[str, float] | None = None) -> float:
     )
 
 
+# Penner ease-out-back default overshoot — the visible "snap past the
+# target before settling" coefficient. 1.70158 is the canonical value
+# from Robert Penner's easing equations and matches MMD / After Effects
+# defaults so authors get the look they expect without tuning.
+_BACK_OUT_DEFAULT_OVERSHOOT = 1.70158
+
+
+def _from_to(spec: dict[str, Any], scope: dict[str, float]) -> tuple[float, float]:
+    """Resolve a curve's ``from`` / ``to`` endpoints.
+
+    Extracted because every interpolating curve kind reads exactly
+    these two fields the same way; without the helper the rule against
+    duplicated 3-statement blocks bites once we have ten curve kinds.
+    """
+    a = _resolve_scalar(spec.get("from", 0.0), scope)
+    b = _resolve_scalar(spec.get("to", 0.0), scope)
+    return a, b
+
+
+def _curve_constant(spec: dict[str, Any], scope: dict[str, float], _t: float) -> float:
+    return _resolve_scalar(spec.get("value", 0.0), scope)
+
+
+def _curve_linear(spec: dict[str, Any], scope: dict[str, float], t: float) -> float:
+    a, b = _from_to(spec, scope)
+    return a + (b - a) * t
+
+
+def _curve_ease(spec: dict[str, Any], scope: dict[str, float], t: float) -> float:
+    a, b = _from_to(spec, scope)
+    eased = _HALF - _HALF * math.cos(t * math.pi)
+    return a + (b - a) * eased
+
+
+def _curve_expression(
+    spec: dict[str, Any], scope: dict[str, float], _t: float,
+) -> float:
+    source = spec.get("source", "0")
+    if not isinstance(source, str):
+        raise DeclarativeAnimationError(
+            f"expression curve 'source' must be str, got {type(source).__name__}",
+        )
+    try:
+        return evaluate_expression(source, scope)
+    except ExpressionError as err:
+        raise DeclarativeAnimationError(str(err)) from err
+
+
+def _curve_step(spec: dict[str, Any], scope: dict[str, float], t: float) -> float:
+    """Discrete jump from ``from`` to ``to`` at ``at`` (default 0.5).
+
+    Useful for cymbal-crash accent moves where the bone teleports to a
+    new pose on a beat instead of easing into it.
+    """
+    a, b = _from_to(spec, scope)
+    at = _resolve_scalar(spec.get("at", _HALF), scope)
+    return b if t >= at else a
+
+
+def _curve_quad_in(spec: dict[str, Any], scope: dict[str, float], t: float) -> float:
+    a, b = _from_to(spec, scope)
+    return a + (b - a) * (t * t)
+
+
+def _curve_quad_out(spec: dict[str, Any], scope: dict[str, float], t: float) -> float:
+    a, b = _from_to(spec, scope)
+    return a + (b - a) * (1.0 - (1.0 - t) ** 2)
+
+
+def _curve_cubic_in(spec: dict[str, Any], scope: dict[str, float], t: float) -> float:
+    a, b = _from_to(spec, scope)
+    return a + (b - a) * (t ** 3)
+
+
+def _curve_cubic_out(spec: dict[str, Any], scope: dict[str, float], t: float) -> float:
+    a, b = _from_to(spec, scope)
+    return a + (b - a) * (1.0 - (1.0 - t) ** 3)
+
+
+def _curve_back_out(spec: dict[str, Any], scope: dict[str, float], t: float) -> float:
+    """Penner ease-out-back: overshoot the target then settle on it.
+
+    The classic "snap past then ease back" feel of MMD pose hits. At
+    ``t=1`` the curve always lands exactly on ``to``; the overshoot is
+    visible somewhere around ``t≈0.7``. Larger ``overshoot`` → more
+    visible kick.
+    """
+    a, b = _from_to(spec, scope)
+    c1 = _resolve_scalar(spec.get("overshoot", _BACK_OUT_DEFAULT_OVERSHOOT), scope)
+    c2 = c1 + 1.0
+    eased = 1.0 + c2 * (t - 1.0) ** 3 + c1 * (t - 1.0) ** 2
+    return a + (b - a) * eased
+
+
+def _curve_pulse(spec: dict[str, Any], scope: dict[str, float], t: float) -> float:
+    """Bell-shaped excursion away from ``from`` toward ``to`` and back.
+
+    Output is ``from`` outside the window ``[center − width/2,
+    center + width/2]`` and reaches ``to`` at the window's centre.
+    The half-sine bell makes the excursion smooth on both sides — drop
+    a ``pulse`` on a beat to get a "thump" without manually authoring
+    two ease curves back to back.
+    """
+    a, b = _from_to(spec, scope)
+    center = _resolve_scalar(spec.get("center", _HALF), scope)
+    width = _resolve_scalar(spec.get("width", _HALF), scope)
+    half = width * _HALF
+    lo = center - half
+    if t <= lo or t >= center + half or width <= 0.0:
+        return a
+    progress = (t - lo) / width
+    bell = math.sin(progress * math.pi)
+    return a + (b - a) * bell
+
+
+_CURVE_HANDLERS: dict[str, Callable[[dict[str, Any], dict[str, float], float], float]] = {
+    "constant": _curve_constant,
+    "linear": _curve_linear,
+    "ease": _curve_ease,
+    "expression": _curve_expression,
+    "step": _curve_step,
+    "quad-in": _curve_quad_in,
+    "quad-out": _curve_quad_out,
+    "cubic-in": _curve_cubic_in,
+    "cubic-out": _curve_cubic_out,
+    "back-out": _curve_back_out,
+    "pulse": _curve_pulse,
+}
+
+
 def _resolve_value_curve(
     spec: Any, phase_t: float, scope: dict[str, float] | None = None,
 ) -> float:
     """Evaluate a per-phase value at normalised phase time ``phase_t`` ∈ [0,1].
 
     ``spec`` is either a scalar (number / symbolic constant / expression
-    string) or a dict with a ``kind`` field naming one of the supported
-    curves: ``constant``, ``linear``, ``ease``, ``expression``. The
-    ``expression`` kind takes a ``"source"`` string and evaluates it
-    via the safe AST DSL with access to ``elapsed``, ``phase_t``,
-    ``phase_elapsed`` and the math helpers.
+    string) or a dict with a ``kind`` field. Supported kinds are listed
+    in :data:`_CURVE_HANDLERS`; each handler is a small pure function so
+    the central dispatcher stays under the cyclomatic-complexity bound.
+
+    Linear / ease use ``from`` and ``to``. Expression takes a ``source``
+    string and evaluates it via the safe AST DSL with access to
+    ``elapsed`` / ``phase_t`` / ``phase_elapsed`` / math helpers. The
+    snappier curves (``quad-in/out``, ``cubic-in/out``, ``back-out``,
+    ``pulse``, ``step``) are pure-math interpolators authored for sharp
+    MMD-style accent hits — see each handler's docstring.
     """
     eval_scope = dict(scope) if scope else {}
     eval_scope.setdefault("phase_t", float(phase_t))
@@ -157,32 +292,13 @@ def _resolve_value_curve(
             f"value curve must be scalar or dict, got {type(spec).__name__}",
         )
     kind = spec.get("kind", "constant")
-    if kind == "constant":
-        return _resolve_scalar(spec.get("value", 0.0), eval_scope)
-    if kind == "linear":
-        a = _resolve_scalar(spec.get("from", 0.0), eval_scope)
-        b = _resolve_scalar(spec.get("to", 0.0), eval_scope)
-        return a + (b - a) * float(phase_t)
-    if kind == "ease":
-        a = _resolve_scalar(spec.get("from", 0.0), eval_scope)
-        b = _resolve_scalar(spec.get("to", 0.0), eval_scope)
-        t = float(phase_t)
-        eased = _HALF - _HALF * math.cos(t * math.pi)
-        return a + (b - a) * eased
-    if kind == "expression":
-        source = spec.get("source", "0")
-        if not isinstance(source, str):
-            raise DeclarativeAnimationError(
-                f"expression curve 'source' must be str, got {type(source).__name__}",
-            )
-        try:
-            return evaluate_expression(source, eval_scope)
-        except ExpressionError as err:
-            raise DeclarativeAnimationError(str(err)) from err
-    raise DeclarativeAnimationError(
-        f"unknown value-curve kind {kind!r}; expected one of "
-        "constant / linear / ease / expression",
-    )
+    handler = _CURVE_HANDLERS.get(kind)
+    if handler is None:
+        raise DeclarativeAnimationError(
+            f"unknown value-curve kind {kind!r}; expected one of "
+            f"{sorted(_CURVE_HANDLERS)}",
+        )
+    return handler(spec, eval_scope, float(phase_t))
 
 
 # --- Schema parsing ---------------------------------------------------------

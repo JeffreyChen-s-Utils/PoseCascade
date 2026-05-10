@@ -600,6 +600,83 @@ def test_physics_chains_parse_into_dict_of_floats() -> None:
     assert parsed.physics_chains["hair_b"]["stiffness"] == pytest.approx(2 * 3.14159265, abs=1e-3)
 
 
+def test_curve_step_returns_from_then_to_at_threshold() -> None:
+    """``step`` is the discrete-jump curve: ``from`` strictly below
+    the ``at`` threshold, ``to`` at or above it."""
+    from posecascade.scripting.declarative import _resolve_value_curve  # noqa: PLC0415
+    spec = {"kind": "step", "from": -1.0, "to": 1.0, "at": 0.4}
+    assert _resolve_value_curve(spec, 0.0) == pytest.approx(-1.0)
+    assert _resolve_value_curve(spec, 0.39) == pytest.approx(-1.0)
+    assert _resolve_value_curve(spec, 0.40) == pytest.approx(1.0)
+    assert _resolve_value_curve(spec, 1.0) == pytest.approx(1.0)
+    # Default threshold is 0.5.
+    spec_default = {"kind": "step", "from": 0.0, "to": 1.0}
+    assert _resolve_value_curve(spec_default, 0.49) == pytest.approx(0.0)
+    assert _resolve_value_curve(spec_default, 0.50) == pytest.approx(1.0)
+
+
+def test_curve_quad_and_cubic_in_out_endpoints_and_midpoint() -> None:
+    """Quadratic and cubic ease-in/-out curves anchor at the endpoints
+    and produce the expected midpoint values (0.25 / 0.75 for quad,
+    0.125 / 0.875 for cubic)."""
+    from posecascade.scripting.declarative import _resolve_value_curve  # noqa: PLC0415
+    base = {"from": 0.0, "to": 1.0}
+    cases = (
+        ({"kind": "quad-in", **base},   0.25),
+        ({"kind": "quad-out", **base},  0.75),
+        ({"kind": "cubic-in", **base},  0.125),
+        ({"kind": "cubic-out", **base}, 0.875),
+    )
+    for spec, mid in cases:
+        assert _resolve_value_curve(spec, 0.0) == pytest.approx(0.0, abs=1e-6), spec
+        assert _resolve_value_curve(spec, 1.0) == pytest.approx(1.0, abs=1e-6), spec
+        assert _resolve_value_curve(spec, 0.5) == pytest.approx(mid, abs=1e-6), spec
+
+
+def test_curve_back_out_overshoots_then_lands_on_target() -> None:
+    """``back-out`` lands exactly on ``to`` at t=1 and overshoots somewhere
+    inside the [0,1] interval (Penner's classic ease-out-back).
+    """
+    from posecascade.scripting.declarative import _resolve_value_curve  # noqa: PLC0415
+    spec = {"kind": "back-out", "from": 0.0, "to": 1.0}
+    assert _resolve_value_curve(spec, 0.0) == pytest.approx(0.0, abs=1e-6)
+    assert _resolve_value_curve(spec, 1.0) == pytest.approx(1.0, abs=1e-6)
+    # Somewhere in the upper half the value briefly exceeds 1.0 — that
+    # IS the visible overshoot. Use a coarse scan to find at least one.
+    samples = [_resolve_value_curve(spec, i / 100.0) for i in range(101)]
+    assert max(samples) > 1.01, (
+        f"back-out should overshoot above 1.0 with default coefficient; max={max(samples)}"
+    )
+    # Larger overshoot → more visible kick.
+    big = {"kind": "back-out", "from": 0.0, "to": 1.0, "overshoot": 4.0}
+    big_samples = [_resolve_value_curve(big, i / 100.0) for i in range(101)]
+    assert max(big_samples) > max(samples)
+
+
+def test_curve_pulse_zero_outside_window_and_peaks_at_center() -> None:
+    """``pulse`` returns ``from`` outside the window, ``to`` at the
+    window's centre, and the half-sine bell in between."""
+    from posecascade.scripting.declarative import _resolve_value_curve  # noqa: PLC0415
+    spec = {"kind": "pulse", "from": 0.0, "to": 2.0, "center": 0.5, "width": 0.4}
+    # Outside [0.3, 0.7] → from
+    assert _resolve_value_curve(spec, 0.0) == pytest.approx(0.0, abs=1e-6)
+    assert _resolve_value_curve(spec, 0.29) == pytest.approx(0.0, abs=1e-6)
+    assert _resolve_value_curve(spec, 0.71) == pytest.approx(0.0, abs=1e-6)
+    # At centre → to
+    assert _resolve_value_curve(spec, 0.5) == pytest.approx(2.0, abs=1e-3)
+    # Width 0 degenerate → always from (no division by zero).
+    degenerate = {"kind": "pulse", "from": 0.0, "to": 1.0, "width": 0.0}
+    assert _resolve_value_curve(degenerate, 0.5) == pytest.approx(0.0)
+
+
+def test_curve_unknown_kind_lists_supported_in_error() -> None:
+    """Typo'd ``kind`` raises with the supported list so the author
+    sees the new options without scrolling docs."""
+    from posecascade.scripting.declarative import _resolve_value_curve  # noqa: PLC0415
+    with pytest.raises(DeclarativeAnimationError, match="back-out"):
+        _resolve_value_curve({"kind": "qaud-in"}, 0.5)
+
+
 def test_parse_bones_section_accepts_per_axis_curves() -> None:
     """Minimal ``bones`` block parses; unknown axes raise."""
     doc = _minimal_doc()

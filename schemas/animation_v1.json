@@ -49,20 +49,42 @@
     },
 
     "value_curve": {
-      "description": "A scalar (constant), or a curve object that varies with phase_t in [0,1].",
+      "description": "A scalar (constant), or a curve object that varies with phase_t in [0,1]. Snappier kinds (quad-in/out, cubic-in/out, back-out, pulse, step) exist for MMD-style accent hits — see docs/declarative_animation.md.",
       "anyOf": [
         { "$ref": "#/$defs/scalar" },
         {
           "type": "object",
           "required": ["kind"],
           "properties": {
-            "kind": { "enum": ["constant", "linear", "ease", "expression"] },
+            "kind": {
+              "enum": [
+                "constant", "linear", "ease", "expression",
+                "step", "quad-in", "quad-out", "cubic-in", "cubic-out",
+                "back-out", "pulse"
+              ]
+            },
             "value": { "$ref": "#/$defs/scalar" },
             "from": { "$ref": "#/$defs/scalar" },
             "to": { "$ref": "#/$defs/scalar" },
             "source": {
               "type": "string",
               "description": "For kind='expression': inline expression evaluated each frame."
+            },
+            "at": {
+              "$ref": "#/$defs/scalar",
+              "description": "For kind='step': phase_t threshold (default 0.5). Value is 'from' below this, 'to' at or above it."
+            },
+            "overshoot": {
+              "$ref": "#/$defs/scalar",
+              "description": "For kind='back-out': Penner overshoot coefficient (default 1.70158)."
+            },
+            "center": {
+              "$ref": "#/$defs/scalar",
+              "description": "For kind='pulse': phase_t centre of the bell (default 0.5)."
+            },
+            "width": {
+              "$ref": "#/$defs/scalar",
+              "description": "For kind='pulse': total width of the bell window (default 0.5)."
             }
           }
         }

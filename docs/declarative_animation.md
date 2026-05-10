@@ -220,9 +220,38 @@ A curve is one of:
 - `{"kind": "constant", "value": ...}`.
 - `{"kind": "linear", "from": ..., "to": ...}` — interpolates
   uniformly over `phase_t`.
-- `{"kind": "ease", "from": ..., "to": ...}` — cosine ease.
+- `{"kind": "ease", "from": ..., "to": ...}` — cosine ease (smooth
+  start AND smooth end).
 - `{"kind": "expression", "source": "..."}` — evaluated each frame
   through the safe AST DSL.
+
+**Snappy curve kinds** (added for MMD-style accent hits — the soft
+sine ease is too gentle for "snap into pose on the beat" choreography):
+
+- `{"kind": "step", "from": ..., "to": ..., "at": 0.5}` — discrete
+  jump at `at` (default 0.5). Below the threshold the value is `from`;
+  at or above it, `to`. The cymbal-crash of curve kinds.
+- `{"kind": "quad-in" | "quad-out", "from": ..., "to": ...}` — `t²`
+  (slow start, abrupt end) and `1 − (1−t)²` (abrupt start, slow end).
+  Quad-out is the pose-hit standard: snap into the pose, then settle.
+- `{"kind": "cubic-in" | "cubic-out", "from": ..., "to": ...}` — same
+  shape as quad but sharper (`t³` / `1 − (1−t)³`). Use when quad still
+  feels mushy.
+- `{"kind": "back-out", "from": ..., "to": ..., "overshoot": 1.70158}`
+  — Penner ease-out-back. Snaps past `to` then settles back exactly on
+  it. The "land hard then rebound" feel of MMD pose hits. Default
+  overshoot matches MMD / After Effects; raise to 4–5 for a cartoonish
+  kick.
+- `{"kind": "pulse", "from": ..., "to": ..., "center": 0.5, "width": 0.5}`
+  — bell-shaped excursion: returns `from` outside the
+  `[center − width/2, center + width/2]` window, peaks at `to` at
+  `center`. One declaration replaces a "rise then fall" pair of ease
+  curves. Drop on a beat for a "thump" in/out without manual chaining.
+
+All snappy curves accept `from` / `to` (defaults 0). Step also takes
+`at`; back-out takes `overshoot`; pulse takes `center` / `width`. All
+parameter values go through the same scalar resolver as `from` / `to`,
+so symbolic constants and inline expressions work everywhere.
 
 ## Expression DSL
 
