@@ -409,6 +409,49 @@ class LyricLine:
 
 
 @dataclass(frozen=True)
+class ClothPieceSpec:
+    """Declarative cloth attachment.
+
+    ``mesh_node`` is the scene-tree node name whose mesh should be
+    simulated as cloth (the importer leaves a node per primitive — for
+    a Galaxia / VRoid avatar the skirt mesh is the one named after its
+    material like ``F00_001_01_Bottoms_01_CLOTH``). The other fields
+    forward straight into ``ClothHost.add_cloth_for_node`` — defaults
+    suit a draping skirt anchored at its hip-side top edge.
+    """
+
+    mesh_node: str
+    structural_stiffness: float = 0.85
+    bend_stiffness: float = 0.12
+    linear_damping: float = 0.985
+    rest_pull: float = 4.0
+    anchor_axis: int = 1
+    anchor_fraction: float = 0.15
+    anchor_mode: str = "top_axis"
+    iterations: int = 8
+    substeps: int = 2
+
+
+@dataclass(frozen=True)
+class ColliderSpec:
+    """Bone-following collider that pushes cloth vertices outside.
+
+    ``kind`` is ``"sphere"`` or ``"capsule"``. Sphere colliders track
+    one bone (``follow_bone``) — the collider's centre is mutated to
+    the bone's world position each frame. Capsule colliders need
+    ``end_bone`` too; the capsule spans the two bones' world
+    positions. ``radius`` plus the cloth's per-piece skin offset
+    determine the keep-out distance.
+    """
+
+    kind: str
+    follow_bone: str
+    radius: float
+    end_bone: str | None = None
+    skin_offset: float = 0.005
+
+
+@dataclass(frozen=True)
 class AudioSpec:
     """Audio attachment for a declarative animation.
 
@@ -467,6 +510,16 @@ class DeclarativeAnimation:
     # any descendant of the root with that name is detached from its
     # parent. Empty tuple → no detachment.
     hide_nodes: tuple[str, ...]
+    # Cloth pieces to register at start. Each entry binds a scene
+    # mesh node into the cloth solver so it sims as cloth (skirt /
+    # cape / tie / sleeve). Empty tuple → no cloth registration.
+    cloth_pieces: tuple[ClothPieceSpec, ...]
+    # Bone-following colliders for the cloth solver. Each entry tracks
+    # one (sphere) or two (capsule) bones — the collider geometry is
+    # mutated each frame to match the bones' world positions, so cloth
+    # naturally keeps clear of the body / arms / hands as the dance
+    # moves them. Empty tuple → no colliders.
+    colliders: tuple[ColliderSpec, ...]
 
 
 @dataclass
@@ -774,6 +827,8 @@ def parse_animation(document: dict[str, Any]) -> DeclarativeAnimation:
         audio=_parse_audio(document.get("audio")),
         lyrics=_parse_lyrics(document.get("lyrics"), bpm),
         hide_nodes=_parse_hide(document.get("hide")),
+        cloth_pieces=_parse_cloth(document.get("cloth")),
+        colliders=_parse_colliders(document.get("colliders")),
     )
 
 
@@ -986,6 +1041,84 @@ def _resolve_time_field(
     return float(entry[sec_key])
 
 
+_VALID_COLLIDER_KINDS = ("sphere", "capsule")
+
+
+def _parse_cloth(raw: Any) -> tuple[ClothPieceSpec, ...]:
+    """Validate the optional document-level ``cloth`` array."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise DeclarativeAnimationError("'cloth' must be an array of objects")
+    out: list[ClothPieceSpec] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise DeclarativeAnimationError(
+                "each cloth entry must be an object",
+            )
+        node = entry.get("mesh_node")
+        if not isinstance(node, str) or not node:
+            raise DeclarativeAnimationError(
+                "cloth entry needs a non-empty string 'mesh_node'",
+            )
+        out.append(ClothPieceSpec(
+            mesh_node=node,
+            structural_stiffness=float(entry.get("structural_stiffness", 0.85)),
+            bend_stiffness=float(entry.get("bend_stiffness", 0.12)),
+            linear_damping=float(entry.get("linear_damping", 0.985)),
+            rest_pull=float(entry.get("rest_pull", 4.0)),
+            anchor_axis=int(entry.get("anchor_axis", 1)),
+            anchor_fraction=float(entry.get("anchor_fraction", 0.15)),
+            anchor_mode=str(entry.get("anchor_mode", "top_axis")),
+            iterations=int(entry.get("iterations", 8)),
+            substeps=int(entry.get("substeps", 2)),
+        ))
+    return tuple(out)
+
+
+def _parse_colliders(raw: Any) -> tuple[ColliderSpec, ...]:
+    """Validate the optional document-level ``colliders`` array."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise DeclarativeAnimationError("'colliders' must be an array of objects")
+    out: list[ColliderSpec] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise DeclarativeAnimationError(
+                "each collider entry must be an object",
+            )
+        kind = entry.get("kind", "sphere")
+        if kind not in _VALID_COLLIDER_KINDS:
+            raise DeclarativeAnimationError(
+                f"collider kind {kind!r} not supported; expected one of "
+                f"{list(_VALID_COLLIDER_KINDS)}",
+            )
+        follow = entry.get("follow_bone")
+        if not isinstance(follow, str) or not follow:
+            raise DeclarativeAnimationError(
+                "collider entry needs a non-empty string 'follow_bone'",
+            )
+        end = entry.get("end_bone")
+        if kind == "capsule" and (not isinstance(end, str) or not end):
+            raise DeclarativeAnimationError(
+                "capsule collider needs a non-empty string 'end_bone'",
+            )
+        radius = entry.get("radius")
+        if not isinstance(radius, (int, float)) or radius <= 0:
+            raise DeclarativeAnimationError(
+                "collider 'radius' must be a positive number",
+            )
+        out.append(ColliderSpec(
+            kind=str(kind),
+            follow_bone=follow,
+            radius=float(radius),
+            end_bone=str(end) if end else None,
+            skin_offset=float(entry.get("skin_offset", 0.005)),
+        ))
+    return tuple(out)
+
+
 def _parse_hide(raw: Any) -> tuple[str, ...]:
     """Validate the optional document-level ``hide`` array."""
     if raw is None:
@@ -1066,9 +1199,16 @@ class DeclarativeRuntime:
     # Optional override of the ``AudioPlayer`` factory — tests pass a
     # stub that records play / pause without touching QtMultimedia.
     audio_player_factory: Any | None = None
+    # Optional reference to the engine's ``ClothHost``. When present
+    # AND the document declared cloth pieces / colliders, the runtime
+    # binds them at start and updates collider transforms per frame.
+    cloth_host: Any | None = None
     _audio_player: Any | None = field(default=None, init=False)
     _wall_time: Callable[[], float] | None = field(default=None, init=False)
     _last_lyric_text: str = field(default="", init=False)
+    # Bone-tracking colliders: list of (collider_obj, kind, head_node, tail_node).
+    # ``tail_node`` is None for spheres, a Node for capsules.
+    _bone_colliders: list[tuple[Any, str, Any, Any]] = field(default_factory=list)
     _root_drive: _BoneDrive | None = None
     _bone_drives: dict[str, _BoneDrive] = field(default_factory=dict)
     _phase_starts: list[float] = field(default_factory=list)
@@ -1150,6 +1290,11 @@ class DeclarativeRuntime:
         # Audio: load + start playback, optionally swap the time
         # provider so phases progress with the music's clock.
         self._setup_audio()
+        # Cloth + bone-following colliders: register cloth pieces
+        # (e.g. skirt) with the cloth host and create capsule / sphere
+        # colliders that track named bones each frame so cloth keeps
+        # clear of arms / hands as the dance moves them.
+        self._setup_cloth_and_colliders()
         # Cache leg-chain nodes for stride lock-target IK.
         for side, chain_names in (
             ("L", self.animation.rig.leg_chain_l),
@@ -1245,6 +1390,112 @@ class DeclarativeRuntime:
                 )
                 continue
             parent.remove_child(node)
+
+    def _setup_cloth_and_colliders(self) -> None:
+        """Bind cloth pieces + create bone-tracking colliders at start.
+
+        Both halves are gated on ``cloth_host`` being wired in (it
+        comes from the script API; tests can stub it). For each cloth
+        piece in the animation: locate the named scene node, call
+        ``cloth_host.add_cloth_for_node`` with the per-spec PBD
+        parameters. For each collider: instantiate the right shape
+        (``SphereCollider`` for one-bone targets, ``CapsuleCollider``
+        for two-bone targets) and stash the collider + bone-node refs
+        in ``_bone_colliders`` so :meth:`_update_bone_colliders` can
+        push their world positions into the collider geometry every
+        frame. Missing modules / nodes / bones are logged + skipped
+        rather than raising — same gating philosophy as audio / camera.
+        """
+        if self.cloth_host is None:
+            return
+        if not self.animation.cloth_pieces and not self.animation.colliders:
+            return
+        try:
+            from posecascade.animation.cloth import (  # noqa: PLC0415
+                CapsuleCollider,
+                SphereCollider,
+            )
+        except ImportError as err:
+            _log.warning("declarative: cloth module unavailable: %s", err)
+            return
+        for piece in self.animation.cloth_pieces:
+            node = self.scene.find(piece.mesh_node)
+            if node is None:
+                _log.warning(
+                    "declarative: cloth mesh node %r not in scene; skipping",
+                    piece.mesh_node,
+                )
+                continue
+            self.cloth_host.add_cloth_for_node(
+                node,
+                cloth_name=piece.mesh_node,
+                anchor_axis=piece.anchor_axis,
+                anchor_fraction=piece.anchor_fraction,
+                anchor_mode=piece.anchor_mode,
+                structural_stiffness=piece.structural_stiffness,
+                bend_stiffness=piece.bend_stiffness,
+                linear_damping=piece.linear_damping,
+                iterations=piece.iterations,
+                substeps=piece.substeps,
+                rest_pull=piece.rest_pull,
+            )
+        for spec in self.animation.colliders:
+            head_node = self.scene.find(spec.follow_bone)
+            if head_node is None:
+                _log.warning(
+                    "declarative: collider follow_bone %r not in scene; skipping",
+                    spec.follow_bone,
+                )
+                continue
+            tail_node = None
+            if spec.kind == "capsule":
+                tail_node = self.scene.find(spec.end_bone) if spec.end_bone else None
+                if tail_node is None:
+                    _log.warning(
+                        "declarative: capsule collider end_bone %r not in scene; "
+                        "skipping",
+                        spec.end_bone,
+                    )
+                    continue
+            head_pos = _world_position(head_node).astype(np.float32)
+            if spec.kind == "sphere":
+                collider = SphereCollider(
+                    center=head_pos.copy(),
+                    radius=spec.radius,
+                    skin_offset=spec.skin_offset,
+                )
+            else:
+                tail_pos = _world_position(tail_node).astype(np.float32)
+                collider = CapsuleCollider(
+                    a=head_pos.copy(),
+                    b=tail_pos.copy(),
+                    radius=spec.radius,
+                    skin_offset=spec.skin_offset,
+                )
+            self.cloth_host.add_collider(collider)
+            self._bone_colliders.append(
+                (collider, spec.kind, head_node, tail_node),
+            )
+
+    def _update_bone_colliders(self) -> None:
+        """Refresh each bone-following collider's geometry from its bones.
+
+        Called each frame after gait + bones have written this frame's
+        bone rotations, so the collider positions reflect the
+        post-pose world transforms — meaning the cloth solver sees the
+        arms / hands where they actually are this frame, not where
+        they were on the previous tick.
+        """
+        if not self._bone_colliders:
+            return
+        for collider, kind, head_node, tail_node in self._bone_colliders:
+            head_pos = _world_position(head_node).astype(np.float32)
+            if kind == "sphere":
+                collider.center = head_pos
+            else:
+                tail_pos = _world_position(tail_node).astype(np.float32)
+                collider.a = head_pos
+                collider.b = tail_pos
 
     def _setup_audio(self) -> None:
         """Optional audio-player attach + clock swap.
@@ -1420,20 +1671,25 @@ class DeclarativeRuntime:
         if output.morphs and self.morph_api is not None:
             for name, weight in output.morphs.items():
                 self.morph_api.set(str(name), float(weight))
-        # Tell the engine foot planter which way the body is facing so
-        # its post-tick toe-twist alignment doesn't fight the gait.
+        self._post_bone_writes(output, elapsed)
+
+    def _post_bone_writes(self, output: PhaseOutput, elapsed: float) -> None:
+        """Side-effect wiring that runs once all per-frame bone writes are
+        in: foot planter forward, camera lerp, lyric overlay, collider
+        bone-tracking. Pulled out of ``_update`` to keep its branch
+        count below the cyclomatic-complexity bound — each of the four
+        independent feature gates was a separate branch there.
+        """
         if self.floor_api is not None:
             self.floor_api.set_body_forward(
                 (math.sin(output.yaw), 0.0, math.cos(output.yaw)),
             )
-        # Camera animation runs independently of the character — it
-        # only consults wall-clock elapsed and the keyframe array, no
-        # per-phase scope. Skipped silently when no keyframes were
-        # declared or no Camera object was wired into the runtime.
         if self.animation.camera_keys and self.camera_api is not None:
             self._apply_camera(elapsed)
         if self.animation.lyrics and self.overlay_api is not None:
             self._apply_lyrics(elapsed)
+        if self._bone_colliders:
+            self._update_bone_colliders()
 
     def _apply_camera(self, elapsed: float) -> None:
         """Lerp between bracketing camera keyframes and write to ``camera_api``.
@@ -2206,6 +2462,7 @@ def load_animation(
         morph_api=api.get("morphs"),
         camera_api=api.get("camera"),
         overlay_api=api.get("overlay"),
+        cloth_host=api.get("cloth_host"),
         source_dir=source_dir,
     )
     return runtime.hooks()

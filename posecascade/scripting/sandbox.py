@@ -87,6 +87,11 @@ def build_api(
     }
     if physics_host is not None:
         api["physics_lite"] = PhysicsLite(physics_host, cloth_host=cloth_host)
+    if cloth_host is not None:
+        # Exposed directly so the declarative runtime can register
+        # cloth pieces + bone-following colliders without going
+        # through the simpler PhysicsLite façade.
+        api["cloth_host"] = cloth_host
     if foot_planter is not None:
         from posecascade.scripting.floor_api import FloorApi  # noqa: PLC0415
         api["floor"] = FloorApi(foot_planter, skins=skins, meshes=meshes)

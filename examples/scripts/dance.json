@@ -50,6 +50,36 @@
     "turbulence_frequency_hz": 1.2
   },
 
+  "cloth": [
+    {
+      "mesh_node": "Object_146",
+      "structural_stiffness": 0.85,
+      "bend_stiffness": 0.12,
+      "anchor_axis": 1,
+      "anchor_fraction": 0.18,
+      "anchor_mode": "top_axis",
+      "rest_pull": 4.0,
+      "iterations": 8
+    }
+  ],
+
+  "colliders": [
+    {"kind": "sphere", "follow_bone": "J_Bip_L_Hand", "radius": 0.06},
+    {"kind": "sphere", "follow_bone": "J_Bip_R_Hand", "radius": 0.06},
+    {
+      "kind": "capsule",
+      "follow_bone": "J_Bip_L_LowerArm",
+      "end_bone": "J_Bip_L_Hand",
+      "radius": 0.045
+    },
+    {
+      "kind": "capsule",
+      "follow_bone": "J_Bip_R_LowerArm",
+      "end_bone": "J_Bip_R_Hand",
+      "radius": 0.045
+    }
+  ],
+
   "phases": [
     {
       "name": "sway_in_place",

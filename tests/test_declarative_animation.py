@@ -1109,6 +1109,120 @@ def test_new_pose_presets_register_in_builtin_library() -> None:
     assert r["upper_arm_R"]["z_rad"] == pytest.approx(-l_["upper_arm_L"]["z_rad"])
 
 
+class _StubClothHost:
+    """In-memory ClothHost-shaped stub for the declarative cloth tests.
+
+    Captures add_cloth_for_node + add_collider calls so assertions can
+    verify what the runtime asked for without spinning up the real PBD
+    solver. Mirrors the surface :class:`DeclarativeRuntime` actually
+    consumes — nothing else.
+    """
+
+    def __init__(self) -> None:
+        self.cloth_calls: list[dict] = []
+        self.colliders: list = []
+
+    def add_cloth_for_node(self, node, **kwargs) -> None:  # noqa: ANN001
+        self.cloth_calls.append({"node": node.name, **kwargs})
+
+    def add_collider(self, collider) -> None:  # noqa: ANN001
+        self.colliders.append(collider)
+
+
+def test_cloth_pieces_register_with_cloth_host_on_start() -> None:
+    """Each entry in document-root 'cloth' calls
+    ``cloth_host.add_cloth_for_node`` with the named scene node + the
+    spec's parameters."""
+    scene = _build_minimal_scene()
+    cloth_host = _StubClothHost()
+    doc = _minimal_doc()
+    doc["cloth"] = [
+        {
+            "mesh_node": "chest",  # arbitrary existing node in minimal scene
+            "structural_stiffness": 0.7,
+            "bend_stiffness": 0.2,
+            "anchor_fraction": 0.20,
+        },
+    ]
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+        cloth_host=cloth_host,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    assert len(cloth_host.cloth_calls) == 1
+    call = cloth_host.cloth_calls[0]
+    assert call["node"] == "chest"
+    assert call["structural_stiffness"] == pytest.approx(0.7)
+    assert call["bend_stiffness"] == pytest.approx(0.2)
+    assert call["anchor_fraction"] == pytest.approx(0.20)
+
+
+def test_colliders_register_and_track_bones_per_frame() -> None:
+    """Sphere + capsule colliders are registered with the cloth host
+    at start, and their geometry is mutated each frame to follow the
+    named bones' world positions."""
+    scene = _build_minimal_scene()
+    cloth_host = _StubClothHost()
+    doc = _minimal_doc()
+    doc["colliders"] = [
+        {"kind": "sphere", "follow_bone": "head", "radius": 0.05},
+        {
+            "kind": "capsule",
+            # Use two bones that DO exist in the minimal test scene —
+            # the geometry doesn't matter for what this test checks
+            # (collider registers + tracks both endpoints).
+            "follow_bone": "upper_arm_L",
+            "end_bone": "upper_leg_L",
+            "radius": 0.04,
+        },
+    ]
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+        cloth_host=cloth_host,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    assert len(cloth_host.colliders) == 2
+    sphere, capsule = cloth_host.colliders
+    # Sphere has center; capsule has a + b. Initial positions match
+    # the bones' world positions captured at start.
+    assert hasattr(sphere, "center")
+    assert hasattr(capsule, "a") and hasattr(capsule, "b")
+    initial_center = np.array(sphere.center, dtype=np.float32).copy()
+    # Move the head bone — collider should follow on next update.
+    head = scene.find("head")
+    head.transform.set_translation(vec3(1.5, 0.0, 0.0))
+    hooks["update"](0.0)
+    moved_center = np.array(sphere.center, dtype=np.float32)
+    assert not np.allclose(initial_center, moved_center, atol=1e-3), (
+        f"sphere collider should track bone movement; was {initial_center}, "
+        f"now {moved_center}"
+    )
+    np.testing.assert_allclose(moved_center[0], 1.5, atol=1e-3)
+
+
+def test_collider_unknown_bone_logged_and_skipped() -> None:
+    """A collider with a follow_bone that doesn't exist is logged +
+    skipped so the rest of the dance still loads."""
+    scene = _build_minimal_scene()
+    cloth_host = _StubClothHost()
+    doc = _minimal_doc()
+    doc["colliders"] = [
+        {"kind": "sphere", "follow_bone": "no_such_bone", "radius": 0.05},
+    ]
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+        cloth_host=cloth_host,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    assert cloth_host.colliders == []
+
+
 def test_hide_detaches_named_nodes_from_scene() -> None:
     """Document-root 'hide' detaches each named node from its parent at
     start. Useful for character.glb files that bundle props (Stairs,
