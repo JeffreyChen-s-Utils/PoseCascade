@@ -8,10 +8,25 @@
 
   "rig": {
     "character_root": "Sketchfab_model",
-    "leg_chain_l": ["upper_leg_L", "lower_leg_L", "foot_L"],
-    "leg_chain_r": ["upper_leg_R", "lower_leg_R", "foot_R"],
+    "leg_chain_l": ["J_Bip_L_UpperLeg", "J_Bip_L_LowerLeg", "J_Bip_L_Foot"],
+    "leg_chain_r": ["J_Bip_R_UpperLeg", "J_Bip_R_LowerLeg", "J_Bip_R_Foot"],
     "knee_limit_min": [-2.4, 0, 0],
-    "knee_limit_max": [0.1, 0, 0]
+    "knee_limit_max": [0.1, 0, 0],
+    "body_bones": {
+      "hip":         "J_Bip_C_Hips",
+      "chest":       "J_Bip_C_UpperChest",
+      "head":        "J_Bip_C_Head",
+      "upper_arm_L": "J_Bip_L_UpperArm",
+      "upper_arm_R": "J_Bip_R_UpperArm",
+      "lower_arm_L": "J_Bip_L_LowerArm",
+      "lower_arm_R": "J_Bip_R_LowerArm",
+      "upper_leg_L": "J_Bip_L_UpperLeg",
+      "upper_leg_R": "J_Bip_R_UpperLeg",
+      "lower_leg_L": "J_Bip_L_LowerLeg",
+      "lower_leg_R": "J_Bip_R_LowerLeg",
+      "foot_L":      "J_Bip_L_Foot",
+      "foot_R":      "J_Bip_R_Foot"
+    }
   },
 
   "ground": {
