@@ -461,6 +461,12 @@ class DeclarativeAnimation:
     # text through ``api['overlay']``. Empty tuple → overlay never
     # touched (legacy / no-lyrics docs).
     lyrics: tuple[LyricLine, ...]
+    # Scene node names to detach from the scene tree at start. Useful
+    # when the loaded .glb bundles props (stairs, room, lights) that
+    # the dance shouldn't include. Names go through ``scene.find`` so
+    # any descendant of the root with that name is detached from its
+    # parent. Empty tuple → no detachment.
+    hide_nodes: tuple[str, ...]
 
 
 @dataclass
@@ -734,6 +740,7 @@ def parse_animation(document: dict[str, Any]) -> DeclarativeAnimation:
         camera_keys=_parse_camera_keys(document.get("camera"), bpm),
         audio=_parse_audio(document.get("audio")),
         lyrics=_parse_lyrics(document.get("lyrics"), bpm),
+        hide_nodes=_parse_hide(document.get("hide")),
     )
 
 
@@ -946,6 +953,22 @@ def _resolve_time_field(
     return float(entry[sec_key])
 
 
+def _parse_hide(raw: Any) -> tuple[str, ...]:
+    """Validate the optional document-level ``hide`` array."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise DeclarativeAnimationError("'hide' must be an array of node names")
+    out: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, str) or not entry:
+            raise DeclarativeAnimationError(
+                "each 'hide' entry must be a non-empty node-name string",
+            )
+        out.append(entry)
+    return tuple(out)
+
+
 def _parse_audio(raw: Any) -> AudioSpec | None:
     """Validate the optional document-level ``audio`` block."""
     if raw is None:
@@ -1038,6 +1061,11 @@ class DeclarativeRuntime:
 
     # ----- start ------------------------------------------------------------
     def _start(self) -> None:
+        # Detach any nodes the document asked us to hide BEFORE caching
+        # bones so the cache reflects what's actually in the tree. The
+        # bundled character.glb ships with a Stairs prop; a clean dance
+        # scene declares ``hide: ["Stairs"]`` to drop it.
+        self._detach_hidden_nodes()
         # Find the character root + cache its rest pose.
         root_name = self.animation.rig.character_root
         if root_name:
@@ -1099,6 +1127,32 @@ class DeclarativeRuntime:
             nodes = tuple(self.scene.find(n) for n in chain_names)
             if all(n is not None for n in nodes):
                 self._leg_chain_nodes[side] = nodes
+
+    def _detach_hidden_nodes(self) -> None:
+        """Remove every named node in ``animation.hide_nodes`` from its parent.
+
+        Names go through ``scene.find`` (whatever the parser already
+        uses elsewhere) so any descendant matching the name is detached.
+        Names that don't resolve are logged and skipped — covers the
+        case where the same dance.json runs against two scenes that
+        share most prop names but not all.
+        """
+        for name in self.animation.hide_nodes:
+            node = self.scene.find(name)
+            if node is None:
+                _log.debug(
+                    "declarative: hide target %r not in scene; skipping",
+                    name,
+                )
+                continue
+            parent = node.parent
+            if parent is None:
+                _log.warning(
+                    "declarative: cannot hide %r — has no parent (root?)",
+                    name,
+                )
+                continue
+            parent.remove_child(node)
 
     def _setup_audio(self) -> None:
         """Optional audio-player attach + clock swap.

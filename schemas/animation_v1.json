@@ -54,6 +54,11 @@
         }
       }
     },
+    "hide": {
+      "type": "array",
+      "description": "Names of scene nodes to detach from the scene tree at start. Useful when the loaded .glb bundles props (stairs, room, lights) the dance doesn't include. Names go through scene.find; unknown names are logged and skipped.",
+      "items": { "type": "string", "minLength": 1 }
+    },
     "audio": {
       "type": "object",
       "required": ["path"],

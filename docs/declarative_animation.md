@@ -209,6 +209,20 @@ default. Lines may overlap; the first matching entry in array order
 wins per frame (predictable). Documents without a `lyrics` field
 never touch the overlay machinery.
 
+### Hiding scene nodes
+
+```json
+"hide": ["Stairs", "Room"]
+```
+
+Document-root list of scene-node names to detach from the scene tree
+at start. Useful when the loaded .glb bundles props (stairs, room,
+lights, debug helpers) the dance shouldn't include. Names resolve
+via `scene.find`, so any descendant matching that name is detached
+from its parent. Unknown names are logged and skipped — same dance
+JSON can target several scenes with overlapping but non-identical
+prop sets.
+
 ### Audio playback (optional)
 
 ```json
