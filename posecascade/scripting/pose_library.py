@@ -69,18 +69,21 @@ BUILTIN_POSES: dict[str, PoseSpec] = {
     },
     # Soft reach to the right — R arm extends forward-right, body
     # turns + leans toward it, L arm relaxes slightly back. Shallower
-    # angle than ``point_R`` so it reads as "casual reach" not "stab".
-    # z_rad of -0.20 keeps the arm OUTSIDE the torso (no skirt clip).
+    # forward angle than ``point_R`` so it reads as "casual reach"
+    # not "stab", but z_rad pushes a full 0.55 outward (matching
+    # ``v_arms_up``) so the hand swings WIDE OF the torso instead
+    # of grazing the skirt — the previous 0.20 wasn't enough lateral
+    # offset on the bundled VRoid rig and the hand clipped through.
     "reach_R_soft": {
-        "upper_arm_R": {"x_rad": -0.85, "z_rad": -0.20},
-        "upper_arm_L": {"x_rad": 0.05, "z_rad": 0.30},
+        "upper_arm_R": {"x_rad": -0.85, "z_rad": -0.55},
+        "upper_arm_L": {"x_rad": 0.05, "z_rad": 0.45},
         "head": {"y_rad": -0.15, "x_rad": -0.05},
         "chest": {"x_rad": -0.04, "y_rad": -0.05},
     },
     # Mirror of reach_R_soft.
     "reach_L_soft": {
-        "upper_arm_L": {"x_rad": -0.85, "z_rad": 0.20},
-        "upper_arm_R": {"x_rad": 0.05, "z_rad": -0.30},
+        "upper_arm_L": {"x_rad": -0.85, "z_rad": 0.55},
+        "upper_arm_R": {"x_rad": 0.05, "z_rad": -0.45},
         "head": {"y_rad": 0.15, "x_rad": -0.05},
         "chest": {"x_rad": -0.04, "y_rad": 0.05},
     },

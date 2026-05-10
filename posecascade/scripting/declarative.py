@@ -478,6 +478,14 @@ class PhaseOutput:
     ``lean`` / ``translation`` are scalars / triples, ``bones`` maps
     bone keys to body-frame quaternion deltas (pre yaw-conjugation),
     ``morphs`` maps morph names to weights.
+
+    ``pose_blends`` is the gait-aware path: each entry is the FULL
+    body-frame target rotation for that bone PLUS a weight in [0,1]
+    saying how much to slerp from gait's current rotation toward that
+    target. weight = 0 leaves gait untouched (arm hangs naturally);
+    weight = 1 snaps to the pose target; in between produces a real
+    "slow rise from hang to pose" instead of the rest-pose-scaled
+    intermediate that a magnitude-scale weight would give.
     """
 
     yaw: float
@@ -485,6 +493,7 @@ class PhaseOutput:
     translation: tuple[float, float, float]
     bones: dict[str, np.ndarray] = field(default_factory=dict)
     morphs: dict[str, float] = field(default_factory=dict)
+    pose_blends: dict[str, tuple[np.ndarray, float]] = field(default_factory=dict)
 
 
 def _lerp_translation(
@@ -538,6 +547,30 @@ def _blend_phase_outputs(a: PhaseOutput, b: PhaseOutput, t: float) -> PhaseOutpu
         wa = a.morphs.get(key, 0.0)
         wb = b.morphs.get(key, 0.0)
         out.morphs[key] = wa + (wb - wa) * t
+    pose_keys = set(a.pose_blends) | set(b.pose_blends)
+    for key in pose_keys:
+        if key in a.pose_blends and key in b.pose_blends:
+            target_a, weight_a = a.pose_blends[key]
+            target_b, weight_b = b.pose_blends[key]
+            blended_target = quat_slerp(target_a, target_b, t)
+            blended_weight = weight_a + (weight_b - weight_a) * t
+        elif key in a.pose_blends:
+            target_a, weight_a = a.pose_blends[key]
+            # A's pose fades out as the cross-fade progresses; at t=1
+            # the bone is fully back to gait baseline. This produces a
+            # smooth "lower the arm" exit when the next phase doesn't
+            # touch this bone.
+            blended_target = target_a
+            blended_weight = weight_a * (1.0 - t)
+        else:
+            target_b, weight_b = b.pose_blends[key]
+            # Symmetric: B's pose fades in as the cross-fade progresses.
+            # At t=0 the bone is at gait baseline; at t=1 fully posed.
+            # This is what produces the "slow rise" the user wants when
+            # a sway phase blends into a reach phase.
+            blended_target = target_b
+            blended_weight = weight_b * t
+        out.pose_blends[key] = (blended_target, blended_weight)
     return out
 
 
@@ -1128,6 +1161,65 @@ class DeclarativeRuntime:
             if all(n is not None for n in nodes):
                 self._leg_chain_nodes[side] = nodes
 
+    def _apply_pose_blends(
+        self,
+        pose_blends: dict[str, tuple[np.ndarray, float]],
+        yaw: float,
+    ) -> None:
+        """Slerp each bone from its current rotation toward the pose target.
+
+        ``pose_blends[bone_key] = (target_body_quat, weight)``. The
+        target is yaw-conjugated to world, then composed with the
+        bone's rest rotation to get the desired final local rotation.
+        We then slerp from the bone's CURRENT local rotation (which
+        already includes the gait's writes from the same frame) toward
+        the desired final by ``weight``. ``weight = 0`` leaves gait
+        intact; ``weight = 1`` snaps to the pose; in between produces
+        the gait→pose interpolation that authors actually want when
+        they ramp pose_weight or ride a cross-fade between phases.
+        """
+        for bone_key, (target_body_quat, weight) in pose_blends.items():
+            if weight <= 0.0:
+                continue
+            bone_name = self.animation.rig.body_bones.get(bone_key, bone_key)
+            drive = self._bone_drives.get(bone_name)
+            if drive is None:
+                continue
+            target_world_delta = _yaw_to_world(target_body_quat, yaw)
+            target_local = self._world_delta_to_local(
+                drive.node, target_world_delta,
+            )
+            target_full = quat_mul(target_local, drive.rest_rotation)
+            current = drive.node.transform.rotation
+            blended = quat_slerp(
+                np.asarray(current, dtype=np.float32),
+                target_full.astype(np.float32, copy=False),
+                float(weight),
+            )
+            drive.node.transform.set_rotation(
+                blended.astype(np.float32, copy=False),
+            )
+
+    def _world_delta_to_local(
+        self, node: Any, delta_world: np.ndarray,
+    ) -> np.ndarray:
+        """Conjugate a world-frame delta into the bone's parent-local frame.
+
+        Same conjugation as ``_set_bone`` does inline; pulled out so
+        ``_apply_pose_blends`` can compose its target the same way
+        without duplicating the parent-chain walk.
+        """
+        parent_world = quat_axis_angle(vec3(1.0, 0.0, 0.0), 0.0)
+        chain: list[np.ndarray] = []
+        cur = node.parent
+        while cur is not None:
+            chain.append(cur.transform.rotation)
+            cur = cur.parent
+        for r in reversed(chain):
+            parent_world = quat_mul(parent_world, r)
+        parent_world_inv = quat_inverse(parent_world)
+        return quat_mul(quat_mul(parent_world_inv, delta_world), parent_world)
+
     def _detach_hidden_nodes(self) -> None:
         """Remove every named node in ``animation.hide_nodes`` from its parent.
 
@@ -1310,16 +1402,21 @@ class DeclarativeRuntime:
         # continuous across short crossfades anyway.
         if phase.gait is not None:
             self._apply_gait(phase.gait, phase_elapsed, phase_t, output.yaw)
-        # Bones override gait (applied after) — same rule as before, but
-        # now sourced from the (possibly blended) computed output. Skip
-        # bones whose delta is effectively identity (e.g. a pose preset
-        # with weight ≈ 0): writing identity here would overwrite gait's
-        # arm_hang and snap the bone back to its rest pose, which on a
-        # VRoid rig is a visible T-pose for the arms.
+        # Phase-explicit bones (from ``phase.bones``) override gait
+        # directly — same rule as before. Skip identity deltas so a
+        # zeroed-out axis curve doesn't snap the bone back to rest.
         for bone_key, body_delta in output.bones.items():
             if _is_identity_quat(body_delta):
                 continue
             self._set_bone(bone_key, _yaw_to_world(body_delta, output.yaw))
+        # Pose blends slerp from gait's CURRENT bone rotation toward
+        # the pose target by per-frame weight — produces a real "slow
+        # rise from hanging to posed" because at low weight the arm is
+        # still mostly at gait's hang. Cross-fade lerps the weight
+        # naturally so a sway → reach transition rises smoothly without
+        # passing through the rest pose.
+        if output.pose_blends:
+            self._apply_pose_blends(output.pose_blends, output.yaw)
         if output.morphs and self.morph_api is not None:
             for name, weight in output.morphs.items():
                 self.morph_api.set(str(name), float(weight))
@@ -1437,24 +1534,22 @@ class DeclarativeRuntime:
         skipped rather than aborting the whole frame so a single bad
         expression doesn't freeze the timeline.
 
-        Pose preset composition: if ``phase.pose`` names a preset in
-        the document's pose library, the preset's per-bone axis values
-        are loaded first (scaled by ``pose_weight`` evaluated each
-        frame), then ``phase.bones`` overrides on a per-axis basis —
-        the preset gives a starting silhouette, the phase tweaks any
-        axis it needs.
+        Pose preset composition splits into two outputs:
+        - ``pose_blends``: gait-aware path. The preset's full target
+          rotation is stored per bone alongside the per-frame pose
+          weight, so the runtime can slerp from gait's current rotation
+          (e.g. arm hanging) toward the pose target. Same semantic for
+          ``hand_L`` / ``hand_R`` (always full weight 1.0).
+        - ``bones``: hard override path. Anything the phase declared
+          explicitly under ``bones`` writes the rotation directly,
+          overriding both gait and pose blend on a per-axis basis.
         """
         yaw = _resolve_value_curve(phase.body_yaw_rad, phase_t, scope)
         lean = _resolve_value_curve(phase.body_lean_x_rad, phase_t, scope)
         translation = _resolve_translation(phase.body_translation, phase_t, scope)
         output = PhaseOutput(yaw=yaw, lean=lean, translation=translation)
-        merged = self._merged_bone_axes(phase, scope, phase_t)
-        for bone_key, axes in merged.items():
-            output.bones[bone_key] = _euler_zyx_quat(
-                axes.get("x_rad", 0.0),
-                axes.get("y_rad", 0.0),
-                axes.get("z_rad", 0.0),
-            )
+        self._fill_pose_blends(output, phase, scope, phase_t)
+        self._fill_explicit_bones(output, phase, scope, phase_t)
         for name, spec in phase.morphs.items():
             try:
                 weight = _resolve_value_curve(spec, phase_t, scope)
@@ -1466,22 +1561,23 @@ class DeclarativeRuntime:
             output.morphs[str(name)] = float(weight)
         return output
 
-    def _merged_bone_axes(
-        self, phase: Phase, scope: dict[str, float], phase_t: float,
-    ) -> dict[str, dict[str, float]]:
-        """Compose body pose + hand presets + phase.bones.
+    def _fill_pose_blends(
+        self,
+        output: PhaseOutput,
+        phase: Phase,
+        scope: dict[str, float],
+        phase_t: float,
+    ) -> None:
+        """Compute target body-frame quaternions for all pose / hand
+        preset bones plus their effective weight, into ``pose_blends``.
 
-        Layering (low → high precedence):
-        1. Body ``pose`` (scaled by ``pose_weight`` per frame)
-        2. ``hand_L`` preset (full strength)
-        3. ``hand_R`` preset (full strength)
-        4. ``phase.bones`` (per-axis override)
-
-        Returns a flat ``{bone_key: {axis: scalar}}`` dict ready to feed
-        into :func:`_euler_zyx_quat` per bone. Phase-level ``bones``
-        wins per-axis on every layer below.
+        Bones that the phase ALSO declared in ``phase.bones`` are
+        excluded from pose_blends — the explicit-bone path always wins
+        per-bone, so authors who want to override a single bone of a
+        preset can do so without inheriting any of the preset's
+        contribution to that bone.
         """
-        merged: dict[str, dict[str, float]] = {}
+        explicit_bones = set(phase.bones)
         if phase.pose:
             preset = self.animation.pose_library.get(phase.pose)
             if preset is None:
@@ -1490,8 +1586,12 @@ class DeclarativeRuntime:
                     phase.pose,
                 )
             else:
-                weight = _resolve_value_curve(phase.pose_weight, phase_t, scope)
-                _merge_preset_into(merged, preset, weight)
+                weight = float(
+                    _resolve_value_curve(phase.pose_weight, phase_t, scope),
+                )
+                _store_pose_targets(
+                    output.pose_blends, preset, weight, exclude=explicit_bones,
+                )
         for hand_field, side_label in (
             (phase.hand_l, "hand_L"), (phase.hand_r, "hand_R"),
         ):
@@ -1504,25 +1604,30 @@ class DeclarativeRuntime:
                     side_label, hand_field,
                 )
                 continue
-            _merge_preset_into(merged, hand_preset, 1.0)
+            _store_pose_targets(
+                output.pose_blends, hand_preset, 1.0, exclude=explicit_bones,
+            )
+
+    def _fill_explicit_bones(
+        self,
+        output: PhaseOutput,
+        phase: Phase,
+        scope: dict[str, float],
+        phase_t: float,
+    ) -> None:
+        """Evaluate ``phase.bones`` per-axis curves into ``output.bones``."""
         for bone_key, axes_spec in phase.bones.items():
             try:
-                bone_axes = {
-                    axis: _resolve_value_curve(
-                        axes_spec.get(axis, 0.0), phase_t, scope,
-                    )
-                    for axis in _BONE_AXES
-                    if axis in axes_spec
-                }
+                x = _resolve_value_curve(axes_spec.get("x_rad", 0.0), phase_t, scope)
+                y = _resolve_value_curve(axes_spec.get("y_rad", 0.0), phase_t, scope)
+                z = _resolve_value_curve(axes_spec.get("z_rad", 0.0), phase_t, scope)
             except DeclarativeAnimationError as err:
                 _log.warning(
                     "declarative: bones[%r] failed to evaluate: %s", bone_key, err,
                 )
                 continue
-            existing = merged.get(bone_key, {})
-            existing.update(bone_axes)
-            merged[bone_key] = existing
-        return merged
+            output.bones[bone_key] = _euler_zyx_quat(x, y, z)
+
 
     def _maybe_refresh_lock_targets(
         self, gait: dict[str, Any], phase_t: float,
@@ -1919,23 +2024,39 @@ def _phase_target_bones(
     return tuple(names)
 
 
-def _merge_preset_into(
-    merged: dict[str, dict[str, float]],
+def _store_pose_targets(
+    pose_blends: dict[str, tuple[np.ndarray, float]],
     preset: PoseSpec,
     weight: float,
+    *,
+    exclude: set[str] | None = None,
 ) -> None:
-    """Compose a preset's bone-axis scalars onto a running merge dict.
+    """Stash each preset bone's full-target body-frame quaternion + the
+    per-frame weight into ``pose_blends``.
 
-    Each axis value is scaled by ``weight``; subsequent layers can
-    overwrite per-axis. Mutates ``merged`` in place because the merge
-    operation is fundamentally accumulative — copying on each layer
-    would allocate one dict per phase per frame for no benefit.
+    The runtime applies these by slerping from the bone's current
+    rotation (which already has the gait applied) toward the target by
+    the weight — so weight 0 leaves gait alone, weight 1 fully poses
+    the bone, in between produces a real interpolation between hanging
+    and posed without ever passing through the rest pose. Multiple
+    presets writing the same bone (body pose + hand pose for fingers
+    on the same arm — rare but possible) keep the LAST one written;
+    this matches the previous merge order (body pose → hand_L → hand_R).
+
+    ``exclude`` is the set of bone keys the phase already drives via
+    its explicit ``phase.bones``; those bones skip the pose path so the
+    explicit override is the sole writer for them.
     """
+    excl = exclude or set()
     for bone_key, axes in preset.items():
-        existing = merged.get(bone_key, {})
-        for axis, value in axes.items():
-            existing[axis] = float(value) * weight
-        merged[bone_key] = existing
+        if str(bone_key) in excl:
+            continue
+        target = _euler_zyx_quat(
+            float(axes.get("x_rad", 0.0)),
+            float(axes.get("y_rad", 0.0)),
+            float(axes.get("z_rad", 0.0)),
+        )
+        pose_blends[str(bone_key)] = (target, float(weight))
 
 
 def _euler_zyx_quat(x: float, y: float, z: float) -> np.ndarray:

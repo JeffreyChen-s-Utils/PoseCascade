@@ -75,8 +75,8 @@
     {
       "name": "soft_reach_R",
       "duration_beats": 6,
-      "blend_in_sec": 0.6,
-      "blend_out_sec": 0.6,
+      "blend_in_sec": 1.2,
+      "blend_out_sec": 1.0,
       "pose": "reach_R_soft",
       "body": {
         "yaw_rad": -0.10,
@@ -103,8 +103,8 @@
     {
       "name": "soft_reach_L",
       "duration_beats": 6,
-      "blend_in_sec": 0.6,
-      "blend_out_sec": 0.6,
+      "blend_in_sec": 1.2,
+      "blend_out_sec": 1.0,
       "pose": "reach_L_soft",
       "body": {
         "yaw_rad": 0.10,
@@ -167,8 +167,8 @@
     {
       "name": "open_arms_lean_back",
       "duration_beats": 6,
-      "blend_in_sec": 0.6,
-      "blend_out_sec": 0.6,
+      "blend_in_sec": 1.2,
+      "blend_out_sec": 1.0,
       "pose": "arms_open",
       "body": {
         "yaw_rad": 0.0,
@@ -195,8 +195,8 @@
     {
       "name": "settle_with_clasp",
       "duration_beats": 6,
-      "blend_in_sec": 0.6,
-      "blend_out_sec": 0.6,
+      "blend_in_sec": 1.2,
+      "blend_out_sec": 1.0,
       "pose": "hands_clasp",
       "body": {
         "yaw_rad": 0.0,

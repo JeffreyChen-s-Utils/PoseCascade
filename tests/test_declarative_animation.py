@@ -1143,6 +1143,43 @@ def test_hide_unknown_node_is_skipped_quietly() -> None:
     hooks["start"]()  # must not raise
 
 
+def test_pose_weight_slerps_from_gait_baseline_not_rest() -> None:
+    """The new pose_blends pathway slerps from the bone's CURRENT
+    rotation (gait baseline) toward the pose target by weight. So at
+    weight 0.5 with gait writing arm_hang and pose writing arms_up,
+    the arm should land halfway between hanging and overhead — NOT
+    at half-arms-up-from-T-pose (the old magnitude-scale semantic)."""
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["phases"][0]["gait"] = {
+        "kind": "walking", "step_cycle_sec": 1.0,
+        "leg_swing_amplitude": 0.0, "knee_bend": 0.0,
+        "arm_swing_amplitude": 0.0, "arm_hang_rad": -1.45,
+    }
+    doc["phases"][0]["pose"] = {"name": "v_arms_up", "weight": 0.5}
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    arm_l = scene.find("upper_arm_L").transform.rotation
+    # At weight 0.5, the arm's rotation should still carry significant
+    # Z component from gait's arm_hang (the old magnitude-scale
+    # semantic would have lost most of the hang because it scaled the
+    # pose's rotation FROM rest, ignoring gait). |z| > 0.2 means hang
+    # is still meaningfully there alongside the pose's X contribution.
+    assert abs(arm_l[2]) > 0.2, (
+        f"arm_l should retain gait hang at weight=0.5; got {arm_l}"
+    )
+    # And the pose's X contribution is also clearly there (otherwise
+    # we're just running pure gait).
+    assert abs(arm_l[0]) > 0.2, (
+        f"arm_l should also carry pose contribution at weight=0.5; got {arm_l}"
+    )
+
+
 def test_pose_zero_weight_does_not_override_gait() -> None:
     """A pose with weight=0 must NOT clobber the gait's bone writes back
     to identity — that would snap arms to the rig's T-pose silhouette,
