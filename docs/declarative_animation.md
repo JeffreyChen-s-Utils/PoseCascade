@@ -187,6 +187,25 @@ pushed into the sandbox `morphs` API; the renderer / morph applier
 reads from there. Phases that don't declare `morphs` leave the
 weight map alone, so a previous phase's last weight persists.
 
+### Camera animation
+
+```json
+"camera": [
+  { "at_sec": 0.0, "position": [0, 1.4, 2.5], "target": [0, 1.2, 0], "fov": 50 },
+  { "at_beat": 16, "position": [1.5, 1.4, 2.0], "target": [0, 1.2, 0], "fov": 35 }
+]
+```
+
+Document-root keyframe array (sorted by time at parse time). Each
+keyframe carries `position` (3-vector), `target` (3-vector), optional
+`fov` in degrees, and either `at_sec` or `at_beat` (the beat form
+requires the document-level `bpm` to be > 0). The runtime lerps
+between bracketing keyframes per frame and writes onto the viewport's
+Camera. Times before the first keyframe / after the last hold to that
+keyframe — useful for "establishing shot held for N seconds, then
+animate". Documents that omit `camera` leave the Camera untouched
+(legacy / character-only demos).
+
 ### Pose presets
 
 ```json

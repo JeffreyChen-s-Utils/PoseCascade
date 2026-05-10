@@ -31,6 +31,21 @@
         "additionalProperties": { "$ref": "#/$defs/bone_axes_scalars" }
       }
     },
+    "camera": {
+      "type": "array",
+      "description": "Camera animation keyframes (sorted by time). Each entry: {at_sec | at_beat, position: [x,y,z], target: [x,y,z], fov?: degrees}. Runtime lerps between bracketing keyframes per frame and writes onto the viewport's Camera. Times before the first keyframe / after the last hold to that keyframe.",
+      "items": {
+        "type": "object",
+        "required": ["position", "target"],
+        "properties": {
+          "at_sec": { "type": "number", "minimum": 0 },
+          "at_beat": { "type": "number", "minimum": 0 },
+          "position": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+          "target": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+          "fov": { "type": "number", "exclusiveMinimum": 0 }
+        }
+      }
+    },
     "rig": { "$ref": "#/$defs/rig" },
     "ground": {
       "anyOf": [

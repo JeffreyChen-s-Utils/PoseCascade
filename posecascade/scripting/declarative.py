@@ -358,6 +358,16 @@ class Phase:
 
 
 @dataclass(frozen=True)
+class CameraKey:
+    """One camera animation keyframe."""
+
+    at_sec: float
+    position: tuple[float, float, float]
+    target: tuple[float, float, float]
+    fov_degrees: float | None = None
+
+
+@dataclass(frozen=True)
 class DeclarativeAnimation:
     name: str
     loop_sec: float
@@ -375,6 +385,12 @@ class DeclarativeAnimation:
     # document declared in ``pose_library`` (user entries win). Phases
     # reference these via ``pose: "name"``.
     pose_library: dict[str, PoseSpec]
+    # Camera keyframes (sorted by absolute time in seconds). Each entry
+    # carries position / target / fov_degrees. The runtime lerps
+    # between bracketing keyframes per frame and writes the result to
+    # the viewport's Camera (passed in via ``api['camera']``). Empty
+    # tuple → camera is left untouched.
+    camera_keys: tuple[CameraKey, ...]
 
 
 @dataclass
@@ -615,6 +631,7 @@ def parse_animation(document: dict[str, Any]) -> DeclarativeAnimation:
         wind=_parse_wind(document.get("wind")),
         bpm=bpm,
         pose_library=_parse_pose_library(document.get("pose_library")),
+        camera_keys=_parse_camera_keys(document.get("camera"), bpm),
     )
 
 
@@ -629,6 +646,65 @@ def _parse_physics_chains(raw: Any) -> dict[str, dict[str, float]]:
             )
         out[str(chain_name)] = {k: _resolve_scalar(v) for k, v in params.items()}
     return out
+
+
+def _parse_camera_keys(
+    raw: Any, bpm: float,
+) -> tuple[CameraKey, ...]:
+    """Validate the document-level ``camera`` keyframe array.
+
+    Each entry must specify ``at_sec`` OR ``at_beat`` (the latter
+    requires ``bpm > 0``). Position and target are 3-vectors of
+    numbers; ``fov`` (degrees) is optional and falls through to the
+    Camera's existing fov when missing. Output is sorted by time so
+    the per-frame bracket search is a simple bisect.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise DeclarativeAnimationError("'camera' must be an array of keyframes")
+    keys: list[CameraKey] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise DeclarativeAnimationError(
+                "each camera keyframe must be an object",
+            )
+        keys.append(_parse_camera_key(entry, bpm))
+    keys.sort(key=lambda k: k.at_sec)
+    return tuple(keys)
+
+
+def _parse_camera_key(entry: dict[str, Any], bpm: float) -> CameraKey:
+    has_sec = "at_sec" in entry
+    has_beat = "at_beat" in entry
+    if has_sec == has_beat:
+        raise DeclarativeAnimationError(
+            "camera keyframe needs exactly one of 'at_sec' or 'at_beat'",
+        )
+    if has_beat:
+        if bpm <= 0.0:
+            raise DeclarativeAnimationError(
+                "camera keyframe uses 'at_beat' but the document has no "
+                "positive 'bpm' to convert it",
+            )
+        at_sec = float(entry["at_beat"]) * _SECONDS_PER_MINUTE / bpm
+    else:
+        at_sec = float(entry["at_sec"])
+    position = _parse_vec3(entry.get("position"), "camera.position")
+    target = _parse_vec3(entry.get("target"), "camera.target")
+    fov_raw = entry.get("fov")
+    fov = float(fov_raw) if fov_raw is not None else None
+    return CameraKey(
+        at_sec=at_sec, position=position, target=target, fov_degrees=fov,
+    )
+
+
+def _parse_vec3(raw: Any, field_name: str) -> tuple[float, float, float]:
+    if not isinstance(raw, (list, tuple)) or len(raw) != _VEC3_LEN:
+        raise DeclarativeAnimationError(
+            f"{field_name} must be a 3-element array of numbers",
+        )
+    return (float(raw[0]), float(raw[1]), float(raw[2]))
 
 
 def _parse_pose_library(raw: Any) -> dict[str, PoseSpec]:
@@ -687,6 +763,12 @@ class DeclarativeRuntime:
     floor_api: Any | None = None
     physics_lite: Any | None = None
     morph_api: Any | None = None
+    # Optional reference to the viewport's Camera. When present AND the
+    # document declared a camera keyframe array, the runtime lerps
+    # between bracketing keyframes each frame and writes position /
+    # target / fov_degrees onto this object. ``None`` → camera is
+    # untouched (legacy / headless tests / character-only demos).
+    camera_api: Any | None = None
     _root_drive: _BoneDrive | None = None
     _bone_drives: dict[str, _BoneDrive] = field(default_factory=dict)
     _phase_starts: list[float] = field(default_factory=list)
@@ -885,6 +967,62 @@ class DeclarativeRuntime:
         if self.floor_api is not None:
             self.floor_api.set_body_forward(
                 (math.sin(output.yaw), 0.0, math.cos(output.yaw)),
+            )
+        # Camera animation runs independently of the character — it
+        # only consults wall-clock elapsed and the keyframe array, no
+        # per-phase scope. Skipped silently when no keyframes were
+        # declared or no Camera object was wired into the runtime.
+        if self.animation.camera_keys and self.camera_api is not None:
+            self._apply_camera(elapsed)
+
+    def _apply_camera(self, elapsed: float) -> None:
+        """Lerp between bracketing camera keyframes and write to ``camera_api``.
+
+        Position / target are 3-vector lerps; fov is a scalar lerp on
+        ``Camera.fov_degrees`` only when both bracketing keyframes set
+        a non-None fov (otherwise the camera's existing fov is left
+        untouched). Before the first keyframe or after the last,
+        snaps to the boundary keyframe's values — common pattern for
+        "hold this composition before/after the animated section".
+        """
+        keys = self.animation.camera_keys
+        if elapsed <= keys[0].at_sec:
+            self._write_camera(keys[0])
+            return
+        if elapsed >= keys[-1].at_sec:
+            self._write_camera(keys[-1])
+            return
+        # Bracket search — keys are pre-sorted by at_sec at parse time.
+        for idx in range(len(keys) - 1):
+            a = keys[idx]
+            b = keys[idx + 1]
+            if a.at_sec <= elapsed < b.at_sec:
+                span = b.at_sec - a.at_sec
+                t = (elapsed - a.at_sec) / span if span > 0 else 0.0
+                self._blend_camera_keys(a, b, t)
+                return
+
+    def _write_camera(self, key: CameraKey) -> None:
+        self.camera_api.position = vec3(*key.position)
+        self.camera_api.target = vec3(*key.target)
+        if key.fov_degrees is not None:
+            self.camera_api.fov_degrees = float(key.fov_degrees)
+
+    def _blend_camera_keys(
+        self, a: CameraKey, b: CameraKey, t: float,
+    ) -> None:
+        self.camera_api.position = vec3(
+            *_lerp_translation(a.position, b.position, t),
+        )
+        self.camera_api.target = vec3(
+            *_lerp_translation(a.target, b.target, t),
+        )
+        # Only lerp fov when both endpoints set it; otherwise leaving
+        # the camera's existing value alone matches "fov keyframes are
+        # optional" intent.
+        if a.fov_degrees is not None and b.fov_degrees is not None:
+            self.camera_api.fov_degrees = (
+                a.fov_degrees + (b.fov_degrees - a.fov_degrees) * t
             )
 
     def _build_scope(
@@ -1514,6 +1652,7 @@ def load_animation(
         floor_api=api.get("floor"),
         physics_lite=api.get("physics_lite"),
         morph_api=api.get("morphs"),
+        camera_api=api.get("camera"),
     )
     return runtime.hooks()
 

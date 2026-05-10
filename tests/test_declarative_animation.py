@@ -600,6 +600,109 @@ def test_physics_chains_parse_into_dict_of_floats() -> None:
     assert parsed.physics_chains["hair_b"]["stiffness"] == pytest.approx(2 * 3.14159265, abs=1e-3)
 
 
+class _StubCamera:
+    """Minimal Camera-shaped stub for declarative camera tests.
+
+    Captures position / target / fov_degrees writes so assertions can
+    verify what the runtime wrote without needing a real Camera class
+    from posecascade.render which pulls in numpy + Vec3 plumbing.
+    """
+
+    def __init__(self) -> None:
+        self.position = None
+        self.target = None
+        self.fov_degrees = 60.0
+
+
+def test_camera_keyframes_lerp_position_target_at_midpoint() -> None:
+    """Two camera keys at t=0 and t=2; at t=1 the runtime writes the
+    midpoint of position / target / fov."""
+    scene = _build_minimal_scene()
+    camera = _StubCamera()
+    doc = _minimal_doc()
+    doc["loop_sec"] = 4.0
+    doc["phases"][0]["duration_sec"] = 4.0
+    doc["camera"] = [
+        {"at_sec": 0.0, "position": [0, 0, 0], "target": [0, 0, 0], "fov": 50.0},
+        {"at_sec": 2.0, "position": [10, 5, -2], "target": [1, 1, 1], "fov": 70.0},
+    ]
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 1.0,
+        camera_api=camera,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    np.testing.assert_allclose(camera.position, [5.0, 2.5, -1.0], atol=1e-3)
+    np.testing.assert_allclose(camera.target, [0.5, 0.5, 0.5], atol=1e-3)
+    assert camera.fov_degrees == pytest.approx(60.0, abs=1e-3)
+
+
+def test_camera_holds_at_first_key_before_window() -> None:
+    """Times before the first keyframe snap to its values — same idea as
+    "establishing shot held for N seconds before the camera starts moving"."""
+    scene = _build_minimal_scene()
+    camera = _StubCamera()
+    doc = _minimal_doc()
+    doc["loop_sec"] = 4.0
+    doc["phases"][0]["duration_sec"] = 4.0
+    doc["camera"] = [
+        {"at_sec": 1.0, "position": [3, 0, 0], "target": [0, 0, 0]},
+        {"at_sec": 2.0, "position": [6, 0, 0], "target": [0, 0, 0]},
+    ]
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+        camera_api=camera,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    np.testing.assert_allclose(camera.position, [3, 0, 0], atol=1e-3)
+
+
+def test_camera_at_beat_resolves_via_bpm() -> None:
+    """Keyframes can be authored in beats when the document has a bpm."""
+    scene = _build_minimal_scene()
+    camera = _StubCamera()
+    doc = _minimal_doc()
+    doc["bpm"] = 120.0
+    doc["loop_sec"] = 4.0
+    doc["phases"][0]["duration_sec"] = 4.0
+    # 4 beats @ 120 bpm = 2.0 sec → keyframe at t = 2.0
+    doc["camera"] = [
+        {"at_beat": 0, "position": [0, 0, 0], "target": [0, 0, 0]},
+        {"at_beat": 4, "position": [4, 0, 0], "target": [0, 0, 0]},
+    ]
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 1.0,
+        camera_api=camera,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    np.testing.assert_allclose(camera.position, [2.0, 0.0, 0.0], atol=1e-3)
+
+
+def test_camera_untouched_when_no_keyframes() -> None:
+    """Documents with no camera array leave the Camera object alone."""
+    scene = _build_minimal_scene()
+    camera = _StubCamera()
+    camera.position = "untouched_sentinel"  # type: ignore[assignment]
+    doc = _minimal_doc()  # no camera field
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+        camera_api=camera,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    assert camera.position == "untouched_sentinel"
+
+
 def test_pose_preset_applies_builtin_bones() -> None:
     """Setting ``pose: 'v_arms_up'`` writes the built-in preset's bone
     rotations through the runtime — verified by sampling the head's
