@@ -85,9 +85,27 @@ _HALF = 0.5
 _DECLARATIVE_SCHEMA_VERSION = 1
 _VEC3_LEN = 3
 _YAW_NEGLIGIBLE = 1e-4
-# Identity rotation for cross-fade blending: a bone present in only one
-# of the two phases being blended is implicitly at rest in the other.
-_IDENTITY_QUAT = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+# Quaternion components below this magnitude count as "no rotation".
+# Used to skip applying a bone delta that's effectively identity —
+# avoids overriding the gait's arm_hang back to T-pose when a pose
+# preset's weight curve is ramping through zero. 1e-3 ≈ 0.06° error,
+# below visible threshold.
+_IDENTITY_QUAT_TOL = 1e-3
+
+
+def _is_identity_quat(q: np.ndarray, tol: float = _IDENTITY_QUAT_TOL) -> bool:
+    """True if ``q`` is effectively the identity rotation.
+
+    Identity is ``(0, 0, 0, ±1)``. The W sign is canonicalised by
+    taking ``abs`` since both ``q`` and ``-q`` represent the same
+    rotation.
+    """
+    return (
+        abs(float(q[0])) < tol
+        and abs(float(q[1])) < tol
+        and abs(float(q[2])) < tol
+        and abs(abs(float(q[3])) - 1.0) < tol
+    )
 # Default Z-tuck that pulls arms from T-pose down to a vertical hang.
 # Slightly less than ±π/2 so arms angle a few degrees out from the torso
 # instead of clipping the rib cage. Matches walk.py's ARM_HANG.
@@ -481,10 +499,18 @@ def _blend_phase_outputs(a: PhaseOutput, b: PhaseOutput, t: float) -> PhaseOutpu
     Body fields use scalar lerp. Bone deltas use quaternion slerp so
     intermediate rotations stay on the unit hypersphere (component lerp
     drifts off the manifold and the resulting bone wobble is visible).
-    Morph weights use scalar lerp. Bones / morphs that appear in only
-    one of the two outputs are blended against the implicit identity:
-    a missing bone means "rest pose" (identity quaternion); a missing
-    morph means weight 0.
+    Morph weights use scalar lerp.
+
+    **One-sided bones** (a bone present in only one of the two phases)
+    are emitted at the present phase's full strength rather than being
+    slerp'd toward the identity quaternion. Identity here means "rest
+    pose", which on a VRoid rig is a T-pose for arms — slerping toward
+    it produces a visible T-pose flash through the cross-fade window.
+    Keeping the present phase's value full means the gait's arm_hang
+    keeps showing on the side that doesn't drive that bone, and the
+    transition is one-shot at the boundary instead of two passes
+    through identity. Morphs absent from one side fall back to weight 0
+    (the natural neutral for a morph).
     """
     out = PhaseOutput(
         yaw=a.yaw + (b.yaw - a.yaw) * t,
@@ -493,9 +519,14 @@ def _blend_phase_outputs(a: PhaseOutput, b: PhaseOutput, t: float) -> PhaseOutpu
     )
     bone_keys = set(a.bones) | set(b.bones)
     for key in bone_keys:
-        qa = a.bones.get(key, _IDENTITY_QUAT)
-        qb = b.bones.get(key, _IDENTITY_QUAT)
-        out.bones[key] = quat_slerp(qa, qb, t)
+        qa = a.bones.get(key)
+        qb = b.bones.get(key)
+        if qa is not None and qb is not None:
+            out.bones[key] = quat_slerp(qa, qb, t)
+        elif qa is not None:
+            out.bones[key] = qa
+        else:
+            out.bones[key] = qb
     morph_keys = set(a.morphs) | set(b.morphs)
     for key in morph_keys:
         wa = a.morphs.get(key, 0.0)
@@ -1226,8 +1257,14 @@ class DeclarativeRuntime:
         if phase.gait is not None:
             self._apply_gait(phase.gait, phase_elapsed, phase_t, output.yaw)
         # Bones override gait (applied after) — same rule as before, but
-        # now sourced from the (possibly blended) computed output.
+        # now sourced from the (possibly blended) computed output. Skip
+        # bones whose delta is effectively identity (e.g. a pose preset
+        # with weight ≈ 0): writing identity here would overwrite gait's
+        # arm_hang and snap the bone back to its rest pose, which on a
+        # VRoid rig is a visible T-pose for the arms.
         for bone_key, body_delta in output.bones.items():
+            if _is_identity_quat(body_delta):
+                continue
             self._set_bone(bone_key, _yaw_to_world(body_delta, output.yaw))
         if output.morphs and self.morph_api is not None:
             for name, weight in output.morphs.items():

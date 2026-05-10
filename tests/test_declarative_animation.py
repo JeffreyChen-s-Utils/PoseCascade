@@ -1095,6 +1095,77 @@ def test_pose_phase_bones_override_preset_per_axis() -> None:
     np.testing.assert_allclose(head_rot[0], 0.0, atol=1e-3)
 
 
+def test_pose_zero_weight_does_not_override_gait() -> None:
+    """A pose with weight=0 must NOT clobber the gait's bone writes back
+    to identity — that would snap arms to the rig's T-pose silhouette,
+    visibly breaking the dance for one frame at the start of any
+    weight-from-zero ramp. Verify by running gait + a weight-0 pose
+    and checking the upper_arm bone keeps its gait-written rotation."""
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["phases"][0]["gait"] = {
+        "kind": "walking", "step_cycle_sec": 1.0,
+        "leg_swing_amplitude": 0.0, "knee_bend": 0.0,
+        "arm_swing_amplitude": 0.0, "arm_hang_rad": -1.45,
+    }
+    doc["phases"][0]["pose"] = {"name": "v_arms_up", "weight": 0.0}
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    arm_l = scene.find("upper_arm_L").transform.rotation
+    # arm_hang_rad of -1.45 produces a non-trivial Z-axis rotation on
+    # the arm (the "hang" component); arm should NOT be at identity.
+    assert abs(arm_l[2]) > 0.5, (
+        f"arm_l should keep gait's arm_hang rotation when pose weight=0; "
+        f"got {arm_l} (T-pose suspect)"
+    )
+
+
+def test_crossfade_one_sided_bone_keeps_full_value() -> None:
+    """A bone written by only ONE of the two crossfading phases must be
+    emitted at full strength — slerping toward identity would flash the
+    bone to its rest pose (T-pose for VRoid arms) through the blend
+    window, the symptom this fix targets."""
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["loop_sec"] = 2.0
+    doc["phases"] = [
+        {
+            "name": "a",
+            "duration_sec": 1.0,
+            "blend_out_sec": 0.4,
+            # NO bones — this phase relies on gait alone.
+            "gait": {
+                "kind": "walking", "step_cycle_sec": 1.0,
+                "leg_swing_amplitude": 0.0, "knee_bend": 0.0,
+                "arm_swing_amplitude": 0.0, "arm_hang_rad": -1.45,
+            },
+        },
+        {
+            "name": "b",
+            "duration_sec": 1.0,
+            "blend_in_sec": 0.4,
+            "bones": {"head": {"x_rad": 1.0}},
+        },
+    ]
+    parsed = parse_animation(doc)
+    t_now = [0.8]  # mid-blend
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: t_now[0],
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    # B's head x_rad=1.0 → quat[0] = sin(0.5). Slerp-with-identity would
+    # give sin(0.25) at t=0.5 (visibly different + briefly T-pose).
+    head_rot = scene.find("head").transform.rotation
+    np.testing.assert_allclose(head_rot[0], math.sin(0.5), atol=1e-3)
+
+
 def test_pose_unknown_name_logged_and_skipped() -> None:
     """An unknown pose name doesn't raise — it's logged and the
     runtime continues with no preset contribution."""
