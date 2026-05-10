@@ -600,6 +600,116 @@ def test_physics_chains_parse_into_dict_of_floats() -> None:
     assert parsed.physics_chains["hair_b"]["stiffness"] == pytest.approx(2 * 3.14159265, abs=1e-3)
 
 
+def _build_finger_scene() -> Scene:
+    """Minimal scene with body bones plus a few VRoid-style finger bones
+    so hand-preset tests have something to write to."""
+    scene = _build_minimal_scene()
+    root = scene.find("Sketchfab_model")
+    for finger in (
+        "J_Bip_L_Index1", "J_Bip_L_Index2", "J_Bip_L_Index3",
+        "J_Bip_L_Middle1", "J_Bip_L_Middle2", "J_Bip_L_Middle3",
+        "J_Bip_L_Ring1", "J_Bip_L_Ring2", "J_Bip_L_Ring3",
+        "J_Bip_L_Little1", "J_Bip_L_Little2", "J_Bip_L_Little3",
+        "J_Bip_L_Thumb1", "J_Bip_L_Thumb2", "J_Bip_L_Thumb3",
+        "J_Bip_R_Index1", "J_Bip_R_Index2", "J_Bip_R_Index3",
+        "J_Bip_R_Middle1", "J_Bip_R_Middle2", "J_Bip_R_Middle3",
+        "J_Bip_R_Ring1", "J_Bip_R_Ring2", "J_Bip_R_Ring3",
+        "J_Bip_R_Little1", "J_Bip_R_Little2", "J_Bip_R_Little3",
+        "J_Bip_R_Thumb1", "J_Bip_R_Thumb2", "J_Bip_R_Thumb3",
+    ):
+        root.add_child(_node(finger))
+    return scene
+
+
+def test_hand_preset_peace_curls_ring_and_little_fingers() -> None:
+    """``hand_L: 'peace_L'`` writes the 'peace' preset's finger curls
+    onto the L-hand bones."""
+    scene = _build_finger_scene()
+    doc = _minimal_doc()
+    doc["phases"][0]["hand_L"] = "peace_L"
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    # Ring + Little curl ~1.4 → quat[0] = sin(0.7) > 0.5
+    assert scene.find("J_Bip_L_Ring1").transform.rotation[0] > 0.5
+    assert scene.find("J_Bip_L_Little1").transform.rotation[0] > 0.5
+    # Index + Middle stay extended → identity rotation
+    np.testing.assert_allclose(
+        scene.find("J_Bip_L_Index1").transform.rotation[0], 0.0, atol=1e-3,
+    )
+
+
+def test_hand_user_library_overrides_builtin() -> None:
+    """A user-declared hand_library entry with the same name as a
+    built-in replaces it."""
+    scene = _build_finger_scene()
+    doc = _minimal_doc()
+    doc["hand_library"] = {
+        "peace_L": {"J_Bip_L_Index1": {"x_rad": 1.0}},
+    }
+    doc["phases"][0]["hand_L"] = "peace_L"
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    np.testing.assert_allclose(
+        scene.find("J_Bip_L_Index1").transform.rotation[0],
+        math.sin(0.5),
+        atol=1e-3,
+    )
+    # Other finger bones not in the user's preset are absent → at rest.
+    np.testing.assert_allclose(
+        scene.find("J_Bip_L_Ring1").transform.rotation[0], 0.0, atol=1e-3,
+    )
+
+
+def test_hand_preset_unknown_name_logged_and_skipped() -> None:
+    """Unknown hand preset name doesn't raise."""
+    scene = _build_finger_scene()
+    doc = _minimal_doc()
+    doc["phases"][0]["hand_L"] = "no_such_hand"
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)  # must not raise
+
+
+def test_hand_and_body_pose_compose_with_phase_bones_override() -> None:
+    """Body pose + hand preset + phase.bones layer correctly: hand
+    preset's finger writes survive, body pose's bones survive, and
+    phase.bones overrides any axis it explicitly sets."""
+    scene = _build_finger_scene()
+    doc = _minimal_doc()
+    doc["phases"][0]["pose"] = "v_arms_up"  # writes head, chest, upper_arm_*
+    doc["phases"][0]["hand_R"] = "fist_R"   # writes R-hand finger curls
+    doc["phases"][0]["bones"] = {
+        "head": {"x_rad": 0.0},  # override pose's head x_rad
+    }
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    # Head's x_rad overridden to 0 → quat[0] ≈ 0
+    np.testing.assert_allclose(
+        scene.find("head").transform.rotation[0], 0.0, atol=1e-3,
+    )
+    # R-hand fist curl on Index1 still applied
+    assert scene.find("J_Bip_R_Index1").transform.rotation[0] > 0.5
+
+
 class _StubCamera:
     """Minimal Camera-shaped stub for declarative camera tests.
 

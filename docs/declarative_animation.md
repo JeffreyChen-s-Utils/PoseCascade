@@ -245,6 +245,41 @@ or add new presets:
 
 User entries with the same name as a built-in win wholesale.
 
+### Hand / finger presets
+
+```json
+{
+  "name": "wave",
+  "duration_beats": 4,
+  "hand_L": "open_palm_L",
+  "hand_R": "peace_R"
+}
+```
+
+Per-phase `hand_L` / `hand_R` fields name finger presets from the
+document's hand library. Built-ins: `peace_L/R`, `fist_L/R`,
+`point_L/R`, `open_palm_L/R`, `thumbs_up_L/R` — each one writes the
+five-finger group on the named side using VRoid bone names
+(`J_Bip_{L,R}_{Index,Middle,Ring,Little,Thumb}{1,2,3}`). Documents
+may extend or override via a root-level `hand_library`:
+
+```json
+"hand_library": {
+  "rock_horns_L": {
+    "J_Bip_L_Index1": {"x_rad": 0.0},
+    "J_Bip_L_Little1": {"x_rad": 0.0},
+    "J_Bip_L_Middle1": {"x_rad": 1.4},
+    "J_Bip_L_Ring1": {"x_rad": 1.4},
+    "J_Bip_L_Thumb1": {"x_rad": 0.6}
+  }
+}
+```
+
+Composition order (low → high precedence): body `pose` → `hand_L` →
+`hand_R` → phase `bones`. So a phase can use a stock body pose, a
+stock hand pose, AND override a single finger axis without
+duplicating the rest of the rotations.
+
 ### Cross-fade between phases
 
 ```json

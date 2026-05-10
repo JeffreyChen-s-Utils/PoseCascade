@@ -31,6 +31,14 @@
         "additionalProperties": { "$ref": "#/$defs/bone_axes_scalars" }
       }
     },
+    "hand_library": {
+      "type": "object",
+      "description": "Custom finger / hand presets keyed by name. Same shape as pose_library; overlays the built-ins (peace_L/R, fist_L/R, point_L/R, open_palm_L/R, thumbs_up_L/R). Phases reference these via 'hand_L' / 'hand_R' fields.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": { "$ref": "#/$defs/bone_axes_scalars" }
+      }
+    },
     "camera": {
       "type": "array",
       "description": "Camera animation keyframes (sorted by time). Each entry: {at_sec | at_beat, position: [x,y,z], target: [x,y,z], fov?: degrees}. Runtime lerps between bracketing keyframes per frame and writes onto the viewport's Camera. Times before the first keyframe / after the last hold to that keyframe.",
@@ -262,6 +270,14 @@
             }
           ],
           "description": "Pose preset to apply UNDER the phase's bones (phase.bones overrides on a per-axis basis). Built-in names: v_arms_up, arms_to_chest, hip_pop_L, hip_pop_R, point_L, point_R, hands_clasp. The object form lets a phase ease the preset in/out via a per-frame weight curve."
+        },
+        "hand_L": {
+          "type": "string",
+          "description": "Left-hand finger preset name from the document's hand_library (built-ins: peace_L, fist_L, point_L, open_palm_L, thumbs_up_L). Composed after body pose, overridden per-axis by phase 'bones'."
+        },
+        "hand_R": {
+          "type": "string",
+          "description": "Right-hand finger preset name (built-ins: peace_R, fist_R, point_R, open_palm_R, thumbs_up_R)."
         }
       }
     },

@@ -57,7 +57,15 @@ from posecascade.scripting.expressions import (
     evaluate_expression,
     looks_like_expression,
 )
-from posecascade.scripting.pose_library import PoseSpec, merge_libraries
+from posecascade.scripting.hand_library import (
+    merge_libraries as merge_hand_libraries,
+)
+from posecascade.scripting.pose_library import (
+    PoseSpec,
+)
+from posecascade.scripting.pose_library import (
+    merge_libraries as merge_pose_libraries,
+)
 from posecascade.utils.logging import get_logger
 from posecascade.utils.math3d import (
     quat_from_axis_angle,
@@ -355,6 +363,12 @@ class Phase:
     # strength). Lets a phase ease in / out of a preset.
     pose: str | None
     pose_weight: Any  # value-curve spec; defaults to 1.0
+    # Optional finger / hand presets per side. Resolved against the
+    # document's hand library at runtime; identical machinery to body
+    # ``pose`` but a separate library namespace so finger poses don't
+    # collide with body silhouette presets.
+    hand_l: str | None
+    hand_r: str | None
 
 
 @dataclass(frozen=True)
@@ -385,6 +399,10 @@ class DeclarativeAnimation:
     # document declared in ``pose_library`` (user entries win). Phases
     # reference these via ``pose: "name"``.
     pose_library: dict[str, PoseSpec]
+    # Hand / finger preset library keyed by name (built-ins:
+    # peace_L/R, fist_L/R, point_L/R, open_palm_L/R, thumbs_up_L/R).
+    # Phases reference these via ``hand_L: "name"`` / ``hand_R: "name"``.
+    hand_library: dict[str, PoseSpec]
     # Camera keyframes (sorted by absolute time in seconds). Each entry
     # carries position / target / fov_degrees. The runtime lerps
     # between bracketing keyframes per frame and writes the result to
@@ -531,6 +549,8 @@ def _parse_phase(raw: dict[str, Any], bpm: float) -> Phase:
             "blend_in_sec / blend_out_sec must be non-negative",
         )
     pose, pose_weight = _parse_pose(raw.get("pose"))
+    hand_l = _parse_hand_field(raw.get("hand_L"), "hand_L")
+    hand_r = _parse_hand_field(raw.get("hand_R"), "hand_R")
     return Phase(
         name=str(raw.get("name", "")),
         duration_sec=_resolve_phase_duration(raw, bpm),
@@ -544,7 +564,21 @@ def _parse_phase(raw: dict[str, Any], bpm: float) -> Phase:
         blend_out_sec=blend_out,
         pose=pose,
         pose_weight=pose_weight,
+        hand_l=hand_l,
+        hand_r=hand_r,
     )
+
+
+def _parse_hand_field(raw: Any, field_name: str) -> str | None:
+    """Validate a phase's ``hand_L`` / ``hand_R`` field — string preset name."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise DeclarativeAnimationError(
+            f"phase '{field_name}' must be a preset name string, got "
+            f"{type(raw).__name__}",
+        )
+    return raw
 
 
 def _parse_pose(raw: Any) -> tuple[str | None, Any]:
@@ -631,6 +665,7 @@ def parse_animation(document: dict[str, Any]) -> DeclarativeAnimation:
         wind=_parse_wind(document.get("wind")),
         bpm=bpm,
         pose_library=_parse_pose_library(document.get("pose_library")),
+        hand_library=_parse_hand_library(document.get("hand_library")),
         camera_keys=_parse_camera_keys(document.get("camera"), bpm),
     )
 
@@ -707,33 +742,52 @@ def _parse_vec3(raw: Any, field_name: str) -> tuple[float, float, float]:
     return (float(raw[0]), float(raw[1]), float(raw[2]))
 
 
-def _parse_pose_library(raw: Any) -> dict[str, PoseSpec]:
-    """Validate the document-level ``pose_library`` and merge with built-ins."""
-    if raw is None:
-        return merge_libraries(None)
+def _parse_pose_dict(
+    raw: Any, field_name: str,
+) -> dict[str, PoseSpec]:
+    """Validate a ``{preset_name: {bone: {axis: scalar}}}`` document fragment.
+
+    Shared validation for both ``pose_library`` and ``hand_library`` —
+    same shape, same axis whitelist, same error message style. The
+    caller chooses which built-in library to merge the result into.
+    """
     if not isinstance(raw, dict):
-        raise DeclarativeAnimationError("'pose_library' must be an object")
-    user: dict[str, PoseSpec] = {}
+        raise DeclarativeAnimationError(f"'{field_name}' must be an object")
+    out: dict[str, PoseSpec] = {}
     for name, spec in raw.items():
         if not isinstance(spec, dict):
             raise DeclarativeAnimationError(
-                f"pose_library[{name!r}] must be an object of bones",
+                f"{field_name}[{name!r}] must be an object of bones",
             )
         bones: PoseSpec = {}
         for bone, axes in spec.items():
             if not isinstance(axes, dict):
                 raise DeclarativeAnimationError(
-                    f"pose_library[{name!r}][{bone!r}] must be an axis object",
+                    f"{field_name}[{name!r}][{bone!r}] must be an axis object",
                 )
             unknown = set(axes) - set(_BONE_AXES)
             if unknown:
                 raise DeclarativeAnimationError(
-                    f"pose_library[{name!r}][{bone!r}] has unknown axes "
+                    f"{field_name}[{name!r}][{bone!r}] has unknown axes "
                     f"{sorted(unknown)}; expected any of {list(_BONE_AXES)}",
                 )
             bones[str(bone)] = {str(k): float(v) for k, v in axes.items()}
-        user[str(name)] = bones
-    return merge_libraries(user)
+        out[str(name)] = bones
+    return out
+
+
+def _parse_pose_library(raw: Any) -> dict[str, PoseSpec]:
+    """Validate the document-level ``pose_library`` and merge with built-ins."""
+    if raw is None:
+        return merge_pose_libraries(None)
+    return merge_pose_libraries(_parse_pose_dict(raw, "pose_library"))
+
+
+def _parse_hand_library(raw: Any) -> dict[str, PoseSpec]:
+    """Validate the document-level ``hand_library`` and merge with built-ins."""
+    if raw is None:
+        return merge_hand_libraries(None)
+    return merge_hand_libraries(_parse_pose_dict(raw, "hand_library"))
 
 
 def _parse_wind(raw: Any) -> dict[str, Any] | None:
@@ -810,7 +864,10 @@ class DeclarativeRuntime:
         # composes a delta against the cached rest rotation.
         for phase in self.animation.phases:
             for bone_name in _phase_target_bones(
-                phase, self.animation.rig, self.animation.pose_library,
+                phase,
+                self.animation.rig,
+                self.animation.pose_library,
+                self.animation.hand_library,
             ):
                 if bone_name in self._bone_drives:
                     continue
@@ -1083,13 +1140,17 @@ class DeclarativeRuntime:
     def _merged_bone_axes(
         self, phase: Phase, scope: dict[str, float], phase_t: float,
     ) -> dict[str, dict[str, float]]:
-        """Compose preset (scaled by weight) with phase.bones overrides.
+        """Compose body pose + hand presets + phase.bones.
+
+        Layering (low → high precedence):
+        1. Body ``pose`` (scaled by ``pose_weight`` per frame)
+        2. ``hand_L`` preset (full strength)
+        3. ``hand_R`` preset (full strength)
+        4. ``phase.bones`` (per-axis override)
 
         Returns a flat ``{bone_key: {axis: scalar}}`` dict ready to feed
-        into :func:`_euler_zyx_quat` per bone. Phase-level bones win
-        per-axis: a preset's ``upper_arm_L`` ``z_rad`` keeps its value
-        unless the phase's ``bones.upper_arm_L`` also declares
-        ``z_rad``.
+        into :func:`_euler_zyx_quat` per bone. Phase-level ``bones``
+        wins per-axis on every layer below.
         """
         merged: dict[str, dict[str, float]] = {}
         if phase.pose:
@@ -1101,10 +1162,20 @@ class DeclarativeRuntime:
                 )
             else:
                 weight = _resolve_value_curve(phase.pose_weight, phase_t, scope)
-                for bone_key, axes in preset.items():
-                    merged[bone_key] = {
-                        axis: float(v) * weight for axis, v in axes.items()
-                    }
+                _merge_preset_into(merged, preset, weight)
+        for hand_field, side_label in (
+            (phase.hand_l, "hand_L"), (phase.hand_r, "hand_R"),
+        ):
+            if not hand_field:
+                continue
+            hand_preset = self.animation.hand_library.get(hand_field)
+            if hand_preset is None:
+                _log.warning(
+                    "declarative: %s preset %r not in hand_library; skipping",
+                    side_label, hand_field,
+                )
+                continue
+            _merge_preset_into(merged, hand_preset, 1.0)
         for bone_key, axes_spec in phase.bones.items():
             try:
                 bone_axes = {
@@ -1487,15 +1558,18 @@ def _gait_target_bones(gait: dict[str, Any], rig: RigBindings) -> tuple[str, ...
 
 
 def _phase_target_bones(
-    phase: Phase, rig: RigBindings, pose_library: dict[str, PoseSpec] | None = None,
+    phase: Phase,
+    rig: RigBindings,
+    pose_library: dict[str, PoseSpec] | None = None,
+    hand_library: dict[str, PoseSpec] | None = None,
 ) -> tuple[str, ...]:
     """All bone names a phase needs rest rotations cached for.
 
     Union of the gait's reset-set, any bone keyed in ``phase.bones``,
-    and any bone driven by the phase's pose preset (when the preset is
-    present in the document's pose_library). All go through the rig's
-    alias map so authors can rename bones in one place without touching
-    every phase.
+    and any bone driven by the phase's body / hand presets (when the
+    presets are present in the document's libraries). All go through
+    the rig's alias map so authors can rename bones in one place
+    without touching every phase.
     """
     names: set[str] = set()
     if phase.gait is not None:
@@ -1507,7 +1581,32 @@ def _phase_target_bones(
         if preset is not None:
             for bone_key in preset:
                 names.add(rig.body_bones.get(bone_key, bone_key))
+    for hand_name in (phase.hand_l, phase.hand_r):
+        if hand_name and hand_library is not None:
+            hand_preset = hand_library.get(hand_name)
+            if hand_preset is not None:
+                for bone_key in hand_preset:
+                    names.add(rig.body_bones.get(bone_key, bone_key))
     return tuple(names)
+
+
+def _merge_preset_into(
+    merged: dict[str, dict[str, float]],
+    preset: PoseSpec,
+    weight: float,
+) -> None:
+    """Compose a preset's bone-axis scalars onto a running merge dict.
+
+    Each axis value is scaled by ``weight``; subsequent layers can
+    overwrite per-axis. Mutates ``merged`` in place because the merge
+    operation is fundamentally accumulative — copying on each layer
+    would allocate one dict per phase per frame for no benefit.
+    """
+    for bone_key, axes in preset.items():
+        existing = merged.get(bone_key, {})
+        for axis, value in axes.items():
+            existing[axis] = float(value) * weight
+        merged[bone_key] = existing
 
 
 def _euler_zyx_quat(x: float, y: float, z: float) -> np.ndarray:
