@@ -44,21 +44,22 @@
   },
 
   "wind": {
-    "direction": [1.0, 0.0, 0.3],
-    "speed": 0.15,
-    "turbulence_amplitude": 0.05,
+    "direction": [1.0, 0.0, 0.0],
+    "speed": 0.08,
+    "turbulence_amplitude": 0.04,
     "turbulence_frequency_hz": 1.2
   },
 
   "cloth": [
     {
       "mesh_node": "Object_146",
-      "structural_stiffness": 0.90,
-      "bend_stiffness": 0.18,
+      "track_bone": "J_Bip_C_Hips",
+      "structural_stiffness": 0.92,
+      "bend_stiffness": 0.20,
       "anchor_axis": 1,
       "anchor_fraction": 0.32,
       "anchor_mode": "top_axis",
-      "rest_pull": 8.0,
+      "rest_pull": 12.0,
       "iterations": 10
     }
   ],

@@ -418,6 +418,13 @@ class ClothPieceSpec:
     material like ``F00_001_01_Bottoms_01_CLOTH``). The other fields
     forward straight into ``ClothHost.add_cloth_for_node`` — defaults
     suit a draping skirt anchored at its hip-side top edge.
+
+    ``track_bone`` is optional. When set, the runtime mutates each
+    anchored vertex's position each frame to follow that bone's world
+    transform — so a skirt anchored to the hip waistband stays glued
+    to the hip even when the dance rotates the hip bone (which the
+    cloth's static world-frame would otherwise miss because the mesh
+    node isn't parented to that bone in the imported scene tree).
     """
 
     mesh_node: str
@@ -430,6 +437,7 @@ class ClothPieceSpec:
     anchor_mode: str = "top_axis"
     iterations: int = 8
     substeps: int = 2
+    track_bone: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1061,6 +1069,11 @@ def _parse_cloth(raw: Any) -> tuple[ClothPieceSpec, ...]:
             raise DeclarativeAnimationError(
                 "cloth entry needs a non-empty string 'mesh_node'",
             )
+        track = entry.get("track_bone")
+        if track is not None and (not isinstance(track, str) or not track):
+            raise DeclarativeAnimationError(
+                "cloth.track_bone must be a non-empty string when set",
+            )
         out.append(ClothPieceSpec(
             mesh_node=node,
             structural_stiffness=float(entry.get("structural_stiffness", 0.85)),
@@ -1072,6 +1085,7 @@ def _parse_cloth(raw: Any) -> tuple[ClothPieceSpec, ...]:
             anchor_mode=str(entry.get("anchor_mode", "top_axis")),
             iterations=int(entry.get("iterations", 8)),
             substeps=int(entry.get("substeps", 2)),
+            track_bone=str(track) if track else None,
         ))
     return tuple(out)
 
@@ -1209,6 +1223,11 @@ class DeclarativeRuntime:
     # Bone-tracking colliders: list of (collider_obj, kind, head_node, tail_node).
     # ``tail_node`` is None for spheres, a Node for capsules.
     _bone_colliders: list[tuple[Any, str, Any, Any]] = field(default_factory=list)
+    # Cloth pieces whose anchor verts follow a bone each frame.
+    # Tuple is (piece, bone_node, anchor_indices, offsets_in_bone_local).
+    _cloth_anchor_followers: list[tuple[Any, Any, np.ndarray, np.ndarray]] = field(
+        default_factory=list,
+    )
     _root_drive: _BoneDrive | None = None
     _bone_drives: dict[str, _BoneDrive] = field(default_factory=dict)
     _phase_starts: list[float] = field(default_factory=list)
@@ -1426,7 +1445,7 @@ class DeclarativeRuntime:
                     piece.mesh_node,
                 )
                 continue
-            self.cloth_host.add_cloth_for_node(
+            cloth_piece = self.cloth_host.add_cloth_for_node(
                 node,
                 cloth_name=piece.mesh_node,
                 anchor_axis=piece.anchor_axis,
@@ -1439,6 +1458,7 @@ class DeclarativeRuntime:
                 substeps=piece.substeps,
                 rest_pull=piece.rest_pull,
             )
+            self._maybe_register_anchor_follower(piece, cloth_piece)
         for spec in self.animation.colliders:
             head_node = self.scene.find(spec.follow_bone)
             if head_node is None:
@@ -1476,6 +1496,77 @@ class DeclarativeRuntime:
             self._bone_colliders.append(
                 (collider, spec.kind, head_node, tail_node),
             )
+
+    def _maybe_register_anchor_follower(
+        self, spec: ClothPieceSpec, cloth_piece: Any,
+    ) -> None:
+        """Capture each anchored vertex's offset in the track-bone's local
+        frame so :meth:`_update_cloth_anchors` can rebuild the world
+        position from the bone's current transform every frame.
+
+        Skips silently when the spec has no track bone, the bone isn't
+        in the scene, or the cloth host returned no piece (the latter
+        happens for stub cloth hosts in tests — anchor following has
+        nothing to track in that case).
+        """
+        if spec.track_bone is None or cloth_piece is None:
+            return
+        bone_node = self.scene.find(spec.track_bone)
+        if bone_node is None:
+            _log.warning(
+                "declarative: cloth.track_bone %r not in scene; skipping",
+                spec.track_bone,
+            )
+            return
+        # Anchored verts are the ones with inverse_mass == 0 by the
+        # cloth solver's convention; capture their indices once.
+        anchor_indices = np.flatnonzero(
+            np.asarray(cloth_piece.inverse_masses, dtype=np.float32) == 0.0,
+        )
+        if anchor_indices.size == 0:
+            return
+        bone_world_start = _world_matrix(bone_node)
+        bone_world_inv = np.linalg.inv(bone_world_start).astype(np.float32, copy=False)
+        anchored_world = np.asarray(
+            cloth_piece.positions[anchor_indices], dtype=np.float32,
+        )
+        # Convert each anchored world position into bone-local frame:
+        # offset_local = bone_world_inv @ [pos.x, pos.y, pos.z, 1]
+        homog = np.column_stack(
+            [anchored_world, np.ones((anchored_world.shape[0], 1), dtype=np.float32)],
+        )
+        offsets_local = (homog @ bone_world_inv.T)[:, :3].astype(np.float32, copy=False)
+        self._cloth_anchor_followers.append(
+            (cloth_piece, bone_node, anchor_indices, offsets_local),
+        )
+
+    def _update_cloth_anchors(self) -> None:
+        """Move each tracked piece's anchor verts to the bone's current frame.
+
+        Uses each frame's parent-chain world matrix on the bone — same
+        transform the renderer would have skinned the body mesh with —
+        so the anchored skirt waistband stays glued to the hip even
+        when the dance rotates the hip bone (which the cloth's static
+        world frame would otherwise miss because the skirt mesh node
+        isn't parented to that bone in the imported scene tree).
+        """
+        if not self._cloth_anchor_followers:
+            return
+        for piece, bone_node, indices, offsets_local in self._cloth_anchor_followers:
+            bone_world = _world_matrix(bone_node)
+            # Transform offsets_local back into world: world = bone_world @ [off, 1]
+            homog = np.column_stack(
+                [offsets_local, np.ones((offsets_local.shape[0], 1), dtype=np.float32)],
+            )
+            new_world = (homog @ bone_world.T)[:, :3].astype(np.float32, copy=False)
+            piece.positions[indices] = new_world
+            # Suppress velocity kick: prev_positions matches new so the
+            # next Verlet step doesn't see a teleport.
+            piece.prev_positions[indices] = new_world
+            # Updating rest_positions so the rest_pull on neighbouring
+            # non-anchored verts pulls them toward the body's CURRENT
+            # rest pose, not the body-at-init pose.
+            piece.rest_positions[indices] = new_world
 
     def _update_bone_colliders(self) -> None:
         """Refresh each bone-following collider's geometry from its bones.
@@ -1690,6 +1781,8 @@ class DeclarativeRuntime:
             self._apply_lyrics(elapsed)
         if self._bone_colliders:
             self._update_bone_colliders()
+        if self._cloth_anchor_followers:
+            self._update_cloth_anchors()
 
     def _apply_camera(self, elapsed: float) -> None:
         """Lerp between bracketing camera keyframes and write to ``camera_api``.
@@ -2354,13 +2447,24 @@ def _yaw_to_world(body_delta: np.ndarray, yaw: float) -> np.ndarray:
     return quat_mul(yaw_q, quat_mul(body_delta, yaw_inv))
 
 
-def _world_position(node: Any) -> np.ndarray:
-    """Compose ``node``'s parent chain to get its world-space origin."""
+def _world_matrix(node: Any) -> np.ndarray:
+    """Compose ``node``'s full parent chain into a 4x4 world matrix.
+
+    Mirrors ``_world_position`` but returns the entire transform —
+    needed by cloth anchor tracking which has to rotate / translate
+    per-vertex offsets, not just read an origin.
+    """
     matrix = node.transform.to_matrix()
     parent = node.parent
     while parent is not None:
         matrix = parent.transform.to_matrix() @ matrix
         parent = parent.parent
+    return np.asarray(matrix, dtype=np.float32)
+
+
+def _world_position(node: Any) -> np.ndarray:
+    """Compose ``node``'s parent chain to get its world-space origin."""
+    matrix = _world_matrix(node)
     return np.array([matrix[0, 3], matrix[1, 3], matrix[2, 3]], dtype=np.float64)
 
 
