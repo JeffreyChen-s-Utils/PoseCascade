@@ -1,0 +1,10 @@
+{
+  "$schema": "https://modelcontextprotocol.io/schema/server-config.json",
+  "mcpServers": {
+    "posecascade": {
+      "command": "posecascade-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}

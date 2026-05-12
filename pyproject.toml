@@ -24,9 +24,18 @@ dev = [
     "bandit>=1.7",
     "scikit-image>=0.24",
 ]
+# ``ai`` ships the Model Context Protocol server + its dependencies so
+# MCP-aware LLM agents can drive the engine. Install with
+# ``pip install -e .[ai]`` — then the ``posecascade-mcp`` console
+# script lands on PATH and ``.mcp.json`` lights up automatically.
+ai = [
+    "mcp>=1.0",
+    "jsonschema>=4.0",
+]
 
 [project.scripts]
 posecascade = "posecascade.__main__:main"
+posecascade-mcp = "posecascade.mcp.server:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
