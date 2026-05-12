@@ -5,6 +5,10 @@ __pycache__/
 
 # C extensions
 *.so
+*.pyd
+# Cython build artefacts — the .c file is generated from the .pyx source
+# at build time by cythonize(). The .pyx is the source of truth.
+posecascade/animation/_cloth_kernels.c
 
 # Distribution / packaging
 .Python

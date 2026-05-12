@@ -1,0 +1,20 @@
+# Files included in the source distribution (``python -m build --sdist``).
+#
+# The Cython kernel ships as ``.pyx`` source so cibuildwheel / a downstream
+# ``pip install`` can cythonize + compile it on the target platform. The
+# generated ``.c`` and the compiled ``.pyd``/``.so`` are intentionally NOT
+# bundled in the sdist — they're platform-specific build artefacts that
+# belong in the wheel, not the source tarball.
+include LICENSE
+include README.md
+include pyproject.toml
+include setup.py
+recursive-include posecascade/animation *.pyx
+recursive-include shaders *.vert *.frag *.geom *.comp
+recursive-include schemas *.json
+graft tests
+exclude **/__pycache__
+global-exclude *.c *.so *.pyd *.pyc
+prune build
+prune dist
+prune .venv

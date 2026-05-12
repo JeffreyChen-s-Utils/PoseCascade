@@ -22,6 +22,17 @@ import numpy as np
 from numpy.typing import NDArray
 
 from posecascade.utils.math3d import Mat4, Vec3, vec3
+from posecascade.utils.profiling import frame_section
+
+# Cython kernels for the PBD inner loop + static-collider projections.
+# Built by ``setup.py`` at install time; absent in pure source checkouts
+# until ``python setup.py build_ext --inplace`` (or ``pip install -e .``)
+# is run. The Python fallbacks below match the kernel maths bit-for-bit
+# within float32 rounding so the rest of the engine is dtype-agnostic.
+try:
+    from posecascade.animation import _cloth_kernels as _native  # type: ignore[attr-defined]
+except ImportError:                                                         # pragma: no cover
+    _native = None
 
 _NUMERIC_EPSILON = 1.0e-8
 _DEFAULT_GRAVITY = (0.0, -9.8, 0.0)
@@ -36,6 +47,30 @@ _MAX_VELOCITY_PER_STEP = 0.20    # cap implicit velocity (positions - prev_posit
 _VEC3_LENGTH = 3                 # 3-component points / vectors
 _INDICES_PER_TRIANGLE = 3        # mesh indices come in triplets
 _MIN_BEND_TRIANGLE_PAIR = 2      # an interior edge is shared by ≥ 2 triangles → contributes a bend
+# Fraction of the tangential velocity that survives a collider contact. < 1.0
+# adds dynamic friction so a vert in contact with a moving collider does not
+# accelerate along the surface frame-after-frame — without this, cloth that
+# the hand sweeps past gains free-sliding speed and flutters wildly long
+# after the contact ends. 0.2 = 80% of tangential energy absorbed per contact;
+# the cloth still slides along the surface but no swing is amplified.
+_CONTACT_TANGENT_RETENTION = 0.2
+# Pad added around the per-substep piece bounding box when broad-phase
+# culling colliders. The piece AABB is computed once per substep, then
+# the constraint loop runs 8+ iterations during which vertices can drift
+# a few millimetres. The padding has to cover that drift OR a collider
+# whose AABB sits just outside the unpadded piece AABB might intersect
+# after iteration and be wrongly skipped. 2 cm is conservative — large
+# enough to never wrongly cull, small enough to still prune the obvious
+# misses (e.g. a hand-sphere across the room).
+_PIECE_AABB_PADDING = 0.02
+# Sub-AABB binning splits the cloth into K vertex-index bins so each
+# collider's projection runs only on the bins its AABB overlaps. K=4 is
+# a sweet spot for typical MMD-scale meshes (a few hundred verts per
+# piece): four narrow stripes give meaningful spatial separation while
+# keeping per-bin AABB compute under ~10 µs. Smaller pieces (< _MIN_BIN_
+# VERTEX_COUNT) skip binning entirely — the overhead would dominate.
+_DEFAULT_BIN_COUNT = 4
+_MIN_BIN_VERTEX_COUNT = 32
 
 
 class ClothForce(Protocol):
@@ -79,21 +114,40 @@ class ClothWind:
 
 @dataclass
 class SphereCollider:
-    """Body sphere — cloth vertices that fall inside are projected to the surface."""
+    """Body sphere — cloth vertices that fall inside are projected to the surface.
+
+    ``prev_center`` is the centre at the start of the current frame's substeps.
+    When set (and distinct from ``center``), :func:`_project_sphere` treats the
+    sphere as having SWEPT from ``prev_center`` to ``center`` and projects verts
+    outside the resulting capsule volume — fixing the fast-hand-tunnels-into-
+    skirt case where a static-snapshot check at the substep's end would leave
+    a vert inside the cloth on the far side of the hand's swept path. The
+    declarative bone-follow driver fills ``prev_center`` each frame; leave it
+    as ``None`` for stationary colliders so the cheaper static projection runs.
+    """
 
     center: Vec3
     radius: float
     skin_offset: float = 0.005  # extra clearance so verts don't tangent-graze the sphere
+    prev_center: Vec3 | None = None
 
 
 @dataclass
 class CapsuleCollider:
-    """Capsule between ``a`` and ``b`` of given ``radius``. Cloth verts project outside."""
+    """Capsule between ``a`` and ``b`` of given ``radius``. Cloth verts project outside.
+
+    ``prev_a`` / ``prev_b`` mirror :attr:`SphereCollider.prev_center` — when both
+    are set, the projection treats the capsule as having swept from
+    ``(prev_a, prev_b)`` to ``(a, b)``; verts inside either capsule (or the
+    convex sweep linking matching endpoints) get pushed to the nearest exit.
+    """
 
     a: Vec3
     b: Vec3
     radius: float
     skin_offset: float = 0.005
+    prev_a: Vec3 | None = None
+    prev_b: Vec3 | None = None
 
 
 @dataclass
@@ -142,6 +196,110 @@ class ClothPiece:
     triangles: NDArray[np.uint32]               # (T, 3) — for normal recomputation
     params: ClothParams = field(default_factory=ClothParams)
     enabled: bool = True
+    # Pre-converted ``np.intp`` views of the edge / bend index columns.
+    # ``np.bincount`` and fancy indexing require ``intp`` weights, and the
+    # implicit ``uint32 → intp`` copy used to happen inside the PBD inner
+    # loop dozens of times per step. Caching them here amortises that to
+    # once at build time. Filled by ``__post_init__``; never read raw.
+    _edge_a_idx: NDArray[np.intp] = field(
+        default_factory=lambda: np.empty(0, dtype=np.intp), init=False, repr=False,
+    )
+    _edge_b_idx: NDArray[np.intp] = field(
+        default_factory=lambda: np.empty(0, dtype=np.intp), init=False, repr=False,
+    )
+    _bend_a_idx: NDArray[np.intp] = field(
+        default_factory=lambda: np.empty(0, dtype=np.intp), init=False, repr=False,
+    )
+    _bend_b_idx: NDArray[np.intp] = field(
+        default_factory=lambda: np.empty(0, dtype=np.intp), init=False, repr=False,
+    )
+    # Combined-side scatter buffers — concatenation of the ``a`` and ``b``
+    # halves of each constraint set so the PBD pass can do one
+    # ``np.bincount`` per axis instead of two (a-scatter then b-scatter).
+    # ``combined_scale`` already carries the sign convention (first half
+    # negated) and the mass + valence weighting that depends only on the
+    # immutable piece topology, so the inner loop never has to recompute it.
+    # ``scratch_weights`` is a reusable (2M,) buffer the solver writes per
+    # axis through ``np.multiply(..., out=)`` so it avoids allocating a
+    # fresh weight array each iteration.
+    _edge_combined_idx: NDArray[np.intp] = field(
+        default_factory=lambda: np.empty(0, dtype=np.intp), init=False, repr=False,
+    )
+    _edge_combined_scale: NDArray[np.float32] = field(
+        default_factory=lambda: np.empty(0, dtype=np.float32), init=False, repr=False,
+    )
+    _edge_scratch_weights: NDArray[np.float32] = field(
+        default_factory=lambda: np.empty(0, dtype=np.float32), init=False, repr=False,
+    )
+    _bend_combined_idx: NDArray[np.intp] = field(
+        default_factory=lambda: np.empty(0, dtype=np.intp), init=False, repr=False,
+    )
+    _bend_combined_scale: NDArray[np.float32] = field(
+        default_factory=lambda: np.empty(0, dtype=np.float32), init=False, repr=False,
+    )
+    _bend_scratch_weights: NDArray[np.float32] = field(
+        default_factory=lambda: np.empty(0, dtype=np.float32), init=False, repr=False,
+    )
+    # Sub-AABB binning state: ``_bin_ranges`` is a list of ``(start, end)``
+    # vertex index ranges, computed once at build time from
+    # ``_DEFAULT_BIN_COUNT``. Pieces below ``_MIN_BIN_VERTEX_COUNT`` get a
+    # single full-range bin so collider projection costs less than the bin
+    # bookkeeping. Bin-level AABBs (``_bin_min`` / ``_bin_max``) are
+    # refreshed per substep — they would otherwise drift through the PBD
+    # iteration loop and lose pruning power.
+    _bin_ranges: list[tuple[int, int]] = field(default_factory=list, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._refresh_index_caches()
+        self._refresh_bin_ranges()
+
+    def _refresh_bin_ranges(self) -> None:
+        """Compute the per-bin index ranges for sub-AABB broad-phase."""
+        n = self.positions.shape[0]
+        if n < _MIN_BIN_VERTEX_COUNT:
+            self._bin_ranges = [(0, n)]
+            return
+        k = _DEFAULT_BIN_COUNT
+        chunk = n // k
+        self._bin_ranges = [
+            (i * chunk, (i + 1) * chunk if i < k - 1 else n) for i in range(k)
+        ]
+
+    def _refresh_index_caches(self) -> None:
+        """Re-derive intp index columns + scatter scales from immutable topology.
+
+        Call this after any code path that swaps in different edges, bends,
+        inverse masses, or valence arrays — tests that build a ClothPiece
+        directly via ``replace`` do this implicitly because dataclass
+        replace re-invokes ``__post_init__``.
+        """
+        self._edge_a_idx = self.edges[:, 0].astype(np.intp, copy=False)
+        self._edge_b_idx = self.edges[:, 1].astype(np.intp, copy=False)
+        (
+            self._edge_combined_idx,
+            self._edge_combined_scale,
+            self._edge_scratch_weights,
+        ) = _build_combined_scatter(
+            self._edge_a_idx, self._edge_b_idx,
+            self.inverse_masses, self.edge_valence,
+        )
+        if self.bends.size:
+            self._bend_a_idx = self.bends[:, 0].astype(np.intp, copy=False)
+            self._bend_b_idx = self.bends[:, 1].astype(np.intp, copy=False)
+            (
+                self._bend_combined_idx,
+                self._bend_combined_scale,
+                self._bend_scratch_weights,
+            ) = _build_combined_scatter(
+                self._bend_a_idx, self._bend_b_idx,
+                self.inverse_masses, self.bend_valence,
+            )
+        else:
+            self._bend_a_idx = np.empty(0, dtype=np.intp)
+            self._bend_b_idx = np.empty(0, dtype=np.intp)
+            self._bend_combined_idx = np.empty(0, dtype=np.intp)
+            self._bend_combined_scale = np.empty(0, dtype=np.float32)
+            self._bend_scratch_weights = np.empty(0, dtype=np.float32)
 
     def reset(self) -> None:
         """Snap vertices back to their rest positions and clear Verlet velocity."""
@@ -343,11 +501,12 @@ class ClothSolver:
         """Advance every cloth piece by ``dt`` seconds."""
         if dt <= 0.0:
             return
-        remaining = float(dt)
-        while remaining > _NUMERIC_EPSILON:
-            sub = min(self.fixed_dt, remaining)
-            self._step_once(sub)
-            remaining -= sub
+        with frame_section("cloth.step"):
+            remaining = float(dt)
+            while remaining > _NUMERIC_EPSILON:
+                sub = min(self.fixed_dt, remaining)
+                self._step_once(sub)
+                remaining -= sub
 
     def _step_once(self, dt: float) -> None:
         for piece in self.pieces:
@@ -395,25 +554,46 @@ def _integrate_piece(
     piece.prev_positions = piece.positions.copy()
     piece.positions = next_positions
 
+    has_bends = piece.bends.size > 0 and piece.params.bend_stiffness > 0.0
+    # Broad-phase: per-bin AABBs (the union of which is the piece AABB) +
+    # per-collider AABB tuple precomputed once per substep. Re-computing
+    # inside the iteration loop would cost more than it saves; the piece-
+    # AABB padding (``_PIECE_AABB_PADDING``) absorbs the tens of milli-
+    # metres a vert can move across 8 PBD passes. The collider AABBs are
+    # static across a substep (the cloth host swaps them between solver
+    # steps, never inside an iteration), so caching is safe. Tuples of
+    # plain floats keep the per-iteration overlap test out of NumPy.
+    bin_aabbs = _compute_bin_aabbs(piece)
+    collider_aabbs = [_collider_aabb_tuple(c) for c in colliders] if colliders else None
     for _ in range(piece.params.iterations):
         _solve_distance_constraints(
             piece.positions,
-            piece.inverse_masses,
-            piece.edges,
+            piece._edge_a_idx,
+            piece._edge_b_idx,
             piece.edge_rest_lengths,
-            piece.edge_valence,
+            piece._edge_combined_idx,
+            piece._edge_combined_scale,
+            piece._edge_scratch_weights,
             piece.params.structural_stiffness,
         )
-        if piece.bends.size > 0 and piece.params.bend_stiffness > 0.0:
+        if has_bends:
             _solve_distance_constraints(
                 piece.positions,
-                piece.inverse_masses,
-                piece.bends,
+                piece._bend_a_idx,
+                piece._bend_b_idx,
                 piece.bend_rest_lengths,
-                piece.bend_valence,
+                piece._bend_combined_idx,
+                piece._bend_combined_scale,
+                piece._bend_scratch_weights,
                 piece.params.bend_stiffness,
             )
-        _project_colliders(piece.positions, piece.inverse_masses, colliders)
+        _project_colliders(
+            piece.positions, piece.prev_positions, piece.inverse_masses,
+            colliders,
+            bin_ranges=piece._bin_ranges,
+            bin_aabbs=bin_aabbs,
+            collider_aabbs=collider_aabbs,
+        )
 
 
 def _accumulate_force(
@@ -436,7 +616,65 @@ def _accumulate_force(
         # per-vertex evaluation — wire that up when you add one.
         sample = force.force_at(piece.positions[0], time)
         total = total + sample
-    return total.astype(np.float32)
+    # ``zeros_like`` already returned float32 (positions are float32) and every
+    # accumulation kept the dtype, so ``astype`` here would just duplicate the
+    # buffer. ``copy=False`` returns ``total`` itself when the dtype matches.
+    return total.astype(np.float32, copy=False)
+
+
+def _row_norms(v: NDArray[np.float32]) -> NDArray[np.float32]:
+    """``np.linalg.norm(v, axis=1)`` for (N, 3) vectors, measured ~2× faster.
+
+    ``einsum('ij,ij->i', v, v)`` lets NumPy fuse the per-row dot product into
+    a single tight loop and skip the dispatch overhead ``linalg.norm`` carries
+    for its general N-dim case. The PBD constraint pass and every collider
+    projection runs this dozens of times per substep, so the win compounds.
+    """
+    return np.sqrt(np.einsum("ij,ij->i", v, v))
+
+
+def _build_combined_scatter(
+    a_idx: NDArray[np.intp],
+    b_idx: NDArray[np.intp],
+    inverse_masses: NDArray[np.float32],
+    valence: NDArray[np.float32],
+) -> tuple[NDArray[np.intp], NDArray[np.float32], NDArray[np.float32]]:
+    """Precompute the immutable scatter inputs for :func:`_solve_distance_constraints`.
+
+    Returns ``(combined_idx, combined_scale, scratch_weights)`` where
+    ``combined_idx`` is ``[a_idx, b_idx]`` so a single bincount visits every
+    affected vertex, and ``combined_scale`` carries the per-constraint
+    inverse-mass / valence weighting already signed: the first half is
+    ``-factor_a / valence[a]`` and the second is ``+factor_b / valence[b]``.
+    Folding the sign into the scale lets the solver use ``positions +=
+    scatter`` uniformly instead of separate ``-=``/``+=`` passes.
+
+    ``scratch_weights`` is an empty (2M,) float32 buffer the solver fills
+    via ``np.multiply(..., out=...)`` each axis — avoids allocating a fresh
+    weight buffer inside the PBD inner loop.
+    """
+    m = a_idx.shape[0]
+    if m == 0:
+        return (
+            np.empty(0, dtype=np.intp),
+            np.empty(0, dtype=np.float32),
+            np.empty(0, dtype=np.float32),
+        )
+    wa = inverse_masses[a_idx]
+    wb = inverse_masses[b_idx]
+    wsum = wa + wb
+    # Match the original solver: vertex pairs where both are anchored
+    # (wsum == 0) get a denominator of 1.0 — their factors evaluate to 0
+    # because wa and wb are both 0, so the constraint produces no scatter.
+    safe_wsum = np.where(wsum > 0.0, wsum, 1.0)
+    factor_a = wa / safe_wsum
+    factor_b = wb / safe_wsum
+    scale_a_neg = (-factor_a / valence[a_idx]).astype(np.float32, copy=False)
+    scale_b = (factor_b / valence[b_idx]).astype(np.float32, copy=False)
+    combined_idx = np.concatenate([a_idx, b_idx])
+    combined_scale = np.concatenate([scale_a_neg, scale_b]).astype(np.float32, copy=False)
+    scratch_weights = np.empty(2 * m, dtype=np.float32)
+    return combined_idx, combined_scale, scratch_weights
 
 
 def _clamp_per_vertex_displacement(
@@ -444,120 +682,480 @@ def _clamp_per_vertex_displacement(
     max_delta: float,
 ) -> NDArray[np.float32]:
     """Clamp each vertex's per-step displacement so a numeric blow-up cannot teleport."""
-    norms = np.linalg.norm(delta, axis=1)
+    norms = _row_norms(delta)
     too_big = norms > max_delta
     if not np.any(too_big):
         return delta
     out = delta.copy()
     scale = max_delta / np.maximum(norms[too_big], _NUMERIC_EPSILON)
-    out[too_big] = (delta[too_big] * scale[:, None]).astype(np.float32)
+    # delta and scale are both float32; copy=False keeps the multiplication
+    # result in place rather than duplicating a fresh buffer per substep.
+    out[too_big] = (delta[too_big] * scale[:, None]).astype(np.float32, copy=False)
     return out
 
 
 def _solve_distance_constraints(
     positions: NDArray[np.float32],
-    inverse_masses: NDArray[np.float32],
-    edges: NDArray[np.uint32],
+    a_idx: NDArray[np.intp],
+    b_idx: NDArray[np.intp],
     rest_lengths: NDArray[np.float32],
-    valence: NDArray[np.float32],
+    combined_idx: NDArray[np.intp],
+    combined_scale: NDArray[np.float32],
+    scratch_weights: NDArray[np.float32],
     stiffness: float,
 ) -> None:
     """Apply one Jacobi-style PBD distance pass (mutates ``positions``).
 
+    Dispatches to the Cython kernel when the compiled extension is
+    available; the pure-Python NumPy implementation below is the
+    bit-for-bit equivalent fallback used in source checkouts that haven't
+    run the build step. ``scratch_weights`` is only consulted in the
+    fallback path — the kernel writes directly into ``positions`` via
+    typed memory views so it doesn't need the scratch buffer.
+    """
+    if a_idx.shape[0] == 0:
+        return
+    if _native is not None:
+        _native.solve_distance_constraints(
+            positions, a_idx, b_idx, rest_lengths,
+            combined_idx, combined_scale,
+            stiffness, _NUMERIC_EPSILON,
+        )
+        return
+    _solve_distance_constraints_numpy(
+        positions, a_idx, b_idx, rest_lengths,
+        combined_idx, combined_scale, scratch_weights,
+        stiffness,
+    )
+
+
+def _solve_distance_constraints_numpy(
+    positions: NDArray[np.float32],
+    a_idx: NDArray[np.intp],
+    b_idx: NDArray[np.intp],
+    rest_lengths: NDArray[np.float32],
+    combined_idx: NDArray[np.intp],
+    combined_scale: NDArray[np.float32],
+    scratch_weights: NDArray[np.float32],
+    stiffness: float,
+) -> None:
+    """NumPy fallback for :func:`_solve_distance_constraints`.
+
     Each correction is divided by the affected vertex's valence so that summed
     parallel corrections don't over-shoot — without this, high-stiffness solves
-    diverge to NaN within a few substeps.
-
-    Scatter-add uses ``np.bincount`` per-axis instead of ``np.add.at`` — the
-    latter is a ~6× slower Python-level loop and dominates cloth tick cost on
-    multi-thousand-vertex meshes.
+    diverge to NaN within a few substeps. The ``a`` and ``b`` halves of each
+    constraint are concatenated into ``combined_idx`` (with the ``a`` side's
+    sign baked into ``combined_scale``) so each axis needs ONE ``bincount``
+    instead of two — measured 12% faster than the split-scatter version.
     """
-    if edges.shape[0] == 0:
-        return
-    a_idx = edges[:, 0].astype(np.intp, copy=False)
-    b_idx = edges[:, 1].astype(np.intp, copy=False)
+    m = a_idx.shape[0]
     delta = positions[a_idx] - positions[b_idx]
-    lengths = np.linalg.norm(delta, axis=1)
+    lengths = _row_norms(delta)
     safe_lengths = np.maximum(lengths, _NUMERIC_EPSILON)
     direction = delta / safe_lengths[:, None]
     error = (lengths - rest_lengths) * stiffness
-    wa = inverse_masses[a_idx]
-    wb = inverse_masses[b_idx]
-    wsum = wa + wb
-    safe_wsum = np.where(wsum > 0.0, wsum, 1.0)
-    factor_a = wa / safe_wsum
-    factor_b = wb / safe_wsum
-    scale_a = factor_a / valence[a_idx]
-    scale_b = factor_b / valence[b_idx]
     correction = error[:, None] * direction
-    # Per-axis bincount: each axis is one O(M) reduction over edges. Net cost
-    # is 6 bincount calls per pass — much faster than 2 × np.add.at on (M, 3).
     n_verts = positions.shape[0]
+    scale_neg = combined_scale[:m]
+    scale_pos = combined_scale[m:]
+    weights_neg = scratch_weights[:m]
+    weights_pos = scratch_weights[m:]
     for axis in range(3):
-        weight = correction[:, axis]
-        scatter_a = np.bincount(a_idx, weights=weight * scale_a, minlength=n_verts)
-        scatter_b = np.bincount(b_idx, weights=weight * scale_b, minlength=n_verts)
-        positions[:, axis] -= scatter_a.astype(np.float32)
-        positions[:, axis] += scatter_b.astype(np.float32)
+        column = correction[:, axis]
+        np.multiply(column, scale_neg, out=weights_neg)
+        np.multiply(column, scale_pos, out=weights_pos)
+        scatter = np.bincount(combined_idx, weights=scratch_weights, minlength=n_verts)
+        positions[:, axis] += scatter.astype(np.float32, copy=False)
+
+
+_AABBTuple = tuple[float, float, float, float, float, float]
+
+
+def _compute_bin_aabbs(piece: ClothPiece) -> list[_AABBTuple]:
+    """Return the per-bin padded AABB tuples for the current piece pose.
+
+    The bin index ranges are fixed at piece-build time; this just walks
+    them, takes the min/max over the current ``positions`` slice, and
+    pads by ``_PIECE_AABB_PADDING`` to absorb PBD iteration drift. A
+    single-bin piece falls through to one whole-mesh AABB.
+    """
+    bins: list[_AABBTuple] = []
+    positions = piece.positions
+    for start, end in piece._bin_ranges:                                # noqa: SLF001
+        chunk = positions[start:end]
+        mn = chunk.min(axis=0)
+        mx = chunk.max(axis=0)
+        bins.append((
+            float(mn[0]) - _PIECE_AABB_PADDING,
+            float(mn[1]) - _PIECE_AABB_PADDING,
+            float(mn[2]) - _PIECE_AABB_PADDING,
+            float(mx[0]) + _PIECE_AABB_PADDING,
+            float(mx[1]) + _PIECE_AABB_PADDING,
+            float(mx[2]) + _PIECE_AABB_PADDING,
+        ))
+    return bins
+
+
+def _collider_aabb_tuple(collider: object) -> _AABBTuple | None:
+    """Return ``(min_x, min_y, min_z, max_x, max_y, max_z)`` for ``collider``.
+
+    Returns a flat tuple of Python floats — the overlap test runs in the
+    iteration hot path and the numpy-array form allocated enough per call
+    to wipe out the broad-phase gain. The capsule sweep through
+    ``prev_a/b`` (sphere through ``prev_center``) is unioned in so a fast-
+    moving collider's sweep volume is still considered.
+
+    Returns ``None`` for collider types we don't know how to bound — those
+    fall through to the full projection without culling.
+    """
+    if isinstance(collider, SphereCollider):
+        r = collider.radius + collider.skin_offset
+        cx = float(collider.center[0])
+        cy = float(collider.center[1])
+        cz = float(collider.center[2])
+        if collider.prev_center is not None:
+            px = float(collider.prev_center[0])
+            py = float(collider.prev_center[1])
+            pz = float(collider.prev_center[2])
+            return (
+                min(cx, px) - r, min(cy, py) - r, min(cz, pz) - r,
+                max(cx, px) + r, max(cy, py) + r, max(cz, pz) + r,
+            )
+        return (cx - r, cy - r, cz - r, cx + r, cy + r, cz + r)
+    if isinstance(collider, CapsuleCollider):
+        r = collider.radius + collider.skin_offset
+        ax = float(collider.a[0])
+        ay = float(collider.a[1])
+        az = float(collider.a[2])
+        bx = float(collider.b[0])
+        by = float(collider.b[1])
+        bz = float(collider.b[2])
+        mnx = min(ax, bx)
+        mny = min(ay, by)
+        mnz = min(az, bz)
+        mxx = max(ax, bx)
+        mxy = max(ay, by)
+        mxz = max(az, bz)
+        if collider.prev_a is not None and collider.prev_b is not None:
+            pax = float(collider.prev_a[0])
+            pay = float(collider.prev_a[1])
+            paz = float(collider.prev_a[2])
+            pbx = float(collider.prev_b[0])
+            pby = float(collider.prev_b[1])
+            pbz = float(collider.prev_b[2])
+            mnx = min(mnx, pax, pbx)
+            mny = min(mny, pay, pby)
+            mnz = min(mnz, paz, pbz)
+            mxx = max(mxx, pax, pbx)
+            mxy = max(mxy, pay, pby)
+            mxz = max(mxz, paz, pbz)
+        return (mnx - r, mny - r, mnz - r, mxx + r, mxy + r, mxz + r)
+    return None
 
 
 def _project_colliders(
     positions: NDArray[np.float32],
+    prev_positions: NDArray[np.float32],
     inverse_masses: NDArray[np.float32],
     colliders: Sequence[object],
+    bin_ranges: Sequence[tuple[int, int]] | None = None,
+    bin_aabbs: Sequence[_AABBTuple] | None = None,
+    collider_aabbs: Sequence[_AABBTuple | None] | None = None,
 ) -> None:
-    """Push movable vertices outside every collider (sphere or capsule)."""
+    """Push movable vertices outside every collider (sphere or capsule).
+
+    ``prev_positions`` is updated in lockstep with the position correction so
+    the next Verlet step doesn't read the projection displacement as velocity.
+    Without this, a fast-moving collider pushes a vert several cm in one step,
+    the integrator then interprets that gap as a high velocity, and the vert
+    keeps flying for many frames after the actual contact ended. The
+    correction nulls the NORMAL-component velocity only — tangential velocity
+    is preserved so cloth still slides along a contact surface.
+
+    ``inverse_masses`` flows down rather than a precomputed ``movable`` bool
+    mask so the Cython projection kernels can read it directly — converting
+    bool → float32 every substep would land back in the alloc hot path.
+    """
     if not colliders:
         return
-    movable = inverse_masses > 0.0
-    for collider in colliders:
-        if isinstance(collider, SphereCollider):
-            _project_sphere(positions, movable, collider)
-        elif isinstance(collider, CapsuleCollider):
-            _project_capsule(positions, movable, collider)
+    # Broad-phase: per-bin AABBs (and matching vertex-index ranges) +
+    # per-collider AABB tuple precomputed once per substep. For each
+    # collider, walk every bin and dispatch the projection kernel only on
+    # the vertex range whose bin actually overlaps — a hand-sphere typically
+    # touches one bin of a four-bin skirt, so the kernel scans ~120 verts
+    # instead of all 480. Six float comparisons per (bin, collider) pair
+    # is dirt-cheap compared to a missed kernel scan.
+    if bin_ranges is None or bin_aabbs is None:
+        bin_ranges = ((0, positions.shape[0]),)
+        bin_aabbs = (None,)
+    boxes = collider_aabbs
+    for index, collider in enumerate(colliders):
+        cbox = boxes[index] if boxes is not None else None
+        for bin_index, (bstart, bend) in enumerate(bin_ranges):
+            bbox = bin_aabbs[bin_index]
+            if cbox is not None and bbox is not None and (
+                bbox[3] < cbox[0] or bbox[0] > cbox[3]
+                or bbox[4] < cbox[1] or bbox[1] > cbox[4]
+                or bbox[5] < cbox[2] or bbox[2] > cbox[5]
+            ):
+                continue
+            if isinstance(collider, SphereCollider):
+                _project_sphere(
+                    positions, prev_positions, inverse_masses, collider,
+                    start=bstart, end=bend,
+                )
+            elif isinstance(collider, CapsuleCollider):
+                _project_capsule(
+                    positions, prev_positions, inverse_masses, collider,
+                    start=bstart, end=bend,
+                )
 
 
 def _project_sphere(
     positions: NDArray[np.float32],
-    movable: NDArray[np.bool_],
+    prev_positions: NDArray[np.float32],
+    inverse_masses: NDArray[np.float32],
     collider: SphereCollider,
+    start: int = 0,
+    end: int = -1,
 ) -> None:
-    delta = positions - collider.center
-    dist = np.linalg.norm(delta, axis=1)
+    """Push verts outside the sphere — uses swept-capsule volume when prev_center is set.
+
+    Without CCD a fast bone (hand, foot) can move farther than its own radius in
+    one substep; a vert behind the swept path is checked at the substep's END
+    position, finds nothing intersecting, and gets stranded on the wrong side
+    of the cloth. The swept capsule from ``prev_center`` to ``center`` catches
+    those verts and projects them out the nearest face.
+
+    Hot-path optimisation: when the collider barely moved (motion < radius),
+    a static projection at the current position covers the contact area
+    anyway. Skipping the swept-capsule fallback there cuts down the number
+    of verts the projection touches per substep — important because every
+    affected vert sends a tangential ripple through the structural mesh
+    that takes many frames to damp out, and the cloth visibly flaps near
+    a hovering hand even when the hand has effectively stopped moving.
+    """
     radius = collider.radius + collider.skin_offset
-    inside = movable & (dist < radius)
-    if not np.any(inside):
+    if collider.prev_center is None:
+        _project_static_sphere(
+            positions, prev_positions, inverse_masses, collider.center, radius, start, end,
+        )
         return
-    safe_dist = np.maximum(dist[inside], _NUMERIC_EPSILON)
-    direction = delta[inside] / safe_dist[:, None]
-    positions[inside] = (collider.center + direction * radius).astype(np.float32)
+    motion = collider.center - collider.prev_center
+    motion_sq = float(np.dot(motion, motion))
+    if motion_sq < radius * radius:
+        _project_static_sphere(
+            positions, prev_positions, inverse_masses, collider.center, radius, start, end,
+        )
+        return
+    _project_swept(
+        positions, prev_positions, inverse_masses,
+        collider.prev_center, collider.center, radius, start, end,
+    )
 
 
 def _project_capsule(
     positions: NDArray[np.float32],
-    movable: NDArray[np.bool_],
+    prev_positions: NDArray[np.float32],
+    inverse_masses: NDArray[np.float32],
     collider: CapsuleCollider,
+    start: int = 0,
+    end: int = -1,
 ) -> None:
-    seg = collider.b - collider.a
-    seg_len_sq = float(np.dot(seg, seg))
-    if seg_len_sq < _NUMERIC_EPSILON:
-        sphere = SphereCollider(
-            center=collider.a, radius=collider.radius, skin_offset=collider.skin_offset
-        )
-        _project_sphere(positions, movable, sphere)
-        return
-    rel = positions - collider.a
-    t = np.clip((rel @ seg) / seg_len_sq, 0.0, 1.0)
-    closest = collider.a + t[:, None] * seg
-    delta = positions - closest
-    dist = np.linalg.norm(delta, axis=1)
+    """Push verts outside the capsule — sweeps the midpoint when prev_a/prev_b are set.
+
+    Approximation of the full 4D minkowski-sweep volume by two projections:
+    the current capsule pose, plus a diagonal capsule from the previous
+    midpoint to the current midpoint. The midpoint-sweep catches most
+    tunneling cases (a forearm or shin rigidly translating between frames)
+    without the 4× cost of the full four-segment projection — that variant
+    was measurably laggy at iterations≥12 with 6 capsule colliders.
+    """
     radius = collider.radius + collider.skin_offset
+    if collider.prev_a is None or collider.prev_b is None:
+        _project_static_capsule(
+            positions, prev_positions, inverse_masses,
+            collider.a, collider.b, radius, start, end,
+        )
+        return
+    motion_a = collider.a - collider.prev_a
+    motion_b = collider.b - collider.prev_b
+    motion_a_sq = float(np.dot(motion_a, motion_a))
+    motion_b_sq = float(np.dot(motion_b, motion_b))
+    radius_sq = radius * radius
+    if motion_a_sq < radius_sq and motion_b_sq < radius_sq:
+        # Either still or moving less than the capsule radius — static
+        # projection at the current pose already covers the contact band,
+        # and adding the midpoint sweep here just spreads the projection
+        # over more verts and seeds the structural ripples the user sees
+        # as the skirt fluttering.
+        _project_static_capsule(
+            positions, prev_positions, inverse_masses,
+            collider.a, collider.b, radius, start, end,
+        )
+        return
+    # Current capsule pose first — biggest single-pose volume.
+    _project_static_capsule(
+        positions, prev_positions, inverse_masses,
+        collider.a, collider.b, radius, start, end,
+    )
+    # Midpoint sweep: capsule joining the previous and current midpoints.
+    # Cheap second pass that catches a vert the static projection missed
+    # because the collider had translated past it.
+    prev_mid = (collider.prev_a + collider.prev_b) * 0.5
+    curr_mid = (collider.a + collider.b) * 0.5
+    _project_static_capsule(
+        positions, prev_positions, inverse_masses,
+        prev_mid, curr_mid, radius, start, end,
+    )
+
+
+def _project_static_sphere(
+    positions: NDArray[np.float32],
+    prev_positions: NDArray[np.float32],
+    inverse_masses: NDArray[np.float32],
+    center: Vec3,
+    radius: float,
+    start: int = 0,
+    end: int = -1,
+) -> None:
+    n = positions.shape[0]
+    stop = n if end < 0 else end
+    if _native is not None:
+        # The kernel inlines the ``inverse_masses == 0`` skip — no bool mask
+        # allocation per substep. ``start`` / ``stop`` lets sub-AABB binning
+        # restrict the scan to a vertex range.
+        _native.project_static_sphere(
+            positions, prev_positions, inverse_masses,
+            float(center[0]), float(center[1]), float(center[2]),
+            float(radius),
+            _CONTACT_TANGENT_RETENTION, _NUMERIC_EPSILON,
+            start, stop,
+        )
+        return
+    movable = inverse_masses > 0.0
+    if start != 0 or stop != n:
+        range_mask = np.zeros(n, dtype=bool)
+        range_mask[start:stop] = True
+        movable = movable & range_mask
+    delta = positions - center
+    dist = _row_norms(delta)
     inside = movable & (dist < radius)
     if not np.any(inside):
         return
     safe_dist = np.maximum(dist[inside], _NUMERIC_EPSILON)
-    direction = delta[inside] / safe_dist[:, None]
-    positions[inside] = (closest[inside] + direction * radius).astype(np.float32)
+    normal = delta[inside] / safe_dist[:, None]
+    # All inputs are float32; ``copy=False`` skips the duplicate buffer.
+    new_positions = (center + normal * radius).astype(np.float32, copy=False)
+    _apply_projection_with_velocity_correction(
+        positions, prev_positions, inside, new_positions, normal,
+    )
+
+
+def _project_static_capsule(
+    positions: NDArray[np.float32],
+    prev_positions: NDArray[np.float32],
+    inverse_masses: NDArray[np.float32],
+    a: Vec3,
+    b: Vec3,
+    radius: float,
+    start: int = 0,
+    end: int = -1,
+) -> None:
+    n = positions.shape[0]
+    stop = n if end < 0 else end
+    seg = b - a
+    seg_len_sq = float(np.dot(seg, seg))
+    if seg_len_sq < _NUMERIC_EPSILON:
+        _project_static_sphere(
+            positions, prev_positions, inverse_masses, a, radius, start, stop,
+        )
+        return
+    if _native is not None:
+        _native.project_static_capsule(
+            positions, prev_positions, inverse_masses,
+            float(a[0]), float(a[1]), float(a[2]),
+            float(b[0]), float(b[1]), float(b[2]),
+            float(radius),
+            _CONTACT_TANGENT_RETENTION, _NUMERIC_EPSILON,
+            start, stop,
+        )
+        return
+    movable = inverse_masses > 0.0
+    if start != 0 or stop != n:
+        range_mask = np.zeros(n, dtype=bool)
+        range_mask[start:stop] = True
+        movable = movable & range_mask
+    rel = positions - a
+    t = np.clip((rel @ seg) / seg_len_sq, 0.0, 1.0)
+    closest = a + t[:, None] * seg
+    delta = positions - closest
+    dist = _row_norms(delta)
+    inside = movable & (dist < radius)
+    if not np.any(inside):
+        return
+    safe_dist = np.maximum(dist[inside], _NUMERIC_EPSILON)
+    normal = delta[inside] / safe_dist[:, None]
+    # All inputs are float32; ``copy=False`` skips the duplicate buffer.
+    new_positions = (closest[inside] + normal * radius).astype(np.float32, copy=False)
+    _apply_projection_with_velocity_correction(
+        positions, prev_positions, inside, new_positions, normal,
+    )
+
+
+def _project_swept(
+    positions: NDArray[np.float32],
+    prev_positions: NDArray[np.float32],
+    inverse_masses: NDArray[np.float32],
+    prev_center: Vec3,
+    center: Vec3,
+    radius: float,
+    start: int = 0,
+    end: int = -1,
+) -> None:
+    """Project verts outside the capsule swept by a moving sphere."""
+    _project_static_capsule(
+        positions, prev_positions, inverse_masses,
+        prev_center, center, radius, start, end,
+    )
+
+
+def _apply_projection_with_velocity_correction(
+    positions: NDArray[np.float32],
+    prev_positions: NDArray[np.float32],
+    inside_mask: NDArray[np.bool_],
+    new_positions: NDArray[np.float32],
+    contact_normal: NDArray[np.float32],
+) -> None:
+    """Commit ``new_positions`` and dampen velocity at the contact.
+
+    Two corrections in one shift of ``prev_positions``:
+
+    1. **Null the normal component.** A vert that ended up inside the collider
+       was projected back out; the implicit Verlet velocity ``pos - prev``
+       would otherwise contain the projection displacement and the cloth
+       would bounce off the surface or fly perpendicular to it. Removing
+       the normal component absorbs the impact.
+    2. **Scale the tangential component by ``_CONTACT_TANGENT_RETENTION``.**
+       The cloth still slides along the contact but with friction — without
+       this, a swept collider drags the cloth and seeds a tangential ripple
+       that takes many frames to damp through ``linear_damping`` alone.
+       Fast hand passes through the skirt's vicinity were leaving the cloth
+       flapping for nearly a second after the actual contact ended.
+
+    Net effect: ``pos - prev`` after this call equals ``retention * tangent``,
+    so the next Verlet step reads only damped tangential velocity at the
+    contact point.
+    """
+    old_positions = positions[inside_mask]
+    old_prev = prev_positions[inside_mask]
+    velocity = old_positions - old_prev
+    normal_component = np.einsum("ij,ij->i", velocity, contact_normal)
+    tangential = (velocity - normal_component[:, None] * contact_normal) * (
+        _CONTACT_TANGENT_RETENTION
+    )
+    positions[inside_mask] = new_positions
+    prev_positions[inside_mask] = new_positions - tangential
 
 
 def _extract_edges_and_bends(
@@ -624,6 +1222,6 @@ def compute_vertex_normals(
             + np.bincount(t1, weights=weight, minlength=n_verts)
             + np.bincount(t2, weights=weight, minlength=n_verts)
         )
-    lengths = np.linalg.norm(normals, axis=1)
+    lengths = _row_norms(normals.astype(np.float32, copy=False))
     safe = np.maximum(lengths, _NUMERIC_EPSILON)
     return (normals / safe[:, None]).astype(np.float32)

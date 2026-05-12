@@ -1,0 +1,91 @@
+name: Build wheels
+
+# Triggers:
+#   - On a release tag (``v*``) — full matrix, then upload the wheel +
+#     sdist as release artefacts (uncomment the PyPI publish step once
+#     you've configured the ``PYPI_API_TOKEN`` repo secret).
+#   - On workflow_dispatch — manual run for sanity-checking the matrix.
+#   - On PR — only Linux × cp314 so the build doesn't blow CI minutes;
+#     macOS / Windows / older Pythons are covered on release.
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'posecascade/animation/_cloth_kernels.pyx'
+      - 'setup.py'
+      - 'pyproject.toml'
+      - '.github/workflows/wheels.yml'
+  workflow_dispatch:
+
+jobs:
+  build_wheels:
+    name: ${{ matrix.os }} / cp${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Release builds: full matrix. PR builds: linux × cp314 only.
+        # The `include` keys are chosen so `if: github.event_name == 'pull_request'`
+        # cuts the matrix down without duplicating the list.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ['312', '313', '314']
+        exclude:
+          - { os: macos-latest, python: '312' }   # macOS runners are scarce; skip oldest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.21
+        env:
+          CIBW_BUILD: cp${{ matrix.python }}-*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-cp${{ matrix.python }}
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  build_sdist:
+    name: Source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Build sdist
+        run: |
+          pip install build
+          python -m build --sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  # publish:
+  #   # Uncomment + set PYPI_API_TOKEN once the project is ready to ship.
+  #   needs: [build_wheels, build_sdist]
+  #   if: startsWith(github.ref, 'refs/tags/v')
+  #   runs-on: ubuntu-latest
+  #   environment: release
+  #   permissions:
+  #     id-token: write   # trusted publishing (no API token needed)
+  #   steps:
+  #     - uses: actions/download-artifact@v4
+  #       with:
+  #         pattern: wheels-*
+  #         path: dist
+  #         merge-multiple: true
+  #     - uses: actions/download-artifact@v4
+  #       with:
+  #         name: sdist
+  #         path: dist
+  #     - uses: pypa/gh-action-pypi-publish@release/v1

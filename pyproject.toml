@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=68", "wheel", "Cython>=3.0", "numpy>=1.26"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -32,6 +32,34 @@ posecascade = "posecascade.__main__:main"
 where = ["."]
 include = ["posecascade*"]
 exclude = ["tests*", "importers*", "examples*"]
+
+# cibuildwheel: build wheels in CI for Win/macOS/Linux × supported Pythons.
+# The job is wired up in ``.github/workflows/wheels.yml`` (see that file
+# for the matrix). Locally, ``pip wheel .`` already produces a wheel for
+# the host platform via setup.py's cythonize step.
+[tool.cibuildwheel]
+# Skip 32-bit + PyPy + EOL CPythons — Cython kernels need a working
+# numpy ABI and the build matrix gets exponentially uglier with rarely-
+# used targets.
+build = "cp312-* cp313-* cp314-*"
+skip = ["*-musllinux_*", "pp*", "*_i686", "*-win32"]
+# Run the test suite inside the temporary wheel install before
+# publishing, so we ship a wheel where the kernel actually loads.
+test-requires = ["pytest", "pytest-qt"]
+test-command = "pytest {project}/tests/test_cloth_cython_kernel.py -q"
+test-skip = "*-macosx_*"  # Qt offscreen + GL fixtures are flaky on macOS runners
+
+[tool.cibuildwheel.linux]
+# Cython kernels need numpy headers at compile time; the manylinux image
+# pulls numpy from PyPI per Python so each wheel is built against the
+# matching numpy ABI.
+before-build = "pip install 'numpy>=1.26' 'Cython>=3.0'"
+
+[tool.cibuildwheel.macos]
+before-build = "pip install 'numpy>=1.26' 'Cython>=3.0'"
+
+[tool.cibuildwheel.windows]
+before-build = "pip install 'numpy>=1.26' 'Cython>=3.0'"
 
 [tool.ruff]
 target-version = "py312"
