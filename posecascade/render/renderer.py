@@ -54,7 +54,12 @@ from posecascade.gl.mesh_uploader import (
     upload_mesh,
 )
 from posecascade.gl.shader import Program, compile_program
-from posecascade.gl.texture import GLTexture, make_white_fallback, upload_texture
+from posecascade.gl.texture import (
+    GLTexture,
+    make_white_fallback,
+    set_toon_sampler_params,
+    upload_texture,
+)
 from posecascade.gl.uniforms import (
     U_AMBIENT,
     U_BASE_COLOR,
@@ -84,6 +89,7 @@ from posecascade.scene.node import Node
 from posecascade.scene.scene import Scene
 from posecascade.utils.logging import get_logger
 from posecascade.utils.math3d import Mat4
+from posecascade.utils.profiling import frame_section
 
 _logger = get_logger(__name__)
 _warned_oversize_skins: set[int] = set()
@@ -92,6 +98,14 @@ _DEFAULT_BASE_COLOR = (0.8, 0.8, 0.85, 1.0)
 _MAX_BONES = 256  # must match skinned.vert's MAX_BONES define
 _DEFAULT_LIGHT_DIRECTION = (0.3, 0.7, 0.6)
 _DEFAULT_LIGHT_COLOR = (1.0, 1.0, 1.0)
+# Selection overlay: a second inverted-hull outline pass run on every mesh
+# under the selected holder using a thicker edge and a bright contrast
+# colour so the user can see which model is selected regardless of whether
+# its materials enabled edges. The edge size is in mesh-local units —
+# typical MMD models live around the unit scale, so 0.04 reads cleanly at
+# normal camera distance without dominating the silhouette.
+_SELECTION_EDGE_SIZE = 0.04
+_SELECTION_EDGE_COLOR = (1.0, 0.85, 0.10, 1.0)
 
 
 @dataclass
@@ -138,6 +152,10 @@ class Renderer:
     # Lazily allocated post-effect ping-pong; only instantiated once the
     # caller requests :meth:`apply_effect_chain`.
     _effect_ping_pong: EffectPingPong | None = field(default=None, init=False)
+    # Currently selected top-level holder. ``draw`` runs an extra outline
+    # pass on every mesh under this node so the user can see which model
+    # they picked. ``None`` skips the selection overlay entirely.
+    _selected_holder: Node | None = field(default=None, init=False)
 
     def initialize(self) -> None:
         """Compile shaders. Must run on the GL-owning thread after the context is current."""
@@ -258,7 +276,13 @@ class Renderer:
             gl_mesh.sphere_texture_id = image_to_gl_tex[sphere_idx].texture_id
         toon_idx = material.toon_texture_index
         if toon_idx is not None and toon_idx in image_to_gl_tex:
-            gl_mesh.toon_texture_id = image_to_gl_tex[toon_idx].texture_id
+            toon_tex = image_to_gl_tex[toon_idx]
+            gl_mesh.toon_texture_id = toon_tex.texture_id
+            # Re-tune the toon ramp to NEAREST + CLAMP_TO_EDGE so cel-shading
+            # bands stay crisp instead of being interpolated into a gradient.
+            # Idempotent — calling it twice when two materials share a ramp
+            # is fine. PMX never reuses a toon image as a base-colour map.
+            set_toon_sampler_params(toon_tex.texture_id)
 
     def _upload_textures(self, imported: ImportedScene) -> dict[int, GLTexture]:
         """Upload every :class:`Texture` in ``imported`` and return ``image_index → GLTexture``."""
@@ -328,6 +352,11 @@ class Renderer:
         """
         if not hasattr(cloth_host, "iter_local_state"):
             return
+        with frame_section("renderer.apply_cloth"):
+            self._stream_cloth_into_meshes(cloth_host)
+
+    def _stream_cloth_into_meshes(self, cloth_host: object) -> None:
+        """Inner loop of :meth:`apply_cloth_state`, factored for the profile wrapper."""
         for binding, positions_local, normals_local in cloth_host.iter_local_state():
             mesh_id = self._node_mesh_index_to_id.get((id(binding.node), binding.mesh_index))
             if mesh_id is None:
@@ -338,19 +367,33 @@ class Renderer:
             reupload_position_vbo(gl_mesh, positions_local)
             reupload_normal_vbo(gl_mesh, normals_local)
 
+    def set_selected_holder(self, holder: Node | None) -> None:
+        """Mark ``holder`` (a top-level scene node) as the selected model.
+
+        The next :meth:`draw` runs an extra outline pass over every mesh
+        under ``holder`` using ``_SELECTION_EDGE_SIZE`` /
+        ``_SELECTION_EDGE_COLOR`` so the user can see which model they
+        picked. Passing ``None`` clears the highlight.
+        """
+        self._selected_holder = holder
+
     def draw(self, scene: Scene, camera: Camera, viewport_size: tuple[int, int]) -> None:
         """Clear, then walk the scene and draw every node that has a mesh attached."""
-        self._require_program()
-        width, height = viewport_size
-        if width <= 0 or height <= 0:
-            return
-        glViewport(0, 0, width, height)
-        glClearColor(0.08, 0.09, 0.10, 1.0)
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        with frame_section("renderer.draw"):
+            self._require_program()
+            width, height = viewport_size
+            if width <= 0 or height <= 0:
+                return
+            glViewport(0, 0, width, height)
+            glClearColor(0.08, 0.09, 0.10, 1.0)
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
-        view = camera.view_matrix()
-        proj = camera.projection_matrix(aspect=width / height)
-        self._draw_scene_nodes(scene, view, proj)
+            view = camera.view_matrix()
+            proj = camera.projection_matrix(aspect=width / height)
+            with frame_section("renderer.scene_nodes"):
+                self._draw_scene_nodes(scene, view, proj)
+            with frame_section("renderer.selection_overlay"):
+                self._draw_selection_overlay(view, proj)
 
     def _draw_scene_nodes(self, scene: Scene, view: Mat4, proj: Mat4) -> None:
         for node in scene.root.traverse():
@@ -391,7 +434,24 @@ class Renderer:
         self, node: Node, gl_mesh: GLMesh, skin: Skin | None, material: MMDMaterial,
         view: Mat4, proj: Mat4,
     ) -> None:
-        """Inverted-hull outline: front-face culled, expanded along normals."""
+        """Inverted-hull outline using the material's edge size + colour."""
+        self._draw_outline_with(
+            node, gl_mesh, skin,
+            edge_size=material.edge_size,
+            edge_color=material.edge_color,
+            view=view, proj=proj,
+        )
+
+    def _draw_outline_with(
+        self, node: Node, gl_mesh: GLMesh, skin: Skin | None,
+        edge_size: float, edge_color: tuple[float, float, float, float],
+        view: Mat4, proj: Mat4,
+    ) -> None:
+        """Inverted-hull outline: front-face culled, expanded along normals.
+
+        Shared between the per-material edge pass and the selection overlay
+        — they only differ in ``edge_size`` and ``edge_color``.
+        """
         program = self._outline_skin_program if skin is not None else self._outline_program
         if program is None:
             return
@@ -401,10 +461,10 @@ class Renderer:
             with use_program(program.program_id):
                 self._set_camera_uniforms(program, view, proj)
                 self._set_geometry_uniforms(program, node, skin)
-                glUniform1f(program.uniform_location(U_EDGE_SIZE), material.edge_size)
+                glUniform1f(program.uniform_location(U_EDGE_SIZE), edge_size)
                 glUniform4fv(
                     program.uniform_location(U_EDGE_COLOR),
-                    1, np.asarray(material.edge_color, dtype=np.float32),
+                    1, np.asarray(edge_color, dtype=np.float32),
                 )
                 with bind_vao(gl_mesh.vao):
                     glDrawElements(
@@ -413,6 +473,31 @@ class Renderer:
                     )
         finally:
             glDisable(GL_CULL_FACE)
+
+    def _draw_selection_overlay(self, view: Mat4, proj: Mat4) -> None:
+        """Re-outline every mesh under :attr:`_selected_holder` for selection feedback.
+
+        Runs after the main scene pass so the highlight sits on top of any
+        per-material outline. Uses the inverted-hull outline shader at a
+        fixed thicker ``_SELECTION_EDGE_SIZE`` so even materials with no
+        edge enabled get a visible silhouette while selected.
+        """
+        holder = self._selected_holder
+        if holder is None:
+            return
+        for node in holder.traverse():
+            mesh_ids = self._node_to_mesh.get(id(node))
+            if not mesh_ids:
+                continue
+            skin = self._node_to_skin.get(id(node))
+            for mesh_id in mesh_ids:
+                gl_mesh = self._meshes[mesh_id]
+                self._draw_outline_with(
+                    node, gl_mesh, skin,
+                    edge_size=_SELECTION_EDGE_SIZE,
+                    edge_color=_SELECTION_EDGE_COLOR,
+                    view=view, proj=proj,
+                )
 
     def _draw_toon(
         self, node: Node, gl_mesh: GLMesh, skin: Skin | None, material: MMDMaterial,

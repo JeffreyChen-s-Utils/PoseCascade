@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from posecascade.animation.player import VmdAnimationPlayer
 from posecascade.scene.external_parent import apply_external_parents
 from posecascade.scene.model_slot import ModelSlot, SceneSlots
+from posecascade.utils.profiling import frame_section
 
 
 @dataclass
@@ -40,12 +41,13 @@ class SlotsPlayer:
 
     def apply(self, time_seconds: float) -> None:
         """Advance every slot's animation, then resolve external parents."""
-        for slot in self.slots:
-            player = self._players.get(slot.name)
-            if player is None:
-                continue
-            player.apply(time_seconds)
-        apply_external_parents(self.slots, self.slots.find)
+        with frame_section("slots_player.apply"):
+            for slot in self.slots:
+                player = self._players.get(slot.name)
+                if player is None:
+                    continue
+                player.apply(time_seconds)
+            apply_external_parents(self.slots, self.slots.find)
 
     def player_for(self, slot_name: str) -> VmdAnimationPlayer | None:
         """Return the underlying per-slot player (debug + UI integration)."""

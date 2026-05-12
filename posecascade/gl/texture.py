@@ -10,8 +10,10 @@ from dataclasses import dataclass
 
 import numpy as np
 from OpenGL.GL import (
+    GL_CLAMP_TO_EDGE,
     GL_LINEAR,
     GL_LINEAR_MIPMAP_LINEAR,
+    GL_NEAREST,
     GL_REPEAT,
     GL_RGBA,
     GL_RGBA8,
@@ -76,3 +78,23 @@ def make_white_fallback() -> GLTexture:
     """Create a 1x1 fully-opaque-white texture used when a mesh has no base-colour map."""
     pixels = np.full((1, 1, 4), 255, dtype=np.uint8)
     return upload_texture(pixels, srgb=False)
+
+
+def set_toon_sampler_params(texture_id: int) -> None:
+    """Re-tune ``texture_id`` for MMD-style cel shading.
+
+    Toon ramps encode a stepped lighting LUT along their V axis. The default
+    ``LINEAR_MIPMAP_LINEAR`` + ``REPEAT`` sampler smears those bands into a
+    smooth gradient and wraps the bottom/top rows around the seam — both fight
+    the desired anime look. Switch to ``NEAREST`` + ``CLAMP_TO_EDGE`` so each
+    Lambert bucket lands on exactly one ramp texel.
+
+    Safe to call after :func:`upload_texture`; assumes the texture is bound
+    to ``GL_TEXTURE_2D`` by this helper (it binds/unbinds itself).
+    """
+    glBindTexture(GL_TEXTURE_2D, texture_id)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+    glBindTexture(GL_TEXTURE_2D, 0)

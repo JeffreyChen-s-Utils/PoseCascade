@@ -85,6 +85,8 @@ class Viewport(QOpenGLWidget):
     def set_scene(self, scene: Scene) -> None:
         self._scene = scene
         self._selected_holder = None
+        if self._renderer is not None:
+            self._renderer.set_selected_holder(None)
         self.update()
 
     def set_cloth_host(self, host: object | None) -> None:
@@ -179,10 +181,19 @@ class Viewport(QOpenGLWidget):
             holder = self._pick_holder(sx, sy)
             if holder is not None:
                 self._selected_holder = holder
+                if self._renderer is not None:
+                    self._renderer.set_selected_holder(holder)
                 self._drag_mode = _DRAG_TRANSLATE
                 self._last_mouse_xy = (sx, sy)
+                self.update()
                 event.accept()
                 return
+            # Picked empty space → clear the selection highlight.
+            if self._selected_holder is not None:
+                self._selected_holder = None
+                if self._renderer is not None:
+                    self._renderer.set_selected_holder(None)
+                self.update()
         elif button in (Qt.MouseButton.RightButton, Qt.MouseButton.MiddleButton):
             self._sync_orbit_from_camera()
             self._drag_mode = _DRAG_PAN if shift else _DRAG_ORBIT
