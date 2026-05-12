@@ -138,6 +138,137 @@ def test_sphere_collider_projects_verts_outside() -> None:
     assert np.all(dists >= sphere.radius - 1.0e-3)
 
 
+def test_slowly_hovering_sphere_uses_static_projection() -> None:
+    """A collider drifting by less than its radius must not trigger the swept-CCD path.
+
+    The swept-CCD branch projects against a long capsule from prev_center to
+    center; for a hand that's basically stationary but jittering a few mm per
+    frame (or one that's intentionally hovering near the cloth), every frame
+    seeds a different swept volume, the cloth gets pushed in a slightly
+    different direction each iteration, and a tangential ripple propagates
+    through the structural mesh — visible as the skirt flapping in place
+    while the hand barely moved. Gating swept on motion >= radius means
+    those near-stationary frames use the cheaper static projection,
+    which converges to a stable contact point.
+    """
+    cloth = _build_cloth_grid(rows=4, cols=4)
+    sim = ClothSolver(pieces=[cloth])
+    # Sphere is bigger than the per-frame motion so the dynamic gate
+    # should pick the static branch.
+    sphere = SphereCollider(
+        center=vec3(0.15, -0.10, 0.0),
+        radius=0.08,
+        prev_center=vec3(0.149, -0.10, 0.0),  # 1mm drift, far smaller than 8cm radius
+    )
+    sim.add_collider(sphere)
+    sim.step(1.0 / 60.0)
+    pos_after = cloth.positions.copy()
+    # Move the sphere by another 1mm and step — expected to remain stable.
+    sphere.prev_center = sphere.center.copy()
+    sphere.center = vec3(0.151, -0.10, 0.0)
+    sim.step(1.0 / 60.0)
+    drift = float(np.linalg.norm(cloth.positions - pos_after, axis=1).max())
+    assert drift < 8.0e-3, (
+        f"cloth jittered {drift*1000:.1f} mm under a near-stationary hover — "
+        "swept-CCD probably fired despite the tiny collider motion"
+    )
+
+
+def test_moving_sphere_does_not_tunnel_cloth() -> None:
+    """A sphere that jumps farther than its own radius in one frame must still catch verts.
+
+    Reproduces the runtime case where the dance moves a hand bone several
+    centimetres between frames — more than the sphere's radius — so a static
+    end-of-frame collision check leaves the cloth verts the sphere flew past
+    untouched, and the renderer shows the fingers / wrist sitting inside the
+    skirt mesh. With ``prev_center`` set, the projector treats the motion as
+    a swept capsule and pushes those verts to the nearest exit.
+    """
+    cloth = _build_cloth_grid(rows=5, cols=5)
+    sim = ClothSolver(pieces=[cloth])
+    # Sphere starts well above the cloth, moves down through it in one frame.
+    sphere = SphereCollider(
+        center=vec3(0.2, -0.5, 0.0),
+        radius=0.05,
+        prev_center=vec3(0.2, 0.5, 0.0),
+    )
+    sim.add_collider(sphere)
+    sim.step(1.0 / 60.0)
+    # Vertices that were on the swept path (X≈0.2, Z≈0) must have been pushed
+    # out of the capsule formed by prev_center → center.
+    a = sphere.prev_center
+    b = sphere.center
+    seg = b - a
+    seg_len_sq = float(np.dot(seg, seg))
+    rel = cloth.positions - a
+    t = np.clip((rel @ seg) / seg_len_sq, 0.0, 1.0)
+    closest = a + t[:, None] * seg
+    dists = np.linalg.norm(cloth.positions - closest, axis=1)
+    movable = cloth.inverse_masses > 0.0
+    # Without CCD a vert at (0.2, -0.2, 0) would still be at (0.2, -0.2, 0)
+    # — well inside the swept capsule's radius. With CCD it sits on the surface.
+    assert np.all(dists[movable] >= sphere.radius - 5.0e-3), (
+        f"swept-volume tunneling: min dist {dists[movable].min():.4f} < radius {sphere.radius}"
+    )
+
+
+def test_collider_push_does_not_inject_normal_velocity() -> None:
+    """Sphere pushes a vert away; vert should NOT keep flying after the push.
+
+    Reproduces the runtime case where a fast hand sweeps past a hanging skirt:
+    the projection forces the cloth vert outward, but without velocity
+    correction the next Verlet step treats that displacement as injected
+    velocity and the vert keeps accelerating outward for many frames after
+    the actual contact ended. The post-projection prev_position shift
+    nulls the normal component of velocity so the cloth stays where the
+    projection put it instead of flying away.
+    """
+    cloth = _build_cloth_grid(rows=3, cols=3, params=ClothParams(rest_pull=0.0))
+    sim = ClothSolver(pieces=[cloth])
+    free = np.where(cloth.inverse_masses > 0.0)[0]
+    vert_idx = int(free[len(free) // 2])
+    # Seed a sphere overlapping the vert. With prev_center = current center
+    # we hit the static-projection branch.
+    p = cloth.positions[vert_idx]
+    sphere = SphereCollider(center=vec3(p[0], p[1], p[2] + 0.04), radius=0.06)
+    sim.add_collider(sphere)
+    # First step: vert gets projected out of the sphere.
+    sim.step(1.0 / 60.0)
+    pos_after_push = cloth.positions[vert_idx].copy()
+    # Subsequent frames: no forces, no collider motion. The vert must NOT
+    # continue drifting — its position should stay (near) put.
+    for _ in range(30):
+        sim.step(1.0 / 60.0)
+    drift = float(np.linalg.norm(cloth.positions[vert_idx] - pos_after_push))
+    # ~mm-scale residual is fine (structural constraint relaxation against
+    # the static neighbours). The bug was the vert flying tens of cm —
+    # 5 mm is well below "flying" but well above the residual motion.
+    assert drift < 5.0e-3, (
+        f"vert kept moving after collider push: drift {drift:.4f} m "
+        f"(start at {pos_after_push}, end at {cloth.positions[vert_idx]})"
+    )
+
+
+def test_static_sphere_projection_unchanged_when_prev_center_is_none() -> None:
+    """The CCD branch is opt-in: leaving ``prev_center`` as None must keep the
+    cheap static-snapshot projection (no behaviour change for stationary props
+    like the hip sphere).
+    """
+    cloth = _build_cloth_grid(rows=4, cols=4)
+    sim = ClothSolver(pieces=[cloth])
+    sim.add_force(ClothGravity(acceleration=vec3(0.0, -9.8, 0.0)))
+    sphere = SphereCollider(center=vec3(0.15, -0.15, 0.0), radius=0.15)
+    # prev_center intentionally left at default (None)
+    assert sphere.prev_center is None
+    sim.add_collider(sphere)
+    for _ in range(60):
+        sim.step(1.0 / 60.0)
+    movable = cloth.inverse_masses > 0.0
+    deltas = cloth.positions[movable] - sphere.center
+    dists = np.linalg.norm(deltas, axis=1)
+    assert np.all(dists >= sphere.radius - 1.0e-3)
+
+
 def test_capsule_collider_projects_verts_outside() -> None:
     cloth = _build_cloth_grid(rows=4, cols=4)
     sim = ClothSolver(pieces=[cloth])

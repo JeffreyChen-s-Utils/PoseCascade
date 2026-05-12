@@ -49,7 +49,10 @@ class ClothBinding:
     node: Node
     mesh_index: int
     piece: ClothPiece
-    world_to_local: Mat4  # frozen at registration time; used to convert sim positions back to local
+    # Captured at registration. iter_local_state recomputes inv(world) each
+    # frame; this only stays as the fallback when the live world matrix is
+    # singular.
+    world_to_local: Mat4
 
 
 @dataclass
@@ -199,11 +202,23 @@ class ClothHost:
         The renderer consumes this to refresh dynamic VBOs each frame. Positions
         and normals are returned in the cloth node's LOCAL space — the renderer
         applies the model matrix downstream as for any other mesh.
+
+        ``world_to_local`` is recomputed from the node's CURRENT world matrix
+        each frame, not the one captured at registration. Otherwise a parent
+        transform applied after registration (declarative root yaw/lean/
+        translation, IK on an intermediate joint, …) double-applies in the
+        renderer: once via the now-stale local positions, once via the new
+        model matrix the renderer reads off the same node.
         """
         for binding in self._bindings:
             if not binding.piece.enabled:
                 continue
-            local_positions = _transform_points(binding.piece.positions, binding.world_to_local)
+            current_world = _world_matrix(binding.node)
+            try:
+                world_to_local = np.linalg.inv(current_world).astype(np.float32, copy=False)
+            except np.linalg.LinAlgError:
+                world_to_local = binding.world_to_local
+            local_positions = _transform_points(binding.piece.positions, world_to_local)
             local_normals = compute_vertex_normals(local_positions, binding.piece.triangles)
             yield binding, local_positions, local_normals
 

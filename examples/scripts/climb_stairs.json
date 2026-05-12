@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "name": "climb_stairs_demo",
-  "loop_sec": 6.0,
+  "loop_sec": 8.0,
 
   "rig": {
     "character_root": "Sketchfab_model",
@@ -36,7 +36,7 @@
   "phases": [
     {
       "name": "approach",
-      "duration_sec": 1.0,
+      "duration_sec": 2.0,
       "body": {
         "yaw_rad": "pi",
         "translation": {
@@ -47,10 +47,11 @@
       },
       "gait": {
         "kind": "walking",
-        "step_cycle_sec": 0.5,
-        "leg_swing_amplitude": 0.40,
-        "knee_bend": -0.25,
-        "arm_swing_amplitude": 0.35
+        "step_cycle_sec": 1.0,
+        "leg_swing_amplitude": 0.50,
+        "knee_bend": -0.30,
+        "arm_swing_amplitude": 0.40,
+        "arm_hang_rad": -1.45
       },
       "morphs": {
         "blink": "0.5 + 0.5 * sin(elapsed * tau / 3.0)"
@@ -59,7 +60,7 @@
 
     {
       "name": "climb",
-      "duration_sec": 4.0,
+      "duration_sec": 5.0,
       "body": {
         "yaw_rad": "pi",
         "lean_x_rad": 0.10,
@@ -78,12 +79,13 @@
       "gait": {
         "kind": "stride",
         "step_count": 5,
-        "leading_lift_rad": -0.70,
-        "trailing_back_rad": 0.25,
-        "knee_bend_rad": 0.30,
-        "arm_swing_amplitude_rad": 0.40,
-        "knee_bell": [0.10, 0.65],
-        "forward_bell": [0.10, 0.65],
+        "leading_lift_rad": -0.40,
+        "trailing_back_rad": 0.15,
+        "knee_bend_rad": 0.20,
+        "arm_swing_amplitude_rad": 0.30,
+        "arm_hang_rad": -1.45,
+        "knee_bell": [0.05, 0.75],
+        "forward_bell": [0.05, 0.75],
         "lock_trailing_foot": true
       },
       "morphs": {
@@ -103,6 +105,14 @@
           "y": 0.10,
           "z": -0.40
         }
+      },
+      "gait": {
+        "kind": "walking",
+        "step_cycle_sec": 1.0,
+        "leg_swing_amplitude": 0.0,
+        "knee_bend": 0.0,
+        "arm_swing_amplitude": 0.0,
+        "arm_hang_rad": -1.45
       },
       "morphs": {
         "blink": "0.5 + 0.5 * sin(elapsed * tau / 3.0)",

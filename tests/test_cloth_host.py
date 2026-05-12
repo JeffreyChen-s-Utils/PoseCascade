@@ -123,6 +123,62 @@ def test_local_positions_round_trip_through_world_matrix() -> None:
     np.testing.assert_allclose(positions_local, mesh.positions, atol=1.0e-4)
 
 
+def test_local_state_tracks_parent_translation_applied_after_register() -> None:
+    """Parent translated AFTER cloth registration — iter_local_state must compensate.
+
+    The renderer reads the cloth node's CURRENT world matrix every frame.
+    If iter_local_state kept using the registration-time world_to_local, the
+    parent translation would double-apply: once through the stale local
+    positions, once through the new model matrix. This is what made the
+    bundled dance skirt drift when the declarative root yaw/translation
+    started transforming Sketchfab_model.
+    """
+    scene, node, mesh = _scene_with_cloth_node()
+    imported = _make_imported(scene, mesh)
+    host = ClothHost()
+    host.register_imported_scene(imported)
+    # Apply the parent translation only AFTER registration.
+    scene.root.transform.set_translation(vec3(2.0, -1.5, 0.75))
+    _binding, positions_local, _normals = next(iter(host.iter_local_state()))
+    # The cloth positions stayed at the original world coords (no tick called),
+    # so local = inv(current_world) @ world_cloth = inv(translation) @ rest_pos
+    # = rest_pos - translation.
+    expected = mesh.positions - np.array([2.0, -1.5, 0.75], dtype=np.float32)
+    np.testing.assert_allclose(positions_local, expected, atol=1.0e-4)
+
+
+def test_local_state_tracks_parent_rotation_applied_after_register() -> None:
+    """Parent rotated AFTER cloth registration — iter_local_state must compensate.
+
+    The yaw the declarative animation applies to the character root is the
+    common case: cloth positions remain in world coords (anchors track a
+    bone, free verts simulate freely), but the renderer multiplies them by
+    the model matrix the root now carries. Without a live-recomputed
+    world_to_local the skirt visibly counter-rotates against the body.
+    """
+    from posecascade.utils.math3d import quat_from_axis_angle  # noqa: PLC0415
+
+    scene, node, mesh = _scene_with_cloth_node()
+    imported = _make_imported(scene, mesh)
+    host = ClothHost()
+    host.register_imported_scene(imported)
+    # 30deg yaw around +Y on the root, after registration.
+    yaw = float(np.pi / 6.0)
+    scene.root.transform.set_rotation(quat_from_axis_angle(vec3(0.0, 1.0, 0.0), yaw))
+    _binding, positions_local, _normals = next(iter(host.iter_local_state()))
+    # Construct what the renderer will do: world_rendered = model_matrix @ local.
+    # Since cloth positions are still at the rest (mesh) coords in world space,
+    # we want world_rendered == rest_positions.
+    from posecascade.animation.cloth_host import _world_matrix  # noqa: PLC0415
+
+    model = _world_matrix(node)
+    homog = np.column_stack(
+        [positions_local, np.ones((positions_local.shape[0], 1), dtype=np.float32)],
+    )
+    rendered = (homog @ model.T)[:, :3]
+    np.testing.assert_allclose(rendered, mesh.positions, atol=1.0e-4)
+
+
 def test_add_collider_projects_verts() -> None:
     scene, _node, mesh = _scene_with_cloth_node()
     imported = _make_imported(scene, mesh)

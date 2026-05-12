@@ -1204,6 +1204,89 @@ def test_colliders_register_and_track_bones_per_frame() -> None:
     np.testing.assert_allclose(moved_center[0], 1.5, atol=1e-3)
 
 
+def test_cloth_rest_positions_only_anchor_band_follows_track_bone() -> None:
+    """Only the anchor verts' rest_positions follow the track_bone each frame.
+
+    Free verts' rest_positions stay at their init-world coords on purpose —
+    pulling them toward a bone-tracked rest each frame turned the hip's
+    natural oscillation into a constant force on every vert, and the cloth
+    visibly resonated whenever the body or a collider moved. Gravity +
+    structural constraints + the anchor band do enough work to keep the
+    drape sensible without that extra coupling.
+
+    The anchor band still tracks so the waistband rotates with the hip and
+    its structural neighbours rest at the rotated position.
+    """
+    from posecascade.animation.cloth_host import ClothHost  # noqa: PLC0415
+    from posecascade.assets.types import ImportedScene, Mesh  # noqa: PLC0415
+    from posecascade.scene.component import (  # noqa: PLC0415
+        ClothComponent,
+        MeshRefComponent,
+    )
+    from posecascade.utils.math3d import quat_from_axis_angle  # noqa: PLC0415
+
+    positions = np.array(
+        [
+            [-0.1,  0.1, 0.0], [0.1,  0.1, 0.0],
+            [-0.1,  0.0, 0.0], [0.1,  0.0, 0.0],
+            [-0.1, -0.1, 0.0], [0.1, -0.1, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    indices = np.array([0,2,1, 1,2,3, 2,4,3, 3,4,5], dtype=np.uint32)
+    mesh = Mesh(name="m", positions=positions, indices=indices)
+
+    root = _node("Sketchfab_model")
+    bone = _node("hip")
+    cloth_node = _node("cloth_node")
+    root.add_child(bone)
+    root.add_child(cloth_node)
+    cloth_node.add_component(MeshRefComponent(mesh_indices=(0,)))
+    cloth_node.add_component(
+        ClothComponent(cloth_name="c", mesh_index=0, anchor_fraction=0.34),
+    )
+    scene = Scene(name="t")
+    scene.root.add_child(root)
+    imported = ImportedScene(meshes=(mesh,), textures=(), skins=(), scene=scene)
+
+    doc = _minimal_doc()
+    doc["cloth"] = [
+        {"mesh_node": "cloth_node", "track_bone": "hip", "anchor_fraction": 0.34},
+    ]
+    parsed = parse_animation(doc)
+
+    host = ClothHost()
+    host.register_imported_scene(imported)
+
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0, cloth_host=host,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    piece = host.find_piece("cloth_node")
+    rest_before = piece.rest_positions.copy()
+    anchor_idx = np.flatnonzero(piece.inverse_masses == 0.0)
+    free_idx = np.flatnonzero(piece.inverse_masses > 0.0)
+    assert anchor_idx.size > 0 and free_idx.size > 0
+
+    bone.transform.set_rotation(quat_from_axis_angle(vec3(0.0, 1.0, 0.0), 0.5))
+    runtime._update_cloth_anchors()
+
+    # Anchor band rest moved.
+    assert not np.allclose(
+        rest_before[anchor_idx], piece.rest_positions[anchor_idx], atol=1e-4,
+    ), "anchor-vert rest should track the bone"
+    # Free band rest stayed put.
+    np.testing.assert_allclose(
+        rest_before[free_idx], piece.rest_positions[free_idx], atol=1e-6,
+        err_msg=(
+            "free-vert rest should stay at init-world coords — letting it "
+            "track the bone makes every body oscillation push energy into "
+            "the cloth via rest_pull, causing visible flapping."
+        ),
+    )
+
+
 def test_collider_unknown_bone_logged_and_skipped() -> None:
     """A collider with a follow_bone that doesn't exist is logged +
     skipped so the rest of the dance still loads."""

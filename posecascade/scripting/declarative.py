@@ -1500,14 +1500,25 @@ class DeclarativeRuntime:
     def _maybe_register_anchor_follower(
         self, spec: ClothPieceSpec, cloth_piece: Any,
     ) -> None:
-        """Capture each anchored vertex's offset in the track-bone's local
-        frame so :meth:`_update_cloth_anchors` can rebuild the world
-        position from the bone's current transform every frame.
+        """Capture every cloth vertex's offset in the track-bone's local frame.
 
-        Skips silently when the spec has no track bone, the bone isn't
-        in the scene, or the cloth host returned no piece (the latter
-        happens for stub cloth hosts in tests — anchor following has
-        nothing to track in that case).
+        Two index sets land in the follower record:
+
+        - ``anchor_indices`` + ``anchor_offsets``: pinned verts that get their
+          ``positions`` and ``prev_positions`` snapped to the bone's current
+          world position each frame (the waistband stays glued to the hip).
+        - ``all_offsets``: every vert (anchor or free). The whole cloth's
+          ``rest_positions`` is rebuilt from these each frame so the
+          ``rest_pull`` force in the integrator pulls free verts toward where
+          the body is NOW — without this, the body rotating yaw lifts the
+          anchored top of the skirt but leaves the free bottom's rest target
+          at the init-world location, and the structural edges pull the
+          bottom band upward toward the rotated top, shoving the skirt above
+          the shirt's hem.
+
+        Skips silently when the spec has no track bone, the bone isn't in
+        the scene, or the cloth host returned no piece (the latter happens
+        for stub cloth hosts in tests).
         """
         if spec.track_bone is None or cloth_piece is None:
             return
@@ -1518,8 +1529,6 @@ class DeclarativeRuntime:
                 spec.track_bone,
             )
             return
-        # Anchored verts are the ones with inverse_mass == 0 by the
-        # cloth solver's convention; capture their indices once.
         anchor_indices = np.flatnonzero(
             np.asarray(cloth_piece.inverse_masses, dtype=np.float32) == 0.0,
         )
@@ -1527,46 +1536,48 @@ class DeclarativeRuntime:
             return
         bone_world_start = _world_matrix(bone_node)
         bone_world_inv = np.linalg.inv(bone_world_start).astype(np.float32, copy=False)
-        anchored_world = np.asarray(
-            cloth_piece.positions[anchor_indices], dtype=np.float32,
-        )
-        # Convert each anchored world position into bone-local frame:
-        # offset_local = bone_world_inv @ [pos.x, pos.y, pos.z, 1]
+        all_world = np.asarray(cloth_piece.positions, dtype=np.float32)
         homog = np.column_stack(
-            [anchored_world, np.ones((anchored_world.shape[0], 1), dtype=np.float32)],
+            [all_world, np.ones((all_world.shape[0], 1), dtype=np.float32)],
         )
-        offsets_local = (homog @ bone_world_inv.T)[:, :3].astype(np.float32, copy=False)
+        all_offsets_local = (homog @ bone_world_inv.T)[:, :3].astype(np.float32, copy=False)
+        anchor_offsets_local = all_offsets_local[anchor_indices]
         self._cloth_anchor_followers.append(
-            (cloth_piece, bone_node, anchor_indices, offsets_local),
+            (cloth_piece, bone_node, anchor_indices, anchor_offsets_local, all_offsets_local),
         )
 
     def _update_cloth_anchors(self) -> None:
-        """Move each tracked piece's anchor verts to the bone's current frame.
+        """Snap each tracked piece's anchor verts (only) to the bone's frame.
 
-        Uses each frame's parent-chain world matrix on the bone — same
-        transform the renderer would have skinned the body mesh with —
-        so the anchored skirt waistband stays glued to the hip even
-        when the dance rotates the hip bone (which the cloth's static
-        world frame would otherwise miss because the skirt mesh node
-        isn't parented to that bone in the imported scene tree).
+        Anchor verts have ``positions``, ``prev_positions``, and
+        ``rest_positions`` all teleported to the bone's current world
+        position. ``prev_positions`` matches ``positions`` so the Verlet
+        step doesn't see a teleport-induced velocity spike, and
+        ``rest_positions`` follows so the structural edges between an
+        anchor vert and its free neighbours rest at the rotated waistband
+        rather than the init-pose waistband.
+
+        Free verts are left to simulate. Their ``rest_positions`` stay at
+        the init-world coords on purpose — pulling them toward a bone-
+        tracked rest each frame turned the hip's natural oscillation into
+        a constant force on every vert, and the cloth visibly resonated
+        whenever the body or a collider moved. Gravity + structural
+        constraints + the anchored top band do enough work to keep the
+        skirt drape sensible without that extra coupling.
         """
         if not self._cloth_anchor_followers:
             return
-        for piece, bone_node, indices, offsets_local in self._cloth_anchor_followers:
+        for piece, bone_node, anchor_indices, anchor_offsets, _all_offsets in (
+            self._cloth_anchor_followers
+        ):
             bone_world = _world_matrix(bone_node)
-            # Transform offsets_local back into world: world = bone_world @ [off, 1]
-            homog = np.column_stack(
-                [offsets_local, np.ones((offsets_local.shape[0], 1), dtype=np.float32)],
+            homog_a = np.column_stack(
+                [anchor_offsets, np.ones((anchor_offsets.shape[0], 1), dtype=np.float32)],
             )
-            new_world = (homog @ bone_world.T)[:, :3].astype(np.float32, copy=False)
-            piece.positions[indices] = new_world
-            # Suppress velocity kick: prev_positions matches new so the
-            # next Verlet step doesn't see a teleport.
-            piece.prev_positions[indices] = new_world
-            # Updating rest_positions so the rest_pull on neighbouring
-            # non-anchored verts pulls them toward the body's CURRENT
-            # rest pose, not the body-at-init pose.
-            piece.rest_positions[indices] = new_world
+            new_anchor_world = (homog_a @ bone_world.T)[:, :3].astype(np.float32, copy=False)
+            piece.positions[anchor_indices] = new_anchor_world
+            piece.prev_positions[anchor_indices] = new_anchor_world
+            piece.rest_positions[anchor_indices] = new_anchor_world
 
     def _update_bone_colliders(self) -> None:
         """Refresh each bone-following collider's geometry from its bones.
@@ -1576,15 +1587,25 @@ class DeclarativeRuntime:
         post-pose world transforms — meaning the cloth solver sees the
         arms / hands where they actually are this frame, not where
         they were on the previous tick.
+
+        Stashes the previous frame's centre / endpoints onto the collider
+        before overwriting them. The cloth solver's swept-capsule CCD reads
+        those to project verts outside the volume the collider passed
+        through, not just where it ended up — without this, a hand that
+        moves more than its own radius between frames tunnels straight
+        through the skirt.
         """
         if not self._bone_colliders:
             return
         for collider, kind, head_node, tail_node in self._bone_colliders:
             head_pos = _world_position(head_node).astype(np.float32)
             if kind == "sphere":
+                collider.prev_center = collider.center.copy()
                 collider.center = head_pos
             else:
                 tail_pos = _world_position(tail_node).astype(np.float32)
+                collider.prev_a = collider.a.copy()
+                collider.prev_b = collider.b.copy()
                 collider.a = head_pos
                 collider.b = tail_pos
 
