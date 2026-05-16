@@ -334,6 +334,98 @@ solver sweeps each edge against the collider every step.
 
 For the full schema, see :doc:`/declarative_animation`.
 
+Inheriting boilerplate (``extends``)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A profile JSON can carry the rig / ground / physics_chains / wind /
+colliders / collision_deform_meshes block once; every animation that
+targets the same character drops them and just references the
+profile:
+
+.. code-block:: json
+
+   {
+     "schema_version": 1,
+     "extends": "_herta_profile.json",
+     "name": "my_anim",
+     "loop_sec": 4.0,
+     "phases": [
+       { "name": "do_thing", "duration_sec": 4.0, "pose": "rest_arms" }
+     ]
+   }
+
+``extends`` resolves relative to the file's directory and is
+path-traversal safe. The merge is shallow at the top level — each
+child key replaces the parent's value outright, with the exception
+of ``pose_library`` and ``hand_library`` which merge per-preset.
+``phases`` are never inherited.
+
+The bundled ``_herta_profile.json`` is a working example —
+``idle.json``, ``walk.json``, ``climb_stairs.json``, and
+``showcase.json`` all extend from it.
+
+Shorthand syntax
+^^^^^^^^^^^^^^^^
+
+Three array shapes are accepted as authoring shortcuts:
+
+* ``[from, to]`` instead of ``{"kind": "linear", "from": …, "to": …}``
+  for a linear curve.
+* ``[x, y, z]`` instead of ``{"x": …, "y": …, "z": …}`` for
+  ``body.translation``. Each element is itself a value curve, so
+  ``[0, 0, [0.0, -2.0]]`` means "linear Z 0 → -2 over the phase,
+  X and Y constant".
+* ``x`` / ``y`` / ``z`` instead of ``x_rad`` / ``y_rad`` / ``z_rad``
+  for axes inside a ``bones`` block.
+
+Mixing the short and long forms on the same axis (``{"x": 0.5,
+"x_rad": 0.5}``) is rejected at parse time.
+
+----
+
+In-editor animation editor
+--------------------------
+
+PoseCascade ships an in-editor authoring surface for declarative
+animations: two right-column docks sharing one in-memory document
+plus an undo / redo command stack so an author can pick whichever
+view fits the moment (drag a card vs. type into the JSON) and switch
+freely.
+
+Open any ``.json`` declarative animation via ``File → Open Script…``
+and both docks populate at once. Toggle them from ``View → Animation
+JSON`` and ``View → Phase blocks``.
+
+The **JSON dock** is a code editor with per-line syntax highlighting
+(keys / strings / numbers / literals / punct), a line-number gutter
+that paints the parser-error row red, a Format button that
+pretty-prints through ``json.dumps``, a dirty indicator (``*`` in
+the dock title until saved), and a Reload button that re-attaches
+the script into the running runtime without a window restart.
+
+The **Phase blocks dock** has a horizontal timeline strip (one bar
+per phase, width proportional to ``duration_sec``; click to select,
+drag to reorder, drag the right edge to resize) plus a vertical
+card list summarising each phase. Selecting a card reveals an inline
+form covering every common field:
+
+* **Basic** — name, duration, blend in/out, pose preset, hand L/R
+  presets, body yaw, body lean X.
+* **Gait** — kind picker (none / walking / stride) with kind-aware
+  field reveal.
+* **Body translation** — XYZ value curves or a stair block.
+* **Bones** — table of bone × (x / y / z) curve cells; clicking a
+  cell opens a ``CurveEditor`` for any of the 11 supported curve
+  kinds.
+* **Morphs** — same table pattern keyed on morph name.
+
+Ctrl+Z / Ctrl+Y route through the shared command stack so undo
+works across both docks. The JSON editor's per-keystroke undo is
+disabled; snapshots happen once per typing session and once per
+discrete UI action.
+
+For the full surface, see :doc:`/animation_editor`.
+
 ----
 
 Sandboxed Python scripts
@@ -446,6 +538,17 @@ sphere / capsule colliders. The solver is written twice:
 
 If the Cython extension isn't compiled, the kernel transparently
 degrades to a pure-NumPy fallback. Same API, ~9× slower.
+
+A separate **GPU compute path** handles ``passive_skin_deform``
+cloth pieces — large character meshes that need LBS + collider push
+on every vertex but don't need full PBD. The OpenGL 4.3 compute
+shader at ``shaders/passive_skin/passive_skin_push.comp`` writes
+directly into the mesh's existing position + normal VBOs, dropping
+the per-frame cost on a 30 k-vert body mesh from ~9 ms on the CPU
+to under 0.05 ms. Falls back transparently to the CPU LBS path
+when the context lacks 4.3 / compute support. See
+:doc:`/rendering_pipeline` for the dispatcher API and integration
+details.
 
 Benchmarks (480-vert skirt, 8 iterations / step, 100-step warmup,
 best of three runs):

@@ -313,6 +313,85 @@ Expression DSL
 
 完整 schema 見 :doc:`/declarative_animation`。
 
+繼承樣板（``extends``）
+^^^^^^^^^^^^^^^^^^^^^^^
+
+profile JSON 可以把 rig / ground / physics_chains / wind / colliders /
+collision_deform_meshes 寫一次，所有針對同一角色的動畫檔就只 reference
+這個 profile：
+
+.. code-block:: json
+
+   {
+     "schema_version": 1,
+     "extends": "_herta_profile.json",
+     "name": "my_anim",
+     "loop_sec": 4.0,
+     "phases": [
+       { "name": "do_thing", "duration_sec": 4.0, "pose": "rest_arms" }
+     ]
+   }
+
+``extends`` 路徑相對於檔案所在目錄，已做 path-traversal 安全檢查。
+合併是 top-level shallow merge——子檔的每個 key 整段蓋掉父檔。例外是
+``pose_library`` 和 ``hand_library``，這兩個會 per-preset 合併。
+``phases`` 永遠不繼承。
+
+隨附 ``_herta_profile.json`` 是現成範例——``idle.json``、``walk.json``、
+``climb_stairs.json``、``showcase.json`` 都從它繼承。
+
+簡寫語法
+^^^^^^^^
+
+三種陣列簡寫：
+
+* ``[from, to]`` 取代 ``{"kind": "linear", "from": …, "to": …}``。
+* ``[x, y, z]`` 取代 ``{"x": …, "y": …, "z": …}``（``body.translation``）。
+  每個元素本身可以是 value curve，所以 ``[0, 0, [0.0, -2.0]]`` 表示
+  Z 軸 linear 0 → -2，X / Y 維持常數。
+* ``bones`` 區塊裡 ``x`` / ``y`` / ``z`` 取代 ``x_rad`` / ``y_rad`` / ``z_rad``。
+
+同一根骨頭的同一軸同時寫長 / 短形（``{"x": 0.5, "x_rad": 0.5}``）會
+在 parse 時報錯。
+
+----
+
+編輯器內動畫編輯器
+------------------
+
+PoseCascade 內建一個 in-editor 動畫編輯介面：兩個共用同一份
+in-memory document 的右側 dock，加上一個共用 undo / redo command stack。
+作者可以隨時切換「拖卡片」跟「打 JSON」兩種工作流。
+
+``File → Open Script…`` 開啟任何 ``.json`` 動畫——兩個 dock 都會同步
+填入。``View → Animation JSON`` 跟 ``View → Phase blocks`` 可獨立顯隱。
+
+**JSON dock** 是個 code editor，per-line 語法上色（key / string /
+number / literal / punct）、行號 gutter（parse error 那一行畫紅色）、
+Format 按鈕（透過 ``json.dumps`` pretty-print）、dirty indicator
+（dock title 帶 ``*`` 直到 Save）、Reload 按鈕（直接把腳本 re-attach
+到 runtime，不必重開視窗）。
+
+**Phase blocks dock** 上面一條橫向時間軸（每個 phase 一條 bar，寬度
+正比於 ``duration_sec``，點選 / 拖曳重排 / 拖右邊緣調 duration），
+下面一列縱向卡片摘要每個 phase。選中卡片會展開 inline 表單，覆蓋所有
+常用欄位：
+
+* **Basic** —— name、duration、blend in/out、pose preset、hand L/R、
+  body yaw、body lean X。
+* **Gait** —— kind picker（none / walking / stride），不同 kind 顯隱
+  對應欄位。
+* **Body translation** —— XYZ value curves 或 stair block。
+* **Bones** —— bone × (x / y / z) curve cell 的表格；點選 cell 會
+  彈出 ``CurveEditor``，11 種 curve kind 都支援。
+* **Morphs** —— 同樣的表格，key 是 morph 名稱。
+
+Ctrl+Z / Ctrl+Y 走共用 command stack，所以 undo 在兩個 dock 都通。
+JSON 編輯器內建的 per-keystroke undo 被關閉；snapshot 一個 typing
+session 才取一次，UI 動作各取一次。
+
+完整介紹見 :doc:`/animation_editor`。
+
 ----
 
 沙箱 Python 腳本
@@ -413,6 +492,14 @@ Solver 寫了兩份：
 
 Cython 擴展沒編譯的話，kernel 會透明退回 NumPy fallback。一樣的 API，
 速度約 9× 慢。
+
+另外有一條 **GPU compute 路徑**，專處理 ``passive_skin_deform`` 布料
+（大型角色 mesh 需要 LBS + collider push 但不需要完整 PBD 的場景）。
+OpenGL 4.3 compute shader 位於
+``shaders/passive_skin/passive_skin_push.comp``，直接寫進 mesh 既有的
+position / normal VBO，在 30k-vert 身體 mesh 上把每幀成本從 ~9 ms（CPU）
+壓到 0.05 ms 以下。GL 版本低於 4.3 / compute 編譯失敗時透明退回 CPU LBS。
+dispatcher API 與整合細節見 :doc:`/rendering_pipeline`。
 
 Benchmark（480-vert 裙、每步 8 次迭代、100-step warmup、三次中最佳）：
 

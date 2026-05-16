@@ -13,6 +13,60 @@ loader is `posecascade.scripting.declarative.load_animation`; the
 `.json` file goes through this runtime while `.py` keeps the existing
 sandbox flow.
 
+## Inheriting from a profile (`extends`)
+
+Boilerplate like the rig definition, ground, physics chains, wind,
+and bone-follow colliders is identical across every animation that
+targets the same character. Pull that into a profile JSON and
+reference it from the top-level `extends` field:
+
+```json
+{
+  "schema_version": 1,
+  "extends": "_herta_profile.json",
+  "name": "my_anim",
+  "loop_sec": 4.0,
+  "phases": [
+    { "name": "do_thing", "duration_sec": 4.0, "pose": "rest_arms" }
+  ]
+}
+```
+
+`extends` resolves relative to the file's directory (path-traversal
+safe via `posecascade.assets.path_safety.resolve_safe`). Each
+top-level key in the child **replaces** the parent's value outright —
+shallow merge — so an animation that wants different stairs writes
+its own `ground` block and the parent's flat ground is dropped
+wholesale. Two top-level keys are the exception: `pose_library` and
+`hand_library` merge per-preset, so a child can add or override one
+pose without redeclaring the whole library. Phases are **never**
+inherited.
+
+Cycles are rejected and the chain depth is capped at four.
+
+The bundled `examples/scripts/_herta_profile.json` is a working
+example — `idle.json`, `walk.json`, `climb_stairs.json`, and
+`showcase.json` all extend from it, which is what makes the typical
+authoring file about a third the size of the long-form version.
+
+## Shorthand syntax
+
+Three array shapes are accepted as shortcuts:
+
+| Shape                                  | Equivalent dict                                       |
+|----------------------------------------|-------------------------------------------------------|
+| `[from, to]` for a curve               | `{"kind": "linear", "from": …, "to": …}`              |
+| `[x, y, z]` for `body.translation`     | `{"x": …, "y": …, "z": …}`                            |
+| `x` / `y` / `z` in a `bones` axis      | `x_rad` / `y_rad` / `z_rad`                           |
+
+Each element of the `[x, y, z]` array is itself a value curve, so
+animated single axes still work: `"translation": [0, 0, [0.0, -2.0]]`
+means "linear Z 0 → -2 over the phase, X and Y constant".
+
+Mixing the short and long forms on the **same axis** of one bone
+(`{"x": 0.5, "x_rad": 0.5}`) is rejected at parse time so a halfway
+refactor doesn't silently drop one of the writes.
+
 ## Document shape
 
 ```json

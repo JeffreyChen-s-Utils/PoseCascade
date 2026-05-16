@@ -39,8 +39,26 @@ PBD cloth solver fast enough to drape several pieces in real time.
   compiled extension isn't built.
 - **Declarative animation runtime**: drive a character from a JSON
   document instead of Python — phases, gaits, body trajectories,
-  morph timelines, and an inline expression DSL.
-  See [`docs/declarative_animation.md`](docs/declarative_animation.md).
+  morph timelines, an inline expression DSL, plus an `extends`
+  profile-inheritance mechanism and array shorthands (`[from, to]`
+  curves, `[x, y, z]` translation, `x` / `y` / `z` bone axis aliases)
+  so a typical authoring file is a third the size of one written
+  out longhand. See [`docs/declarative_animation.md`](docs/declarative_animation.md).
+- **In-editor animation editor** (new): two right-column docks
+  bound to one shared document — a JSON editor with syntax
+  highlighting, line-number gutter, inline error marks, format
+  button, and dirty indicator; and a phase-blocks dock with a
+  horizontal timeline (drag-to-reorder + drag-edge-to-resize),
+  vertical phase cards, and an inline form covering every common
+  field (name / duration / blends / pose / gait / body translation /
+  bones / morphs). Ctrl+Z / Ctrl+Y undo/redo across both views.
+  See [`docs/animation_editor.md`](docs/animation_editor.md).
+- **GPU compute skinning** (new): an OpenGL 4.3 compute-shader path
+  for `passive_skin_deform` cloth pieces does LBS + collider push +
+  world-to-local on the GPU, writing directly into the mesh's
+  position + normal VBOs. Drops per-frame cloth + apply_cloth from
+  ~9 ms to under 0.05 ms on a 30 k-vert body mesh. Transparently
+  falls back to the CPU LBS path on contexts that lack 4.3 / compute.
 - **Sandboxed Python scripts**: a restricted namespace (no `open`,
   `os`, `subprocess`, `__import__`, …) exposes `scene`, `nodes`,
   `time`, `input`, and a curated math layer so users can pose,
@@ -177,8 +195,11 @@ lives in [`docs/rendering_pipeline.md`](docs/rendering_pipeline.md).
 
 ## Performance notes
 
-The cloth solver has been the recent focus. On the 480-vert skirt
-benchmark in `posecascade.mcp.server.cloth_benchmark`:
+Two passes through the engine have been the recent focus: the cloth
+solver and the renderer hot path.
+
+**Cloth** — 480-vert skirt benchmark
+(`posecascade.mcp.server.cloth_benchmark`):
 
 | Stage                                  | ms/step (best) | vs baseline |
 |----------------------------------------|---------------:|------------:|
@@ -187,10 +208,40 @@ benchmark in `posecascade.mcp.server.cloth_benchmark`:
 | Cython kernel                          |          0.356 |    **−89%** |
 | Cython + broad-phase + bin culling     |          0.36–0.38 (single-bin colliders save 30%) | — |
 
+On the bundled 30 k-vert body mesh in the showcase scene, the GPU
+compute skinning path turns the same passive_skin LBS + collider
+push from a ~9 ms CPU cost into well under 0.05 ms — written
+directly into the mesh's existing position + normal VBOs with no
+CPU readback.
+
+**Renderer** — showcase scene at 768×768 with shadow + projected
+shadow + ground + outline + toon, driven by `tools/bench_renderer.py`:
+
+| Stage                                  | ms/frame |    FPS |
+|----------------------------------------|---------:|-------:|
+| Baseline                               |     7.88 |    127 |
+| Per-frame uniform-state cache          |     6.09 |    164 |
+| + glUseProgram hoisting in shadow pass |     5.04 |    198 |
+| + batched bone-matrix matmul           | **~4.50**| **~220**|
+
+Wins come from a per-program "already uploaded this frame" cache
+that skips ~85% of `glUniformMatrix4fv` / `ascontiguousarray` calls,
+hoisting `glUseProgram` out of per-mesh inner loops in the depth +
+projected-shadow passes, and replacing per-joint Python matmul in
+`_compute_bone_matrices` with a single batched `np.matmul`.
+
+**Declarative runtime** — per-frame parent-world rotation cache,
+an `lru_cache`-backed AST parse for the expression DSL, and an
+`extends` resolver that runs at load time (no per-frame cost). On
+showcase the JSON-driven update step holds steady around 0.6 ms.
+
 Per-frame timing for the renderer hot path is wrapped in
 `posecascade.utils.profiling.frame_section` so a UI overlay (or a
 custom test) can pull a per-frame breakdown out of
-`current_stats().sections`.
+`current_stats().sections`. `tools/bench_renderer.py` drives the
+showcase scene through a fixed number of frames and prints the
+breakdown — useful for spotting regressions before pushing renderer
+changes.
 
 ## License
 

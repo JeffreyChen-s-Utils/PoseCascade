@@ -27,8 +27,20 @@ VMD 風格動畫曲線、IK + 腳掌貼地、morph target，以及可即時擺�
   **0.35 ms** 左右——比純 NumPy fallback 快約 9×。若編譯擴展未建構，kernel 會透明
   地退回 NumPy 路徑。
 - **聲明式動畫 runtime**：用 JSON 文件而不是 Python 程式碼來驅動角色——phases、
-  gaits、body trajectories、morph 時間線，以及行內 expression DSL。
-  詳見 [`docs/declarative_animation.md`](docs/declarative_animation.md)。
+  gaits、body trajectories、morph 時間線、行內 expression DSL，加上 `extends`
+  繼承機制與陣列簡寫（`[from, to]` 曲線、`[x, y, z]` 平移、bones 的 `x`/`y`/`z`
+  軸別名），把典型動畫檔長度縮到原本長寫法的 1/3。詳見
+  [`docs/declarative_animation.md`](docs/declarative_animation.md)。
+- **編輯器內動畫編輯器**（新）：兩個共用同一份 in-memory document 的右側 dock——
+  JSON 編輯器具備語法上色、行號 gutter、parse error 行內標記、Format 按鈕、
+  dirty indicator；Phase 方塊 dock 則有橫向時間軸（拖曳重排 + 拖邊緣調 duration）、
+  縱向卡片列表，加上 inline 表單覆蓋所有常用欄位（name / duration / blends /
+  pose / gait / body translation / bones / morphs）。兩邊都接 Ctrl+Z / Ctrl+Y
+  undo/redo。詳見 [`docs/animation_editor.md`](docs/animation_editor.md)。
+- **GPU compute 蒙皮**（新）：用 OpenGL 4.3 compute shader 把 `passive_skin_deform`
+  布料的 LBS + 碰撞推開 + world-to-local 都搬到 GPU，直接寫進 mesh 的 position
+  與 normal VBO。在 30k-vert 身體 mesh 上把每幀 cloth + apply_cloth 從 ~9 ms 降到
+  0.05 ms 以下；GL 版本低於 4.3 或 compute 編譯失敗時透明退回 CPU LBS 路徑。
 - **沙箱化 Python 腳本**：在受限的命名空間裡執行（拿不到 `open`、`os`、`subprocess`、
   `__import__` …），對外只提供 `scene`、`nodes`、`time`、`input`，以及一層整理過的
   數學 API，讓使用者擺姿勢、打 keyframe、做動畫，不必碰引擎內部。
@@ -158,8 +170,10 @@ projected shadow、selection overlay、後處理 effect chain。每個 pass 都�
 
 ## 效能備註
 
-布料求解器是近期主要的優化重點。`posecascade.mcp.server.cloth_benchmark`
-裡 480-vert 裙子的 benchmark：
+最近兩條主要的優化路線：布料求解器與渲染器熱路徑。
+
+**布料** —— 480-vert 裙子 benchmark
+（`posecascade.mcp.server.cloth_benchmark`）：
 
 | 階段                                   | ms/step (best) |  vs baseline |
 |----------------------------------------|---------------:|-------------:|
@@ -168,8 +182,33 @@ projected shadow、selection overlay、後處理 effect chain。每個 pass 都�
 | Cython kernel                          |          0.356 |     **−89%** |
 | Cython + broad-phase + bin culling     |  0.36–0.38（單 bin collider 多省 30%） | — |
 
+showcase 場景中 30k-vert 身體 mesh 那條 passive_skin LBS + 碰撞推開，
+GPU compute 路徑把原本 ~9 ms 的 CPU 成本壓到 0.05 ms 以下，直接寫進 mesh
+既有的 position / normal VBO，沒有 CPU readback。
+
+**渲染器** —— 768×768 showcase 場景開全部 pass（shadow + projected shadow
++ ground + outline + toon），用 `tools/bench_renderer.py` 跑：
+
+| 階段                                   | ms/frame |    FPS |
+|----------------------------------------|---------:|-------:|
+| Baseline                               |     7.88 |    127 |
+| 每幀 uniform-state 快取                |     6.09 |    164 |
+| + shadow pass 拉出 glUseProgram        |     5.04 |    198 |
+| + 批次 bone-matrix matmul              | **~4.50**| **~220**|
+
+提升來源：per-program「這幀已上傳過」的 uniform 快取省下大約 85% 的
+`glUniformMatrix4fv` / `ascontiguousarray` 呼叫；把 `glUseProgram` 拉出
+depth 與 projected-shadow pass 的 per-mesh 內迴圈；以及把
+`_compute_bone_matrices` 裡每個關節的 Python matmul 換成單一批次 `np.matmul`。
+
+**聲明式 runtime** —— 每幀 parent-world rotation 快取、`lru_cache` 化的
+expression AST 解析、以及只在載入時跑的 `extends` 解析（沒有 per-frame 成本）。
+在 showcase 上 JSON 驅動的 update 穩定在 0.6 ms 左右。
+
 渲染器熱路徑的每幀計時都用 `posecascade.utils.profiling.frame_section` 包起來，
 UI overlay（或自訂測試）能從 `current_stats().sections` 拉出每幀分解。
+`tools/bench_renderer.py` 把 showcase 場景跑指定幀數並印出細目—— renderer 變更
+push 之前可以先用它抓 regression。
 
 ## 授權
 
