@@ -187,3 +187,8 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+.idea/vcs.xml
+.idea/pyProjectModel.xml
+.claude/settings.local.json
+.claude/settings.local.json
+/.claude
