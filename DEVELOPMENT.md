@@ -194,28 +194,28 @@ Versions are derived from git tags via
 `local_scheme = "no-local-version"` keeps non-tag builds PEP 440
 clean so TestPyPI / PyPI accept them.
 
-### One-time PyPI configuration
+### One-time PyPI configuration — `PYPI_API_TOKEN`
 
-The publish step uses
-[PyPI Trusted Publishing](https://docs.pypi.org/trusted-publishers/),
-so **no API token is stored in the repo**. The maintainer configures
-this once on PyPI:
+The publish step authenticates with a PyPI API token stored as a
+GitHub repository secret. One-time setup:
 
-1. Sign in to <https://pypi.org/> as a maintainer of the
-   `posecascade` project. (If the project doesn't exist yet, the
-   first release uses the
-   [pending publisher flow](https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/).)
-2. Project → **Manage** → **Publishing**.
-3. Add a GitHub publisher:
-   * Owner: `JeffreyChen-s-Utils`
-   * Repository: `PoseCascade`
-   * Workflow filename: `wheels.yml`
-   * Environment name: `release`
-4. Save.
+1. Sign in to <https://pypi.org/> and go to
+   <https://pypi.org/manage/account/token/>.
+2. **Add API token**. Token name: anything (e.g. `posecascade-ci`).
+   Scope: pick `Entire account` for the first ever upload of a new
+   project, then immediately rotate to `Project: posecascade` after
+   the first version lands (PyPI only lets you scope to existing
+   projects).
+3. Copy the token (`pypi-...`) — PyPI only shows it once.
+4. On the repo → **Settings → Secrets and variables → Actions →
+   New repository secret**. Name `PYPI_API_TOKEN`, paste the token.
 
-The matching `environment: release` in `wheels.yml` is what PyPI
-checks against. If you change the environment name in either file,
-change it in both.
+`wheels.yml`'s `publish` job reads `secrets.PYPI_API_TOKEN` and
+passes it to `pypa/gh-action-pypi-publish` as the upload password.
+No OIDC, no environment configuration, no `id-token` permission.
+
+If the token is rotated on PyPI, update the `PYPI_API_TOKEN` secret
+to match; nothing else needs to change in the repo.
 
 ### Reverting / yanking a release
 
