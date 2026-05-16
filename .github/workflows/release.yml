@@ -45,10 +45,18 @@ jobs:
           # the latest ``v*`` tag. Without ``fetch-depth: 0`` the
           # checkout is shallow and ``git tag --list`` returns nothing.
           fetch-depth: 0
-          # Use a deploy key / PAT if your branch protection blocks
-          # the default GITHUB_TOKEN from pushing tags. The default
-          # token works on standard repos.
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # IMPORTANT: use a PAT, not GITHUB_TOKEN, to push the new
+          # tag. GitHub Actions deliberately suppresses workflow
+          # triggers from pushes authenticated by GITHUB_TOKEN to
+          # prevent recursion — that means a tag pushed here with
+          # GITHUB_TOKEN would NOT trigger ``wheels.yml`` and the
+          # release pipeline would silently no-op (tag created, no
+          # build, no PyPI upload, no GitHub Release). The PAT
+          # workaround is the documented escape hatch:
+          # https://docs.github.com/en/actions/security-guides/automatic-token-authentication#using-the-github_token-in-a-workflow
+          # Create a fine-grained PAT scoped to this repo with
+          # Contents: read+write, store it as ``RELEASE_PAT``.
+          token: ${{ secrets.RELEASE_PAT }}
 
       - name: Compute next version
         id: version

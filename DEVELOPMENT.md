@@ -182,6 +182,26 @@ Versions are derived from git tags via
 `local_scheme = "no-local-version"` keeps non-tag builds PEP 440
 clean so TestPyPI / PyPI accept them.
 
+### One-time GitHub configuration — `RELEASE_PAT`
+
+`release.yml` pushes the new `v*` tag, and that tag push is what
+triggers `wheels.yml` to build + publish. GitHub Actions deliberately
+suppresses downstream-workflow triggers from pushes authenticated by
+the default `GITHUB_TOKEN` (anti-recursion). The escape hatch is a
+fine-grained Personal Access Token:
+
+1. <https://github.com/settings/tokens?type=beta> →
+   **Generate new token (fine-grained)**.
+2. Repository access: only `PoseCascade`.
+3. Repository permissions: **Contents → Read and write**.
+4. Generate, copy.
+5. Repo → **Settings → Secrets and variables → Actions → New
+   repository secret**. Name `RELEASE_PAT`, paste the value.
+
+`release.yml`'s checkout step reads `secrets.RELEASE_PAT` and uses it
+for the `git push origin v*` that follows. Without this secret the
+tag is created but `wheels.yml` never runs.
+
 ### One-time PyPI configuration
 
 The publish step uses
