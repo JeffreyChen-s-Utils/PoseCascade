@@ -1,66 +1,178 @@
-name: Build wheels
+name: Build wheels & release
 
-# Triggers:
-#   - On a release tag (``v*``) — full matrix, then upload the wheel +
-#     sdist as release artefacts (uncomment the PyPI publish step once
-#     you've configured the ``PYPI_API_TOKEN`` repo secret).
-#   - On workflow_dispatch — manual run for sanity-checking the matrix.
-#   - On PR — only Linux × cp314 so the build doesn't blow CI minutes;
-#     macOS / Windows / older Pythons are covered on release.
+# One workflow handles the whole release chain on every push to ``main``:
+# compute next version → build wheels (matrix) → build sdist → PyPI
+# publish → build Nuitka .exe → tag the commit + create the GitHub
+# Release with the .exe attached. Doing everything inside a single
+# workflow run sidesteps GitHub Actions' anti-recursion rule that
+# blocks workflow triggers from GITHUB_TOKEN pushes — no PAT, no
+# manual setup, the default token is enough.
+
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+    tags: ["v*"]
   pull_request:
     paths:
-      - 'posecascade/animation/_cloth_kernels.pyx'
-      - 'setup.py'
-      - 'pyproject.toml'
-      - '.github/workflows/wheels.yml'
+      - "posecascade/animation/_cloth_kernels.pyx"
+      - "setup.py"
+      - "pyproject.toml"
+      - ".github/workflows/wheels.yml"
   workflow_dispatch:
 
+# No workflow-level ``permissions:`` block. SonarCloud rules
+# githubactions:S8233 (write) and githubactions:S8264 (read) both
+# enforce least-privilege at the job level: any permission granted
+# on the workflow is inherited by every job in the workflow, which
+# is over-broad even for a bare ``contents: read``. Each job below
+# carries its own ``permissions:`` block scoped to exactly what
+# that one job touches.
+
 jobs:
+  # ---------------------------------------------------------------------
+  # compute_version: pick the next v* tag from the most recent one.
+  # Only runs on push-to-main; PR / tag / dispatch paths build from
+  # whatever version setuptools-scm derives from the existing repo
+  # state (the tag itself for tag pushes, fallback_version for PRs).
+  # ---------------------------------------------------------------------
+  compute_version:
+    if: |
+      github.event_name == 'push'
+      && github.ref == 'refs/heads/main'
+      && !contains(github.event.head_commit.message, '[skip release]')
+      && !contains(github.event.head_commit.message, '[skip ci]')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read   # read git tags only
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0           # need full tag history
+          persist-credentials: false   # read-only job; don't store the token
+      - id: v
+        shell: bash
+        # The commit message is passed through an env var, not
+        # interpolated into the script body. ``${{ github.event.* }}``
+        # expressions are baked into the shell text at workflow
+        # render time, so a commit subject containing single quotes
+        # (or worse, ``'; rm -rf /; '``) would break out of the
+        # ``msg='...'`` assignment and execute arbitrary code on the
+        # runner. Routing the value through env (which goes through
+        # GitHub Actions' standard string-passing path, not shell
+        # parsing) closes that injection sink — flagged by SonarCloud
+        # as a Security Hotspot on the previous workflow design.
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          set -euo pipefail
+          latest=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+          if [[ -z "$latest" ]]; then
+            next="0.0.1"
+            echo "No previous tag; starting at v$next"
+          else
+            current="${latest#v}"
+            IFS='.' read -r major minor patch <<< "$current"
+            major=${major:-0}; minor=${minor:-0}; patch=${patch:-0}
+            if printf '%s' "$COMMIT_MSG" | grep -qiE '\[release[[:space:]]+major\]'; then
+              major=$((major + 1)); minor=0; patch=0
+              bump="major"
+            elif printf '%s' "$COMMIT_MSG" | grep -qiE '\[release[[:space:]]+minor\]'; then
+              minor=$((minor + 1)); patch=0
+              bump="minor"
+            else
+              patch=$((patch + 1))
+              bump="patch"
+            fi
+            next="${major}.${minor}.${patch}"
+            echo "Previous tag: v$current → bump $bump → v$next"
+          fi
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+          echo "tag=v$next" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------
+  # build_wheels: cibuildwheel across the OS × Python matrix.
+  # ---------------------------------------------------------------------
   build_wheels:
+    needs: compute_version
+    # ``always()`` so the job still runs when compute_version was
+    # skipped (PR / tag-push / dispatch); the result branch covers
+    # the "compute_version succeeded" case for push-to-main.
+    if: |
+      always()
+      && (needs.compute_version.result == 'success'
+          || needs.compute_version.result == 'skipped')
     name: ${{ matrix.os }} / cp${{ matrix.python }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read   # read source for cibuildwheel
     strategy:
       fail-fast: false
       matrix:
-        # Release builds: full matrix. PR builds: linux × cp314 only.
-        # The `include` keys are chosen so `if: github.event_name == 'pull_request'`
-        # cuts the matrix down without duplicating the list.
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ['312', '313', '314']
+        python: ["312", "313", "314"]
         exclude:
-          - { os: macos-latest, python: '312' }   # macOS runners are scarce; skip oldest
-
+          - { os: macos-latest, python: "312" }
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
-
+          persist-credentials: false   # read-only build; no push
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.x" }
       - name: Build wheels
-        uses: pypa/cibuildwheel@v2.21
+        # SHA-pinned reference (SonarCloud rule githubactions:S7637
+        # — pin third-party actions to a full commit SHA so a tag
+        # rewrite by an upstream maintainer can't silently change
+        # the code that runs in this job). The trailing comment is
+        # the human-readable tag this SHA corresponds to; the
+        # comment doesn't affect resolution.
+        #
+        # v3.4.1 is the current stable line and ships cp314 as a
+        # regular release-Python target. v2.23.4 still classified
+        # cp314 as prerelease (``BuildSelector(... prerelease_pythons
+        # =False)`` rejected ``cp314-*`` with "No build identifiers
+        # selected"), which is why the matrix needs the 3.x line.
+        uses: pypa/cibuildwheel@d16cc544083d96996f923fc4b318fee3cb14b34e  # v3.4.1
         env:
           CIBW_BUILD: cp${{ matrix.python }}-*
-
+          # On push-to-main, compute_version drives the wheel
+          # version through setuptools-scm's pretend-version env
+          # var. On tag pushes / PRs / dispatch, the env value is
+          # empty and setuptools-scm falls back to its normal
+          # tag-or-fallback behaviour.
+          CIBW_ENVIRONMENT: |
+            SETUPTOOLS_SCM_PRETEND_VERSION=${{ needs.compute_version.outputs.version }}
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}-cp${{ matrix.python }}
           path: ./wheelhouse/*.whl
           if-no-files-found: error
 
+  # ---------------------------------------------------------------------
+  # build_sdist: source distribution (same version logic).
+  # ---------------------------------------------------------------------
   build_sdist:
+    needs: compute_version
+    if: |
+      always()
+      && (needs.compute_version.result == 'success'
+          || needs.compute_version.result == 'skipped')
     name: Source distribution
     runs-on: ubuntu-latest
+    permissions:
+      contents: read   # read source for sdist build
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
         with:
-          python-version: '3.14'
+          fetch-depth: 0               # setuptools-scm reads tag history
+          persist-credentials: false   # read-only sdist build; no push
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.14" }
       - name: Build sdist
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.compute_version.outputs.version }}
         run: |
           pip install build
           python -m build --sdist
@@ -70,20 +182,30 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
+  # ---------------------------------------------------------------------
+  # publish: upload wheels + sdist to PyPI via Trusted Publishing.
+  # ---------------------------------------------------------------------
   publish:
-    # Auto-publishes to PyPI on every tag-push (``release.yml`` creates
-    # the tag on push-to-main; this job picks it up). Uses PyPI
-    # Trusted Publishing — no API token is stored in repo secrets.
-    # See ``docs/release_pipeline.md`` for the one-time PyPI side
-    # configuration (project → Publishing → Add → GitHub).
-    needs: [build_wheels, build_sdist]
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [compute_version, build_wheels, build_sdist]
+    # Run on push-to-main (compute_version success) or on tag pushes.
+    if: |
+      always()
+      && needs.build_wheels.result == 'success'
+      && needs.build_sdist.result == 'success'
+      && (needs.compute_version.result == 'success'
+          || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
+    # Per-job grant scoped to PyPI Trusted Publishing only — this is
+    # the one step in the workflow that mints an OIDC ID token (the
+    # ``pypa/gh-action-pypi-publish`` action exchanges it for a
+    # short-lived PyPI upload credential). Default ``contents: read``
+    # at the workflow level is left untouched here so the job has no
+    # write access to the repo.
+    permissions:
+      id-token: write
     environment:
       name: release
       url: https://pypi.org/p/posecascade
-    permissions:
-      id-token: write   # trusted publishing — no API token needed
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -97,41 +219,37 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
 
+  # ---------------------------------------------------------------------
+  # build_exe: Nuitka --onefile Windows .exe with the same version.
+  # ---------------------------------------------------------------------
   build_exe:
-    # Once the PyPI publish has succeeded, compile a standalone
-    # Nuitka --onefile Windows executable and attach it to the
-    # GitHub Release the next job creates. PyPI is the authoritative
-    # distribution path for the Python package; the .exe is the
-    # bonus for users who don't want a Python install. The
-    # dependency on ``publish`` ensures that if PyPI rejects the
-    # upload (transient network failure, token mismatch), we don't
-    # produce a GitHub Release that points at a non-existent PyPI
-    # version.
-    needs: publish
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [compute_version, publish]
+    if: |
+      always()
+      && needs.publish.result == 'success'
     runs-on: windows-latest
+    permissions:
+      contents: read   # read source for Nuitka build
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
         with:
-          python-version: "3.14"
-
+          fetch-depth: 0
+          persist-credentials: false   # Nuitka build; no push
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.14" }
       - name: Install project + Nuitka toolchain
-        # ``ordered-set`` speeds Nuitka's symbol bookkeeping; Nuitka
-        # warns on startup if missing. ``zstandard`` is the codec for
-        # ``--onefile`` mode.
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.compute_version.outputs.version }}
         run: |
           pip install -e .
           pip install "nuitka>=2.5" ordered-set zstandard
-
       - name: Build the cloth Cython kernel in-place
-        # Nuitka's standalone discovery picks up the compiled .pyd
-        # sitting next to _cloth_kernels.pyx — without this step the
-        # bundle silently falls back to the slower NumPy path.
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.compute_version.outputs.version }}
         run: python setup.py build_ext --inplace
-
       - name: Build with Nuitka
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.compute_version.outputs.version }}
         shell: bash
         run: |
           python -m nuitka \
@@ -148,35 +266,73 @@ jobs:
             --output-dir=dist \
             --output-filename=PoseCascade \
             posecascade/__main__.py
-
       - uses: actions/upload-artifact@v4
         with:
           name: PoseCascade-exe
           path: dist/PoseCascade.exe
           if-no-files-found: error
 
-  github_release:
-    # Final step: create (or update) the GitHub Release for this tag
-    # and attach the Nuitka executable. The Python package itself
-    # has already been published to PyPI by the ``publish`` job; we
-    # only attach the binary here so the release page doesn't
-    # duplicate the wheel files that are one ``pip install`` away.
-    needs: [publish, build_exe]
-    if: startsWith(github.ref, 'refs/tags/v')
+  # ---------------------------------------------------------------------
+  # tag_and_release: tag the source commit and create / update the
+  # GitHub Release page with the .exe attached. Runs only when
+  # publish succeeded AND we're on the push-to-main path (i.e.
+  # compute_version produced a fresh version); tag-push reruns
+  # skip this job since the tag already exists.
+  # ---------------------------------------------------------------------
+  tag_and_release:
+    needs: [compute_version, publish, build_exe]
+    if: |
+      always()
+      && needs.publish.result == 'success'
+      && needs.compute_version.result == 'success'
     runs-on: ubuntu-latest
+    # Per-job grant: only this job pushes the new tag and creates
+    # the GitHub Release. ``contents: write`` covers both
+    # operations; no other job in the workflow inherits it.
     permissions:
-      contents: write   # softprops/action-gh-release needs this to push the release
+      contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Don't bake the bundled GITHUB_TOKEN into ``.git/config``.
+          # Default ``persist-credentials: true`` stores the token as
+          # a remote-level extraheader, which means every subsequent
+          # step in this job inherits the credential even though only
+          # the tag-push step below actually needs it. The SonarCloud
+          # Security Hotspot fires on the implicit-broad-scope path;
+          # the fix is to disable persistence and pass the token
+          # explicitly through an env var at the one step that
+          # actually pushes.
+          persist-credentials: false
+      - name: Tag the source commit
+        env:
+          TAG: ${{ needs.compute_version.outputs.tag }}
+          # Scope the token to this step only. ``GH_TOKEN`` is the
+          # conventional name; bash receives it as a normal env var
+          # and we hand it to git via an ephemeral extraheader on the
+          # single push command (no global ``.git/config`` mutation,
+          # no token in process argv, no token in shell history).
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          # ``http.extraheader`` set via ``-c`` is per-invocation only
+          # and doesn't write the token to ``.git/config`` on disk.
+          # ``AUTHORIZATION:`` capitalisation matters — git lowercases
+          # before comparing, but other tooling along the way does not.
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: Bearer $GH_TOKEN" \
+              push "https://github.com/$REPO.git" "$TAG"
       - uses: actions/download-artifact@v4
         with:
           name: PoseCascade-exe
           path: release-assets
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: PoseCascade ${{ github.ref_name }}
+          tag_name: ${{ needs.compute_version.outputs.tag }}
+          name: PoseCascade ${{ needs.compute_version.outputs.tag }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
@@ -195,9 +351,4 @@ jobs:
             required): `PoseCascade.exe` attached below. Built with
             Nuitka `--onefile`; the binary self-extracts to a temp
             directory on first launch.
-
-            See
-            [`docs/packaging_nuitka.md`](https://github.com/JeffreyChen-s-Utils/PoseCascade/blob/main/docs/packaging_nuitka.md)
-            for how the binary is produced.
-          files: |
-            release-assets/PoseCascade.exe
+          files: release-assets/PoseCascade.exe

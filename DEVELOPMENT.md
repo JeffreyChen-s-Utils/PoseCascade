@@ -133,29 +133,41 @@ prints the breakdown.
 
 ## CI + release pipeline
 
-Three GitHub Actions workflows wire the project up:
+Two GitHub Actions workflows wire the project up:
 
 * **`tests.yml`** runs `ruff` + `bandit` + the full `pytest` suite
-  (under `xvfb-run` for Qt) on every pull request and every push to
-  `main`. Three Python versions (3.12 / 3.13 / 3.14) on Ubuntu.
-* **`release.yml`** runs on every push to `main` — reads the latest
-  `v*` git tag, bumps the patch version (or major / minor if the
-  commit subject contains `[release major]` / `[release minor]`),
-  and pushes the new tag.
-* **`wheels.yml`** triggers on tag pushes — builds the OS × Python
-  matrix via `cibuildwheel`, runs an in-wheel smoke test, and
-  publishes to PyPI through Trusted Publishing. After PyPI publish
-  succeeds, two follow-up jobs run:
-  * **`build_exe`** — compiles a Nuitka `--onefile` standalone
-    Windows `.exe` on `windows-latest`. The runner installs Nuitka +
-    zstandard, builds the cloth Cython kernel in place, and runs
-    `python -m nuitka` with the flags documented in
-    [`docs/packaging_nuitka.md`](docs/packaging_nuitka.md).
-  * **`github_release`** — creates / updates the GitHub Release for
-    the new `v*` tag and attaches `PoseCascade.exe`. The release
-    body links to the PyPI package page for the Python install path;
-    wheels themselves stay on PyPI rather than being duplicated on
-    the Release page.
+  on every pull request and every push to `main`. Three Python
+  versions (3.12 / 3.13 / 3.14) on Ubuntu. Uses
+  `QT_QPA_PLATFORM=offscreen` so PySide6 fixtures construct
+  without a real display.
+* **`wheels.yml`** is the single-workflow release pipeline. On
+  every push to `main` it runs six jobs in order:
+  1. **`compute_version`** — reads the latest `v*` tag and bumps
+     the patch component (or minor / major if the commit subject
+     contains `[release minor]` / `[release major]`).
+  2. **`build_wheels`** — cibuildwheel matrix across Win / macOS /
+     Linux × cp312 / cp313 / cp314. The computed version is
+     injected into each build via `SETUPTOOLS_SCM_PRETEND_VERSION`.
+  3. **`build_sdist`** — source distribution with the same version.
+  4. **`publish`** — uploads wheels + sdist to PyPI through
+     Trusted Publishing.
+  5. **`build_exe`** — Nuitka `--onefile` standalone Windows
+     executable, same version baked in. See
+     [`docs/packaging_nuitka.md`](docs/packaging_nuitka.md) for the
+     full Nuitka invocation.
+  6. **`tag_and_release`** — tags the source commit `v<version>`,
+     pushes the tag, and creates / updates the GitHub Release with
+     `PoseCascade.exe` attached. The release body points users at
+     `pip install posecascade` for the package install path.
+
+Keeping everything in one workflow run sidesteps GitHub Actions'
+anti-recursion rule that blocks downstream-workflow triggers from
+`GITHUB_TOKEN` pushes — no Personal Access Token is required.
+
+`pull_request` builds run `build_wheels` + `build_sdist` only, so a
+contributor's PR exercises the wheel build path without publishing.
+`workflow_dispatch` is available for manual reruns; tag pushes
+re-trigger the publish path against the existing tag.
 
 ### Bump rules
 
@@ -181,26 +193,6 @@ Versions are derived from git tags via
 
 `local_scheme = "no-local-version"` keeps non-tag builds PEP 440
 clean so TestPyPI / PyPI accept them.
-
-### One-time GitHub configuration — `RELEASE_PAT`
-
-`release.yml` pushes the new `v*` tag, and that tag push is what
-triggers `wheels.yml` to build + publish. GitHub Actions deliberately
-suppresses downstream-workflow triggers from pushes authenticated by
-the default `GITHUB_TOKEN` (anti-recursion). The escape hatch is a
-fine-grained Personal Access Token:
-
-1. <https://github.com/settings/tokens?type=beta> →
-   **Generate new token (fine-grained)**.
-2. Repository access: only `PoseCascade`.
-3. Repository permissions: **Contents → Read and write**.
-4. Generate, copy.
-5. Repo → **Settings → Secrets and variables → Actions → New
-   repository secret**. Name `RELEASE_PAT`, paste the value.
-
-`release.yml`'s checkout step reads `secrets.RELEASE_PAT` and uses it
-for the `git push origin v*` that follows. Without this secret the
-tag is created but `wheels.yml` never runs.
 
 ### One-time PyPI configuration
 
