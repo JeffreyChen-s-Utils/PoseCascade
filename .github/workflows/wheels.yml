@@ -20,9 +20,15 @@ on:
       - ".github/workflows/wheels.yml"
   workflow_dispatch:
 
+# Workflow-level default: read-only. Each ``write`` capability the
+# pipeline needs is granted on the specific job that needs it (see
+# the ``permissions:`` blocks on ``publish`` and ``tag_and_release``
+# below). SonarCloud rule githubactions:S8233 — workflow-level write
+# permissions are over-broad: every job in the workflow inherits
+# them, including ones that have no business touching the repo
+# contents or minting OIDC tokens.
 permissions:
-  contents: write     # tag_and_release pushes the tag + creates a Release
-  id-token: write     # publish uses PyPI Trusted Publishing (OIDC)
+  contents: read
 
 jobs:
   # ---------------------------------------------------------------------
@@ -182,6 +188,14 @@ jobs:
       && (needs.compute_version.result == 'success'
           || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
+    # Per-job grant scoped to PyPI Trusted Publishing only — this is
+    # the one step in the workflow that mints an OIDC ID token (the
+    # ``pypa/gh-action-pypi-publish`` action exchanges it for a
+    # short-lived PyPI upload credential). Default ``contents: read``
+    # at the workflow level is left untouched here so the job has no
+    # write access to the repo.
+    permissions:
+      id-token: write
     environment:
       name: release
       url: https://pypi.org/p/posecascade
@@ -263,6 +277,11 @@ jobs:
       && needs.publish.result == 'success'
       && needs.compute_version.result == 'success'
     runs-on: ubuntu-latest
+    # Per-job grant: only this job pushes the new tag and creates
+    # the GitHub Release. ``contents: write`` covers both
+    # operations; no other job in the workflow inherits it.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
