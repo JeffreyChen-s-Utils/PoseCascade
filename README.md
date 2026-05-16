@@ -147,6 +147,11 @@ The Sphinx tree under [`docs/`](docs/) covers:
   editor + undo/redo.
 - [`docs/mcp.md`](docs/mcp.md) — the Model Context Protocol server
   surface (tools, parameters, return shapes).
+- [`docs/packaging_pyinstaller.md`](docs/packaging_pyinstaller.md) —
+  shipping PoseCascade as a standalone executable with PyInstaller.
+- [`docs/packaging_nuitka.md`](docs/packaging_nuitka.md) — same
+  again with Nuitka (compiled binary, smaller / faster, longer
+  build).
 
 For contributor / maintainer notes (dev workflow, CI workflows,
 release pipeline, performance numbers), see

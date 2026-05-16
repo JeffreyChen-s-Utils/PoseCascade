@@ -125,6 +125,10 @@ python examples/compare_lights.py   # 只開主光 vs + HighDef rim + fill
   的使用說明。
 - [`docs/mcp.md`](docs/mcp.md) —— Model Context Protocol 伺服器的
   工具、參數、回傳格式。
+- [`docs/packaging_pyinstaller.md`](docs/packaging_pyinstaller.md)
+  —— 用 PyInstaller 把 PoseCascade 包成獨立執行檔。
+- [`docs/packaging_nuitka.md`](docs/packaging_nuitka.md) —— 同樣的
+  事改用 Nuitka(編譯成原生二進位,體積更小 / 啟動更快,但 build 較久)。
 
 貢獻者 / 維護者文件(開發流程、CI、release pipeline、效能數字)在
 [`DEVELOPMENT.md`](DEVELOPMENT.md)。
