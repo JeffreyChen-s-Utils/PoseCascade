@@ -144,7 +144,19 @@ Three GitHub Actions workflows wire the project up:
   and pushes the new tag.
 * **`wheels.yml`** triggers on tag pushes — builds the OS × Python
   matrix via `cibuildwheel`, runs an in-wheel smoke test, and
-  publishes to PyPI through Trusted Publishing.
+  publishes to PyPI through Trusted Publishing. After PyPI publish
+  succeeds, two follow-up jobs run:
+  * **`build_exe`** — compiles a Nuitka `--onefile` standalone
+    executable per platform (Linux x86_64, macOS arm64, Windows
+    x86_64). Each runner installs Nuitka + zstandard, builds the
+    cloth Cython kernel in place, and runs `python -m nuitka` with
+    the flags documented in
+    [`docs/packaging_nuitka.md`](docs/packaging_nuitka.md).
+  * **`github_release`** — creates / updates the GitHub Release for
+    the new `v*` tag and attaches the three executables. The release
+    body links to the PyPI package page for the Python install path;
+    wheels themselves stay on PyPI rather than being duplicated on
+    the Release page.
 
 ### Bump rules
 

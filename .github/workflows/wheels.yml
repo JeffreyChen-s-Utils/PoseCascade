@@ -96,3 +96,137 @@ jobs:
           path: dist
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  build_exe:
+    # Once the PyPI publish has succeeded, compile a standalone
+    # Nuitka --onefile executable per platform and attach them to the
+    # GitHub Release the next job creates. PyPI is the authoritative
+    # distribution path for the Python package; this is the
+    # one-binary-per-OS bonus for users who don't want a Python
+    # install. The dependency on ``publish`` ensures that if PyPI
+    # rejects the upload (transient network failure, token mismatch),
+    # we don't produce a GitHub Release that points at a non-existent
+    # PyPI version.
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset_name: PoseCascade-linux-x86_64
+            extension: ""
+          - os: macos-latest
+            asset_name: PoseCascade-macos-arm64
+            extension: ""
+          - os: windows-latest
+            asset_name: PoseCascade-windows-x86_64
+            extension: ".exe"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system libs for Qt + Nuitka tooling
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libxkbcommon0 libdbus-1-3 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
+            libxcb-cursor0 patchelf ccache
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install project + Nuitka toolchain
+        # ``ordered-set`` speeds Nuitka's symbol bookkeeping; Nuitka
+        # warns on startup if missing. ``zstandard`` is the codec for
+        # ``--onefile`` mode.
+        run: |
+          pip install -e .
+          pip install "nuitka>=2.5" ordered-set zstandard
+
+      - name: Build the cloth Cython kernel in-place
+        # Nuitka's standalone discovery picks up the compiled .pyd /
+        # .so sitting next to _cloth_kernels.pyx — without this step
+        # the bundle silently falls back to the slower NumPy path.
+        run: python setup.py build_ext --inplace
+
+      - name: Build with Nuitka
+        run: |
+          python -m nuitka \
+            --standalone \
+            --onefile \
+            --assume-yes-for-downloads \
+            --enable-plugin=pyside6 \
+            --enable-plugin=numpy \
+            --include-package=importers \
+            --include-data-dir=shaders=shaders \
+            --include-data-dir=schemas=schemas \
+            --include-data-dir=importers=importers \
+            --output-dir=dist \
+            --output-filename=${{ matrix.asset_name }} \
+            posecascade/__main__.py
+        shell: bash
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exe-${{ matrix.os }}
+          path: dist/${{ matrix.asset_name }}${{ matrix.extension }}
+          if-no-files-found: error
+
+  github_release:
+    # Final step: create (or update) the GitHub Release for this tag
+    # and attach the Nuitka executables. The Python package itself
+    # has already been published to PyPI by the ``publish`` job; we
+    # only attach the binaries here so the release page doesn't
+    # duplicate large wheel files that are one ``pip install`` away.
+    needs: [publish, build_exe]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # softprops/action-gh-release needs this to push the release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: exe-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: PoseCascade ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            ## Install
+
+            **Python package** (recommended for most users):
+
+            ```bash
+            pip install posecascade
+            ```
+
+            Wheels for cp312 / cp313 / cp314 × Win / macOS / Linux are
+            on [PyPI](https://pypi.org/p/posecascade).
+
+            **Standalone executable** (no Python install required):
+            attached to this release for Linux x86_64, macOS arm64,
+            and Windows x86_64. Built with Nuitka `--onefile`; the
+            binary self-extracts to a temp directory on first launch.
+            On macOS the first run needs `xattr -d
+            com.apple.quarantine PoseCascade-macos-arm64` or a
+            right-click → Open to bypass Gatekeeper, since the
+            binary isn't signed.
+
+            See
+            [`docs/packaging_nuitka.md`](https://github.com/JeffreyChen-s-Utils/PoseCascade/blob/main/docs/packaging_nuitka.md)
+            for how these binaries are produced.
+          files: |
+            release-assets/PoseCascade-linux-x86_64
+            release-assets/PoseCascade-macos-arm64
+            release-assets/PoseCascade-windows-x86_64.exe
