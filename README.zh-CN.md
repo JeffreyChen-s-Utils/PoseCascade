@@ -158,6 +158,27 @@ PoseCascade/
 Win / macOS / Linux × 各支持 Python 版本上产出预构建 wheel;
 `.github/workflows/wheels.yml` 在 tag push 时触发那个流程。
 
+## 持续集成 + 自动发布
+
+三个 GitHub Actions workflow 串起整条 pipeline：
+
+- **`tests.yml`** 在每个 PR 跟每次 push 到 `main` 跑 `ruff` + `bandit` +
+  完整 `pytest`（透过 `xvfb-run` 让 Qt 跑得起来）。三个 Python 版本
+  （3.12 / 3.13 / 3.14）在 Ubuntu 上。
+- **`release.yml`** 在每次 push 到 `main` 跑—— 读最新的 `v*` git tag,
+  bump patch 版本（commit subject 含 `[release major]` / `[release minor]`
+  则改成对应的 bump）,然后 push 新 tag。docs-only PR 想跳过时在 merge
+  commit message 里写 `[skip release]`。
+- **`wheels.yml`** 在新 tag push 时触发,透过 `cibuildwheel` 跑全 OS ×
+  Python 矩阵、跑 in-wheel smoke test,然后透过 Trusted Publishing
+  **自动发布到 PyPI**—— repo 不需要存任何 API token。
+
+整体效果：merge 一个 PR 就会自动发成一版新的 PyPI release。版号透过
+setuptools-scm 读刚 push 进去的 tag 取得,`pyproject.toml` 的
+`dynamic = ["version"]` 开启这个机制。一次性的 PyPI Trusted Publishing
+配置、bump 消息规则、yank / revert 指引、本地 dry-run 食谱,都在
+[`docs/release_pipeline.md`](docs/release_pipeline.md)。
+
 ## 视觉管线
 
 前向渲染器每帧按固定顺序跑六个 pass —— depth-map 阴影 pass、scene、地面、

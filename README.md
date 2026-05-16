@@ -182,6 +182,31 @@ For distribution, the `[tool.cibuildwheel]` section in
 × supported Python versions; `.github/workflows/wheels.yml` drives
 that on tag pushes.
 
+## Continuous integration + release
+
+Three GitHub Actions workflows wire the project up:
+
+- **`tests.yml`** runs `ruff` + `bandit` + the full `pytest` suite
+  (under `xvfb-run` for Qt) on every pull request and every push
+  to `main`. Three Python versions (3.12 / 3.13 / 3.14) on Ubuntu.
+- **`release.yml`** runs on every push to `main` — reads the latest
+  `v*` git tag, bumps the patch version (or major / minor if the
+  commit subject contains `[release major]` / `[release minor]`),
+  and pushes the new tag. Include `[skip release]` in the merge
+  commit message to opt out for docs-only PRs.
+- **`wheels.yml`** triggers on the new tag push, builds the full
+  OS × Python matrix via `cibuildwheel`, runs an in-wheel smoke
+  test, and **publishes to PyPI** through Trusted Publishing — no
+  API token is stored in repo secrets.
+
+Net effect: a merged PR becomes a new PyPI release automatically.
+The version comes from setuptools-scm reading the tag the release
+workflow pushed; `pyproject.toml`'s `dynamic = ["version"]` block
+opts into that mechanism. See
+[`docs/release_pipeline.md`](docs/release_pipeline.md) for the
+one-time PyPI Trusted-Publishing setup, bump-message rules,
+yank / revert guidance, and a local dry-run recipe.
+
 ## Visual pipeline
 
 The forward renderer runs six passes per frame in fixed order — depth-

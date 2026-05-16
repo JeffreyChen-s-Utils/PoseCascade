@@ -1,10 +1,22 @@
 [build-system]
-requires = ["setuptools>=68", "wheel", "Cython>=3.0", "numpy>=1.26"]
+requires = [
+    "setuptools>=68",
+    "setuptools-scm>=8",
+    "wheel",
+    "Cython>=3.0",
+    "numpy>=1.26",
+]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "posecascade"
-version = "0.0.1"
+# Version is derived from the most recent git tag via setuptools-scm
+# (see [tool.setuptools_scm] below). The release workflow tags
+# ``vMAJOR.MINOR.PATCH`` on every push to main and that tag becomes
+# the wheel's version. Local non-tag builds fall back to
+# ``0.0.0.dev{commit-count}+g{sha}`` so a developer install still
+# advertises a unique version.
+dynamic = ["version"]
 description = "PySide6 + OpenGL engine for importing 3D models and driving them with sandboxed scripts."
 requires-python = ">=3.12"
 dependencies = [
@@ -41,6 +53,16 @@ posecascade-mcp = "posecascade.mcp.server:main"
 where = ["."]
 include = ["posecascade*"]
 exclude = ["tests*", "importers*", "examples*"]
+
+[tool.setuptools_scm]
+# Tag format: ``vMAJOR.MINOR.PATCH``. ``fallback_version`` is used when
+# the source tree has no git metadata (sdist installs, ``pip install``
+# directly from GitHub on a non-tag SHA). ``local_scheme = no-local-version``
+# keeps PEP 440-compliant versions on PyPI — TestPyPI / PyPI reject the
+# ``+gSHA`` local segment setuptools-scm produces by default for
+# non-tag builds.
+fallback_version = "0.0.0"
+local_scheme = "no-local-version"
 
 # cibuildwheel: build wheels in CI for Win/macOS/Linux × supported Pythons.
 # The job is wired up in ``.github/workflows/wheels.yml`` (see that file

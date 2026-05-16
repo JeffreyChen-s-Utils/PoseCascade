@@ -1,0 +1,85 @@
+name: Tests
+
+# Runs on every pull request and every push to ``main``. Three jobs:
+#
+# * ``lint`` — ``ruff check`` over the whole tree. Fast (~5 s).
+# * ``security`` — ``bandit`` over ``posecascade/`` with the project's
+#   skip config. Also fast.
+# * ``test`` — the full pytest suite under Linux + Python 3.12 / 3.13 /
+#   3.14. Uses ``xvfb-run`` so the Qt + offscreen-GL fixtures have a
+#   virtual display; Cython kernel is compiled in-place by
+#   ``pip install -e .[dev,ai]``.
+#
+# Windows / macOS test runs are intentionally out of scope here —
+# ``wheels.yml`` already builds + smoke-tests one wheel per OS on
+# release; the per-PR cost of three OSes × three Pythons would slow
+# everything down for a marginal coverage gain.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install ruff
+        run: pip install "ruff>=0.6"
+      - name: Run ruff
+        run: python -m ruff check .
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install bandit
+        run: pip install "bandit>=1.7"
+      - name: Run bandit
+        # The ``-c pyproject.toml`` flag is REQUIRED — without it bandit
+        # ignores the project skip config and the run goes noisy.
+        run: python -m bandit -c pyproject.toml -r posecascade/
+
+  test:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install system libs for Qt + offscreen GL
+        # libxcb-cursor0 is needed by Qt 6.5+ on every Linux runner.
+        # libgl1 / libegl1 / libdbus-1-3 are the minimum to get
+        # QOpenGLContext::create to succeed under ``xvfb``.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb libegl1 libgl1 libxkbcommon0 libdbus-1-3 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-cursor0
+      - name: Install project (editable + dev extras)
+        run: pip install -e ".[dev,ai]"
+      - name: Run pytest under xvfb
+        # ``xvfb-run -a`` allocates a virtual X display per invocation
+        # so Qt's QApplication can create real (offscreen) windows.
+        # Test_export_video skips on CI because ffmpeg isn't installed
+        # by default; keep that exclusion explicit so a missing
+        # ffmpeg doesn't fail the suite.
+        run: |
+          xvfb-run -a python -m pytest tests/ -q \
+            --ignore=tests/test_export_video.py

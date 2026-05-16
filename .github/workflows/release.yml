@@ -1,0 +1,94 @@
+name: Release on merge to main
+
+# Auto-tag + auto-publish to PyPI on every push to ``main``. The flow:
+#
+# 1. ``Tests`` workflow (tests.yml) must have passed on the same commit
+#    — this workflow runs in parallel but only the tag-creation step
+#    is gated on commit-message convention; the actual PyPI upload
+#    lives in ``wheels.yml`` and is triggered by the tag this workflow
+#    pushes.
+# 2. Compute the next ``MAJOR.MINOR.PATCH`` version from the most
+#    recent ``v*`` tag. Default bump is the patch component; commits
+#    whose head message contains ``[release minor]`` or
+#    ``[release major]`` bump the corresponding component instead.
+# 3. Push a new annotated tag ``v{version}``. The push triggers
+#    ``wheels.yml``, which builds the full OS × Python matrix, runs
+#    the in-wheel smoke test, and uploads to PyPI via Trusted
+#    Publishing (no API token in repo secrets).
+#
+# Escape hatch: include ``[skip release]`` in the merge commit's head
+# message and this workflow exits cleanly without tagging. Useful for
+# docs-only PRs where shipping a new wheel adds noise.
+#
+# Recursion guard: the workflow never commits back to ``main`` — it
+# only pushes the tag — so there's no second-trigger loop.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write   # push the new tag
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Skip the release entirely when the commit asks for it. The check
+    # runs against the head commit so amend/rebase pushes are honoured.
+    if: |
+      !contains(github.event.head_commit.message, '[skip release]') &&
+      !contains(github.event.head_commit.message, '[skip ci]')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need full tag history so the version calculator can read
+          # the latest ``v*`` tag. Without ``fetch-depth: 0`` the
+          # checkout is shallow and ``git tag --list`` returns nothing.
+          fetch-depth: 0
+          # Use a deploy key / PAT if your branch protection blocks
+          # the default GITHUB_TOKEN from pushing tags. The default
+          # token works on standard repos.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute next version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Find the highest ``v*`` tag by version-aware sort.
+          latest=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+          if [[ -z "$latest" ]]; then
+            # No tag yet → start at v0.0.1.
+            next="0.0.1"
+            echo "No previous tag; starting at v$next"
+          else
+            current="${latest#v}"
+            IFS='.' read -r major minor patch <<< "$current"
+            major=${major:-0}; minor=${minor:-0}; patch=${patch:-0}
+            msg='${{ github.event.head_commit.message }}'
+            if echo "$msg" | grep -qiE '\[release[[:space:]]+major\]'; then
+              major=$((major + 1)); minor=0; patch=0
+              bump="major"
+            elif echo "$msg" | grep -qiE '\[release[[:space:]]+minor\]'; then
+              minor=$((minor + 1)); patch=0
+              bump="minor"
+            else
+              patch=$((patch + 1))
+              bump="patch"
+            fi
+            next="${major}.${minor}.${patch}"
+            echo "Previous tag: v$current → bump $bump → v$next"
+          fi
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+          echo "tag=v$next" >> "$GITHUB_OUTPUT"
+
+      - name: Create + push tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+          echo "Tag $TAG pushed — wheels.yml will pick it up and publish to PyPI."

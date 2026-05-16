@@ -19,3 +19,4 @@ Welcome to the PoseCascade documentation. Please select your language:
    declarative_animation
    animation_editor
    mcp
+   release_pipeline
