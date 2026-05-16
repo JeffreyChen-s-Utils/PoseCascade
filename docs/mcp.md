@@ -74,10 +74,10 @@ with its `name`, `loop_sec`, and phase count.
 ```json
 [
   {
-    "path": "examples/scripts/dance.json",
-    "name": "mmd_dance_declarative_demo",
-    "loop_sec": 24.0,
-    "phase_count": 8
+    "path": "examples/scripts/walk.json",
+    "name": "walk_in_place_demo",
+    "loop_sec": 4.0,
+    "phase_count": 1
   }
 ]
 ```
@@ -121,7 +121,7 @@ structural summary:
 
 ```json
 {
-  "path": "examples/assets/character.glb",
+  "path": "examples/assets/herta/herta.glb",
   "format": ".glb",
   "mesh_count": 12,
   "texture_count": 15,

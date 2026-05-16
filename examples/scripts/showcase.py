@@ -1,14 +1,11 @@
-"""Showcase animation for ``character.glb`` — body sway + hair + sleeve cloth.
+"""Showcase animation for ``herta.glb`` — body sway + hair + sleeve cloth.
 
-The character has a long flowing sleeve (``obj2_m18_0``) that sits
-very close to several body meshes in the abdomen / waist area
-(``obj2_m9_0``, ``m13_0``, ``m17_0``). The bundled glTF was patched
-in Blender to inflate the sleeve outward by ~2 mm along its normals,
-which buys enough depth-test headroom that a PBD cloth simulation's
-~5 mm gravity-driven hem droop no longer fights with the body
-geometry underneath. With that fix in the asset, the cloth solver
-can run without the abdomen-area color flicker the unpatched mesh
-exhibited.
+The Herta's body, dress, and hat are rigged into a single skinned mesh
+so there is no separate cape / sleeve to run a dedicated cloth pass
+against on this asset; the cloth registration below skips quietly if
+the named mesh isn't present, leaving body sway + hair sway driving
+the silhouette. Users who swap in a model that *does* split clothing
+into independent meshes get cloth back automatically.
 
 What this script drives:
 
@@ -48,7 +45,7 @@ Sandbox globals used: ``scene``, ``physics_lite``, ``time``, ``vec3``,
 
 Run with::
 
-    py -m posecascade --scene examples/assets/character.glb \
+    py -m posecascade --scene examples/assets/herta/herta.glb \
         --script examples/scripts/showcase.py
 """
 

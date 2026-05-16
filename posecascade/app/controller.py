@@ -37,7 +37,7 @@ from posecascade.project.sync import (
     project_from_state,
 )
 from posecascade.project.writer import save_project
-from posecascade.render.effects.builtins import register_builtins
+from posecascade.render.effects.builtins import load_builtin, register_builtins
 from posecascade.render.effects.chain import EffectChain, EffectLibrary
 from posecascade.scene.model_slot import ModelSlot, SceneSlots
 from posecascade.ui.export_dialog import ExportSpec, ExportTarget
@@ -73,6 +73,28 @@ class AppController:
         # Pre-register the four built-in effect descriptors so the chain
         # UI's "Add" menu has something to offer out of the gate.
         register_builtins(self.effect_library)
+        self._seed_default_effect_chain()
+
+    def _seed_default_effect_chain(self) -> None:
+        """Append AutoLuminous to a freshly-constructed empty chain.
+
+        MMD ships its bloom equivalent on by default — the "glow" you
+        see at every dance opening is AutoLuminous-style emission. We
+        match that out of the box: an empty chain becomes a one-entry
+        chain with AutoLuminous at descriptor defaults. Projects that
+        explicitly load a saved chain hit ``_apply_loaded_state`` which
+        replaces ``effect_chain`` wholesale, so user-saved configs are
+        never clobbered.
+        """
+        if len(self.effect_chain) > 0:
+            return
+        try:
+            descriptor = load_builtin("autoluminous")
+        except Exception:                                       # noqa: BLE001
+            # Effect file missing / malformed — fall back to no default
+            # rather than crashing the editor on launch.
+            return
+        self.effect_chain.append(descriptor)
 
     # ----- frame ticking ----------------------------------------------
     def on_frame_changed(self, frame: int) -> None:

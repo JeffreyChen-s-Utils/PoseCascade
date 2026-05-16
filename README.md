@@ -1,5 +1,8 @@
 # PoseCascade
 
+> **Languages**: **English** · [繁體中文](README.zh-TW.md) · [简体中文](README.zh-CN.md)
+> **Documentation**: [Read the Docs source](docs/) (Sphinx)
+
 A PySide6 + OpenGL desktop engine for importing 3D models and driving
 them with sandboxed scripts. The visual target is MMD: toon shading
 with crisp inverted-hull outlines, PMX materials with sphere maps,
@@ -13,9 +16,17 @@ PBD cloth solver fast enough to drape several pieces in real time.
   VPD poses), each behind its own plugin adapter so adding a format
   doesn't touch the renderer.
 - **MMD-flavoured forward renderer**: toon ramp (NEAREST + clamp for
-  crisp cel bands), sphere-map composite, inverted-hull outlines, and
-  a selection-overlay pass that re-outlines the picked top-level
-  holder in a bright contrast colour.
+  crisp cel bands), sphere-map composite, inverted-hull outlines,
+  procedural checkered ground, projected ground shadow, depth-mapped
+  PCF-softened self-shadow, sRGB-aware output, gradient-sky pass,
+  multi-light HighDef setup (1 primary + up to 3 secondary), opt-in
+  dual-quaternion skinning for joint-volume preservation, default
+  AutoLuminous bloom, MMD tone-curve post-process effect, procedural
+  dance-stage abstraction (floor + back wall + side walls), and a
+  selection-overlay pass that re-outlines the picked top-level holder
+  in a bright contrast colour. See
+  [`docs/rendering_pipeline.md`](docs/rendering_pipeline.md) for the
+  full pass order + per-pass toggles.
 - **VMD-driven animation**: per-bone / per-morph / per-camera tracks
   with the four-control-point bezier interpolation MMD uses, IK
   solver, foot planter, external-parent bindings between slots,
@@ -61,8 +72,47 @@ engine transparently uses the NumPy fallback path.
 Launch the editor against a bundled example:
 
 ```bash
-python -m posecascade --scene examples/assets/character.glb \
-                       --script examples/scripts/dance.json
+# Classic 3D-model demo reel (30s): intro idle → 360° turntable →
+# walk-in-place → wave → V-pose → hip-pop → bow → return to neutral.
+python -m posecascade --scene examples/assets/herta/herta.glb \
+                       --script examples/scripts/showcase.json
+
+# In-place walking + arm-swing loop (4s).
+python -m posecascade --scene examples/assets/herta/herta.glb \
+                       --script examples/scripts/walk.json
+
+# Minimal breathing-idle loop (4s).
+python -m posecascade --scene examples/assets/herta/herta.glb \
+                       --script examples/scripts/idle.json
+```
+
+Or render the MMD-style hero frame headlessly — no editor window
+required, useful as a smoke check for the full visual stack:
+
+```bash
+# Loads herta.glb (glTF), enables every MMD-fluence toggle on the
+# force_toon path, writes mmd_demo.png next to the script.
+python examples/mmd_demo.py
+
+# Loads the bundled March 7th PMX via the renderer's PMX-native path
+# (per-mesh MMDMaterial + sphere textures + edge flag straight from the
+# file). The asset is third-party — see examples/assets/march7th/NOTICE.md
+# for attribution. Writes march7th_pmx_demo.png next to the script.
+python examples/march7th_pmx_demo.py
+
+# Also works through the interactive editor:
+python -m posecascade --scene examples/assets/march7th/march7th.pmx
+```
+
+A set of side-by-side comparison scripts demonstrates each
+MMD-fluence feature against its baseline — each writes a labelled
+PNG so the visual difference is reproducible:
+
+```bash
+python examples/compare_bloom.py    # bloom OFF vs AutoLuminous applied
+python examples/compare_tone.py     # sRGB only vs + mmd_tone
+python examples/compare_dqs.py      # LBS candy-wrapper vs DQS at extreme twist
+python examples/compare_lights.py   # primary only vs + HighDef rim + fill
 ```
 
 ## Project layout
@@ -114,6 +164,17 @@ For distribution, the `[tool.cibuildwheel]` section in
 × supported Python versions; `.github/workflows/wheels.yml` drives
 that on tag pushes.
 
+## Visual pipeline
+
+The forward renderer runs six passes per frame in fixed order — depth-
+map shadow pass, scene, ground, projected shadow, selection overlay,
+post-process effect chain. Each pass has a toggle (`set_ground_enabled`,
+`set_self_shadow_enabled`, `set_projected_shadow_enabled`,
+`set_selected_holder`) so smoke tests and headless renders can opt
+out without losing pixel fidelity. The full breakdown — pass order,
+shader files, light-space math, texture units, MMD-fluence gaps —
+lives in [`docs/rendering_pipeline.md`](docs/rendering_pipeline.md).
+
 ## Performance notes
 
 The cloth solver has been the recent focus. On the 480-vert skirt
@@ -134,5 +195,10 @@ custom test) can pull a per-frame breakdown out of
 ## License
 
 See [`LICENSE`](LICENSE) for the project's MIT-style terms. Bundled
-assets carry their own licenses — `examples/assets/character.glb`
-ships under CC-BY (Galaxia model).
+assets carry their own licenses — `examples/assets/herta/herta.glb`
+ships under CC-BY 4.0 (uploader X9_YT on Sketchfab; character
+"The Herta" © HoYoverse, used under their Fan Content Guidelines —
+see `examples/assets/herta/NOTICE.md` for the full notice).
+The MMD demo `examples/assets/march7th/march7th.pmx` is separately
+licensed CC-BY 4.0 (uploader Gregman; character "March 7th" ©
+HoYoverse) — see `examples/assets/march7th/NOTICE.md`.

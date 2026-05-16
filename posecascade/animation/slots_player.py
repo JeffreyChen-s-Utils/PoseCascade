@@ -33,6 +33,13 @@ class SlotsPlayer:
 
     def __post_init__(self) -> None:
         for slot in self.slots:
+            if slot.is_stage:
+                # Stage slots are passive props; they get rendered like
+                # any other slot but never receive a per-frame animation
+                # pass. Skipping the player build also saves the bone /
+                # morph / IK / physics setup the player would do at
+                # construction time.
+                continue
             if slot.motion is not None:
                 self._players[slot.name] = VmdAnimationPlayer.for_imported_scene(
                     motion=slot.motion,
@@ -60,8 +67,15 @@ def make_slot(
     imported,                               # noqa: ANN001 — runtime ImportedScene
     motion=None,                            # noqa: ANN001 — runtime VmdMotionAsset
     visible: bool = True,
+    is_stage: bool = False,
 ) -> ModelSlot:
     """Convenience builder for callers that don't already import :class:`ModelSlot`."""
     return ModelSlot(
-        name=name, imported=imported, motion=motion, visible=visible,
+        name=name, imported=imported, motion=motion,
+        visible=visible, is_stage=is_stage,
     )
+
+
+def make_stage_slot(name: str, imported) -> ModelSlot:    # noqa: ANN001
+    """Sugar for ``make_slot(... is_stage=True)`` — reads better at call sites."""
+    return make_slot(name=name, imported=imported, is_stage=True)

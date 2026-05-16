@@ -4,11 +4,15 @@
   "title": "PoseCascade declarative animation v1",
   "description": "JSON document parsed by posecascade.scripting.declarative.parse_animation. Drives a character demo as data — phase timeline, body trajectory, gait, ground geometry, physics chain tunings, morph weights — without writing Python.",
   "type": "object",
-  "required": ["schema_version", "phases"],
+  "required": ["schema_version"],
   "properties": {
     "schema_version": {
       "const": 1,
       "description": "Schema generation. Older / newer versions are rejected with DeclarativeAnimationError."
+    },
+    "extends": {
+      "type": "string",
+      "description": "Path (relative to this file's directory) of a profile JSON to inherit boilerplate from. Each top-level key in the child replaces the parent's value outright (shallow merge); pose_library and hand_library are the only keys that merge per-preset. Path-traversal safe. Phases are never inherited."
     },
     "name": {
       "type": "string",
@@ -115,9 +119,15 @@
     },
 
     "value_curve": {
-      "description": "A scalar (constant), or a curve object that varies with phase_t in [0,1]. Snappier kinds (quad-in/out, cubic-in/out, back-out, pulse, step) exist for MMD-style accent hits — see docs/declarative_animation.md.",
+      "description": "A scalar (constant), an [from, to] array (shorthand for kind='linear'), or a curve object that varies with phase_t in [0,1]. Snappier kinds (quad-in/out, cubic-in/out, back-out, pulse, step) exist for MMD-style accent hits — see docs/declarative_animation.md.",
       "anyOf": [
         { "$ref": "#/$defs/scalar" },
+        {
+          "type": "array",
+          "items": { "$ref": "#/$defs/scalar" },
+          "minItems": 2, "maxItems": 2,
+          "description": "[from, to] linear-curve shorthand. Equivalent to {kind: 'linear', from: ..., to: ...}."
+        },
         {
           "type": "object",
           "required": ["kind"],
@@ -314,12 +324,15 @@
 
     "bone_axes": {
       "type": "object",
-      "description": "Per-axis curves for one bone. All three are optional; missing axes are zero (identity rotation around that axis).",
+      "description": "Per-axis curves for one bone. All three are optional; missing axes are zero (identity rotation around that axis). Short aliases 'x' / 'y' / 'z' read as 'x_rad' / 'y_rad' / 'z_rad'; mixing the two forms on the same axis raises at parse time.",
       "additionalProperties": false,
       "properties": {
         "x_rad": { "$ref": "#/$defs/value_curve" },
         "y_rad": { "$ref": "#/$defs/value_curve" },
-        "z_rad": { "$ref": "#/$defs/value_curve" }
+        "z_rad": { "$ref": "#/$defs/value_curve" },
+        "x": { "$ref": "#/$defs/value_curve" },
+        "y": { "$ref": "#/$defs/value_curve" },
+        "z": { "$ref": "#/$defs/value_curve" }
       }
     },
 
@@ -343,6 +356,7 @@
           "oneOf": [
             {
               "type": "object",
+              "not": { "required": ["stair"] },
               "properties": {
                 "x": { "$ref": "#/$defs/value_curve" },
                 "y": { "$ref": "#/$defs/value_curve" },
@@ -355,6 +369,12 @@
               "properties": {
                 "stair": { "$ref": "#/$defs/stair_translation" }
               }
+            },
+            {
+              "type": "array",
+              "items": { "$ref": "#/$defs/value_curve" },
+              "minItems": 3, "maxItems": 3,
+              "description": "[x, y, z] shorthand — equivalent to {x: ..., y: ..., z: ...}. Each element is itself a value_curve so authors can mix constants and animated axes."
             }
           ]
         }

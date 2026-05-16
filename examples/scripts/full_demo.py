@@ -1,18 +1,18 @@
-"""PoseCascade hair-sway demo (full character.glb scene).
+"""PoseCascade hair-sway demo (full herta.glb scene).
 
-Only hair is animated. Six spring chains (5 hair + 1 ornament) are
-auto-detected by the importer; this script tunes their stiffness/damping per
-chain, exposes them to a sin-driven gusty wind, and fires a periodic 4-direction
-impulse so the sway is unmistakable.
+Only hair is animated. Auto-detected spring chains are tuned with per-chain
+stiffness/damping, exposed to a sin-driven gusty wind, and given a periodic
+4-direction impulse so the sway is unmistakable.
 
-Cloth physics is intentionally NOT used on this character — the costume mesh's
-anchor topology produces visible kinks at the anchor seam (top portion pinned,
-bottom swings) that read as the cloth "splitting in two". A character with
-cleaner separate-mesh-per-flap topology would be needed for clean cloth sim.
+Cloth physics is intentionally NOT used on this character — her dress is
+rigged into the body mesh, so cloth simulation would tear the visible
+silhouette. A character with separate-mesh cape / cloak topology would be
+needed for clean cloth sim.
 
 Run::
 
-    py -m posecascade --scene examples/assets/character.glb --script examples/scripts/full_demo.py
+    py -m posecascade --scene examples/assets/herta/herta.glb \
+        --script examples/scripts/full_demo.py
 """
 
 # Per-chain hair tuning. Damping kept under-critical (ζ < 1) so a kick produces

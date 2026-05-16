@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+
+  "rig": {
+    "character_root": "Object_4",
+    "leg_chain_l": ["upper_leg_L", "lower_leg_L", "foot_L"],
+    "leg_chain_r": ["upper_leg_R", "lower_leg_R", "foot_R"]
+  },
+
+  "ground": {
+    "kind": "flat",
+    "y": 0.0
+  },
+
+  "physics_chains": {
+    "BackHair_L":    {"stiffness": 1.0, "damping": 0.08, "inertia": 0.15},
+    "BackHair_R":    {"stiffness": 1.0, "damping": 0.08, "inertia": 0.15},
+    "BackHairUpper": {"stiffness": 2.5, "damping": 0.18, "inertia": 0.10},
+    "hair_C":  {"stiffness": 2.5, "damping": 0.18, "inertia": 0.10},
+    "hair_L":  {"stiffness": 1.5, "damping": 0.11, "inertia": 0.13},
+    "hair_R":  {"stiffness": 1.5, "damping": 0.11, "inertia": 0.13},
+    "hair_LL": {"stiffness": 0.8, "damping": 0.06, "inertia": 0.15},
+    "hair_RR": {"stiffness": 0.8, "damping": 0.06, "inertia": 0.15},
+    "orn":     {"stiffness": 5.0, "damping": 0.35, "inertia": 0.08}
+  },
+
+  "wind": {
+    "direction": [1.0, 0.0, 0.0],
+    "speed": 0.04,
+    "turbulence_amplitude": 0.02,
+    "turbulence_frequency_hz": 0.8
+  },
+
+  "collision_deform_meshes": ["Object_361"],
+
+  "colliders": [
+    {"kind": "capsule", "follow_bone": "upper_leg_L", "end_bone": "lower_leg_L", "radius": 0.08, "skin_offset": 0.01},
+    {"kind": "capsule", "follow_bone": "upper_leg_R", "end_bone": "lower_leg_R", "radius": 0.08, "skin_offset": 0.01},
+    {"kind": "capsule", "follow_bone": "lower_leg_L", "end_bone": "foot_L", "radius": 0.05, "skin_offset": 0.005},
+    {"kind": "capsule", "follow_bone": "lower_leg_R", "end_bone": "foot_R", "radius": 0.05, "skin_offset": 0.005}
+  ]
+}

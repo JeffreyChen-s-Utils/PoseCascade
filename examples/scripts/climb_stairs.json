@@ -1,15 +1,8 @@
 {
   "schema_version": 1,
+  "extends": "_herta_profile.json",
   "name": "climb_stairs_demo",
   "loop_sec": 8.0,
-
-  "rig": {
-    "character_root": "Sketchfab_model",
-    "leg_chain_l": ["upper_leg_L", "lower_leg_L", "foot_L"],
-    "leg_chain_r": ["upper_leg_R", "lower_leg_R", "foot_R"],
-    "knee_limit_min": [-2.4, 0, 0],
-    "knee_limit_max": [0.1, 0, 0]
-  },
 
   "ground": {
     "kind": "stairs",
@@ -18,12 +11,6 @@
     "step_rise": 0.02,
     "count": 5,
     "forward_sign": -1
-  },
-
-  "physics_chains": {
-    "hair_C":  {"stiffness": 14.0, "damping": 0.45, "inertia": 0.015},
-    "hair_L":  {"stiffness": 12.0, "damping": 0.40, "inertia": 0.015},
-    "hair_R":  {"stiffness": 12.0, "damping": 0.40, "inertia": 0.015}
   },
 
   "wind": {
@@ -37,25 +24,16 @@
     {
       "name": "approach",
       "duration_sec": 2.0,
-      "body": {
-        "yaw_rad": "pi",
-        "translation": {
-          "x": 0,
-          "y": 0,
-          "z": {"kind": "linear", "from": 0.0, "to": -0.20}
-        }
-      },
+      "body": {"yaw_rad": "pi", "translation": [0, 0, [0.0, -0.20]]},
       "gait": {
         "kind": "walking",
         "step_cycle_sec": 1.0,
         "leg_swing_amplitude": 0.50,
         "knee_bend": -0.30,
         "arm_swing_amplitude": 0.40,
-        "arm_hang_rad": -1.45
+        "arm_hang_rad": -0.50
       },
-      "morphs": {
-        "blink": "0.5 + 0.5 * sin(elapsed * tau / 3.0)"
-      }
+      "morphs": {"blink": "0.5 + 0.5 * sin(elapsed * tau / 3.0)"}
     },
 
     {
@@ -83,7 +61,7 @@
         "trailing_back_rad": 0.15,
         "knee_bend_rad": 0.20,
         "arm_swing_amplitude_rad": 0.30,
-        "arm_hang_rad": -1.45,
+        "arm_hang_rad": -0.50,
         "knee_bell": [0.05, 0.75],
         "forward_bell": [0.05, 0.75],
         "lock_trailing_foot": true
@@ -100,19 +78,12 @@
       "body": {
         "yaw_rad": "pi",
         "lean_x_rad": {"kind": "ease", "from": 0.10, "to": 0.0},
-        "translation": {
-          "x": 0,
-          "y": 0.10,
-          "z": -0.40
-        }
+        "translation": [0, 0.10, -0.40]
       },
       "gait": {
         "kind": "walking",
         "step_cycle_sec": 1.0,
-        "leg_swing_amplitude": 0.0,
-        "knee_bend": 0.0,
-        "arm_swing_amplitude": 0.0,
-        "arm_hang_rad": -1.45
+        "arm_hang_rad": -0.50
       },
       "morphs": {
         "blink": "0.5 + 0.5 * sin(elapsed * tau / 3.0)",

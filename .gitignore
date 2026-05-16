@@ -10,6 +10,10 @@ __pycache__/
 # at build time by cythonize(). The .pyx is the source of truth.
 posecascade/animation/_cloth_kernels.c
 
+# Reserved for ad-hoc / private test assets that mustn't be shipped.
+# (No assets currently live here — see examples/assets/march7th/NOTICE.md
+# for the attribution covering the bundled March 7th model.)
+
 # Distribution / packaging
 .Python
 build/

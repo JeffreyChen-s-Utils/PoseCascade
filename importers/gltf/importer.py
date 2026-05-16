@@ -22,7 +22,10 @@ from posecascade.animation.rig_normalize import (
     collapse_wrapper_empties,
     normalize_character_orientation,
 )
-from posecascade.animation.spring import detect_chains, resolve_chain_params
+from posecascade.animation.spring import (
+    detect_chains,
+    resolve_chain_params_or_none,
+)
 from posecascade.assets.path_safety import resolve_safe
 from posecascade.assets.types import ImportedScene, Mesh, Skin, Texture
 from posecascade.errors import MalformedAssetError
@@ -498,14 +501,26 @@ def _attach_skins(
 def _attach_spring_chains(skins: tuple[Skin, ...]) -> None:
     """For every skin, detect named chains and tag each chain's anchor node.
 
-    Idempotent: skipping anchors that already carry a :class:`SpringChainComponent`
-    with the same chain name (so re-importing the same scene won't double-attach).
+    Only chains whose prefix matches a known profile in
+    :data:`DEFAULT_CHAIN_PROFILES` get rigged. The chain detector
+    catches every ``<prefix><digits>`` joint group, including
+    structural bones (``Spine1_M_037``/``Spine2_M_044``) and rig-only
+    helpers (twist deformers, weapon attachments) that look like
+    chains but should never sway. The strict resolver returns
+    ``None`` for those so they're skipped — auto-rigging Spine as
+    swing physics would warp the torso every time the body moved.
+
+    Idempotent: skipping anchors that already carry a
+    :class:`SpringChainComponent` with the same chain name (so
+    re-importing the same scene won't double-attach).
     """
     for skin in skins:
         for chain in detect_chains(skin.joints):
             if _has_chain_component(chain.anchor, chain.name):
                 continue
-            params = resolve_chain_params(chain.name)
+            params = resolve_chain_params_or_none(chain.name)
+            if params is None:
+                continue
             chain.anchor.add_component(
                 SpringChainComponent(
                     chain_name=chain.name,

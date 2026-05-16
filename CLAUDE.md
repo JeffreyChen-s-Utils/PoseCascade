@@ -106,6 +106,14 @@ never happens and the gap compounds.
 
 ### Performance
 
+- **NEVER disable, gate behind a flag, or remove a feature to "fix" performance.** A slow
+  feature is a bug to be optimised, not a feature to be hidden. The user is shipping the
+  feature for a reason — taking it out trades a clear regression for an invisible cost
+  ("now this asset doesn't clip" → "now this asset doesn't clip AND drops below 60 fps").
+  When perf-tuning, the deliverable is the same user-visible behaviour at lower CPU/GPU cost,
+  full stop. If after honest profiling the only path to acceptable perf truly is to scope
+  the feature down (e.g. operate on a vertex subset rather than the whole mesh), surface the
+  trade-off to the user explicitly and let them decide — don't unilaterally take features away.
 - Always consider and implement the best-performance approach for the task.
 - Use lazy loading and on-demand initialization where applicable. Textures and meshes are
   uploaded to the GPU on first draw, not at import time.

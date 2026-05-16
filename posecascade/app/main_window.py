@@ -36,11 +36,15 @@ from posecascade.render.effects.chain import EffectChain
 from posecascade.scene.model_slot import SceneSlots
 from posecascade.scene.node import Node
 from posecascade.scene.scene import Scene
+from posecascade.ui.animation_command_stack import AnimationCommandStack
+from posecascade.ui.animation_json_dock import AnimationJsonDock
+from posecascade.ui.animation_json_document import AnimationJsonDocument
 from posecascade.ui.effect_chain_dock import EffectChainDock
 from posecascade.ui.export_dialog import ExportDialog, ExportSpec
 from posecascade.ui.inspector import InspectorDock
 from posecascade.ui.multi_track_timeline import MultiTrackTimelineDock
 from posecascade.ui.outliner import OutlinerDock
+from posecascade.ui.phase_blocks_dock import PhaseBlocksDock
 from posecascade.ui.slot_list_dock import SlotListDock
 from posecascade.ui.timeline_basic import TimelineDock
 from posecascade.ui.viewport import Viewport
@@ -91,6 +95,7 @@ class MainWindow(QMainWindow):
         self._effect_dock = EffectChainDock(EffectChain(), self)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._effect_dock)
         self.tabifyDockWidget(self._inspector, self._effect_dock)
+        self._build_animation_docks()
         self._timeline = TimelineDock(self)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._timeline)
         self._multi_track = MultiTrackTimelineDock(
@@ -157,13 +162,80 @@ class MainWindow(QMainWindow):
 
     def set_script_path(self, path: Path | None) -> None:
         self._script_path = path
+        # Mirror the just-loaded script into the JSON dock when it's a
+        # declarative animation. Python scripts go through the sandbox
+        # loader and don't have an in-editor view yet, so we leave the
+        # dock alone for them — its placeholder text already tells the
+        # user to use ``File → Open Script`` with a ``.json``.
+        if path is not None and path.suffix.lower() == ".json":
+            self._animation_json_dock.load_file(path)
         self._update_status_text()
+
+    def _on_animation_json_reload(self, text: str) -> None:
+        """Re-attach the dock's current text as a declarative animation.
+
+        Writes the buffer to a temp file is unnecessary — ``attach_script``
+        only needs the path for ``extends`` resolution + the script-host
+        registry name. We mirror the in-memory text to the on-disk file
+        through a transient save (the dock's Save button does this on
+        demand) and then re-run the attach flow.
+        """
+        if self._script_path is None or self._script_path.suffix.lower() != ".json":
+            _log.warning("animation reload requested but no .json path bound")
+            return
+        try:
+            self._script_path.write_text(text, encoding="utf-8")
+        except OSError as err:
+            _log.error("failed to persist edited animation: %s", err)
+            return
+        from posecascade.app.bootstrap import attach_script  # noqa: PLC0415
+
+        attach_script(self, self._services, self._script_path)
 
     # --- Qt overrides --------------------------------------------------------
 
     def closeEvent(self, event: object) -> None:  # noqa: N802 — Qt override
         self._timer.stop()
         super().closeEvent(event)
+
+    # --- dock construction helpers ------------------------------------------
+
+    def _build_animation_docks(self) -> None:
+        """Build the JSON + phase-blocks docks sharing one document.
+
+        Pulled out of ``__init__`` to keep that method under the
+        cyclomatic-complexity bound — the editor's right-column dock
+        wiring adds enough statements that the constructor crosses the
+        50-statement linter cap when this is inline.
+        """
+        self._animation_document = AnimationJsonDocument(self)
+        self._animation_stack = AnimationCommandStack(
+            self._animation_document, self,
+        )
+        self._animation_json_dock = AnimationJsonDock(
+            document=self._animation_document,
+            command_stack=self._animation_stack,
+            parent=self,
+        )
+        self._phase_blocks_dock = PhaseBlocksDock(
+            document=self._animation_document,
+            command_stack=self._animation_stack,
+            parent=self,
+        )
+        self.addDockWidget(
+            Qt.DockWidgetArea.RightDockWidgetArea, self._animation_json_dock,
+        )
+        self.addDockWidget(
+            Qt.DockWidgetArea.RightDockWidgetArea, self._phase_blocks_dock,
+        )
+        self.tabifyDockWidget(self._inspector, self._animation_json_dock)
+        self.tabifyDockWidget(self._animation_json_dock, self._phase_blocks_dock)
+        self._animation_json_dock.reload_requested.connect(
+            self._on_animation_json_reload,
+        )
+        self._phase_blocks_dock.reload_requested.connect(
+            self._on_animation_json_reload,
+        )
 
     # --- menu / toolbar / status bar -----------------------------------------
 
@@ -209,6 +281,8 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self._slot_list.toggleViewAction())
         view_menu.addAction(self._inspector.toggleViewAction())
         view_menu.addAction(self._effect_dock.toggleViewAction())
+        view_menu.addAction(self._animation_json_dock.toggleViewAction())
+        view_menu.addAction(self._phase_blocks_dock.toggleViewAction())
         view_menu.addAction(self._timeline.toggleViewAction())
         view_menu.addAction(self._multi_track.toggleViewAction())
 

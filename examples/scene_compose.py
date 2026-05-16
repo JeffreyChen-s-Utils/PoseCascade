@@ -87,8 +87,9 @@ _Z_UP_TO_Y_UP = quat_axis_angle(vec3(1.0, 0.0, 0.0), -math.pi / 2)
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--character", type=Path, default=_DEFAULT_ASSETS_DIR / "character.glb",
-        help="Humanoid character .glb (default: examples/assets/character.glb).",
+        "--character", type=Path,
+        default=_DEFAULT_ASSETS_DIR / "herta" / "herta.glb",
+        help="Humanoid character .glb (default: examples/assets/herta/herta.glb).",
     )
     parser.add_argument(
         "--dog", type=Path, default=_DEFAULT_ASSETS_DIR / "dog.glb",

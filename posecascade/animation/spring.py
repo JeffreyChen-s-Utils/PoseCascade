@@ -226,15 +226,31 @@ class SpringSimulator:
         return None
 
     def step(self, dt: float) -> None:
-        """Advance simulation by ``dt`` seconds (substepped to ``fixed_dt``)."""
+        """Advance simulation by ``dt`` seconds (substepped to ``fixed_dt``).
+
+        Anchor world poses are snapshotted once at the start of the step
+        and reused across every substep — the anchor is a static bone
+        for the duration of one user-frame, so re-walking its parent
+        chain every substep is pure waste. On a 3-chain rig with 2
+        substeps per frame this drops the per-frame anchor-walk count
+        from 6 to 3.
+        """
         if dt <= 0.0:
             return
+        anchor_poses: dict[int, tuple[Vec3, Quat]] = {}
+        for chain in self.chains:
+            if chain.enabled:
+                anchor_poses[id(chain)] = node_world_pose(chain.anchor)
         remaining = float(dt)
         while remaining > _NUMERIC_EPSILON:
             sub = min(self.fixed_dt, remaining)
             for chain in self.chains:
-                if chain.enabled:
-                    _integrate_chain(chain, sub, self.time, self.global_forces)
+                if not chain.enabled:
+                    continue
+                _integrate_chain(
+                    chain, sub, self.time, self.global_forces,
+                    anchor_pose=anchor_poses[id(chain)],
+                )
             self.time += sub
             remaining -= sub
 
@@ -282,10 +298,15 @@ def _integrate_chain(
     dt: float,
     time: float,
     global_forces: Sequence[ExternalForce],
+    *,
+    anchor_pose: tuple[Vec3, Quat] | None = None,
 ) -> None:
     """Step every joint in ``chain`` once. Walks root → tip so each joint sees its parent's
     updated world transform."""
-    anchor_pos, anchor_rot = node_world_pose(chain.anchor)
+    if anchor_pose is None:
+        anchor_pos, anchor_rot = node_world_pose(chain.anchor)
+    else:
+        anchor_pos, anchor_rot = anchor_pose
     parent = _ParentFrame(position=anchor_pos, rotation=anchor_rot)
     for joint in chain.joints:
         if not joint.initialized:
@@ -388,7 +409,27 @@ def node_world_pose(node: Node) -> tuple[Vec3, Quat]:
 # A bone name like ``hair_C_0`` splits into prefix ``hair_C`` and index ``0``.
 # The pattern requires at least one non-digit character before the trailing digits
 # so anchor names like ``head_anchor`` (no integer suffix) do not match.
-_DEFAULT_CHAIN_PATTERN = re.compile(r"^(?P<prefix>.+?)_(?P<index>\d+)$")
+#
+# The underscore is OPTIONAL so MMD-style names ship out of the box:
+# ``前髪01`` → prefix ``前髪`` / index ``1``, ``リボン2`` → prefix ``リボン`` / index ``2``.
+# Non-greedy ``.+?`` + the anchored ``\d+`` makes the regex backtrack from
+# the end, so the underscore in ``hair_C_0`` still belongs to the prefix
+# (``hair_C``) rather than being eaten by the optional ``_?``.
+#
+# The trailing ``(?:_.*)?`` swallows any Maya / HSR-style suffix after
+# the chain index — ``HairA_00_JNT_060`` parses as prefix ``HairA`` /
+# index ``00`` so March 7th's strands group into chains the same way
+# ``hair_C_0..3`` did historically. Without the optional tail, the
+# greedy ``\d+`` would lock onto the trailing global joint ID
+# (``060``), every strand bone would land in its own prefix bucket,
+# and chain detection would emit zero chains on FBX-style rigs.
+# ``side`` capture group recognises the standard left/right suffix that HSR
+# and similar FBX rigs append AFTER the index (``BackHair1_L_0210``). When
+# present, the side is folded into the chain key so left and right strands
+# rig as independent chains instead of fighting for the same bucket.
+_DEFAULT_CHAIN_PATTERN = re.compile(
+    r"^(?P<prefix>.+?)_?(?P<index>\d+)(?:_(?P<side>[LR]))?(?:_.*)?$",
+)
 _log = logging.getLogger(__name__)
 
 
@@ -405,12 +446,45 @@ class DetectedChain:
     joints: tuple[Node, ...]
 
 
-# Sensible per-prefix defaults the importer (or any caller) can fall back on. Hair
-# uses moderate stiffness; ornaments use stiffer + heavier damping so accessories
-# don't flop loosely.
+# Sensible per-prefix defaults the importer (or any caller) can fall back on.
+# Keys cover the conventional glTF naming (``hair_C_0..3``) AND the canonical
+# MMD bone names (``前髪01..08``, ``リボン1..3``, ``スカート_0_0..3`` …) so PMD /
+# PMX imports get the same auto-rig glTF has always had. Add new entries here
+# when you encounter a new model whose author tags physics chains with an
+# unfamiliar prefix.
 DEFAULT_CHAIN_PROFILES: Mapping[str, SpringParams] = {
+    # Latin / glTF conventions
     "hair": SpringParams(stiffness=12.0, damping=2.5, inertia=0.05),
+    # HSR-style rigs that split back / side / inner hair into separate
+    # prefix buckets (``BackHair1_L``, ``BackHairUpper2``, …). Add new
+    # variant prefixes as you encounter rigs that use them.
+    "BackHair": SpringParams(stiffness=10.0, damping=2.2, inertia=0.05),
+    "BackHairUpper": SpringParams(stiffness=14.0, damping=2.7, inertia=0.04),
+    "SideHair": SpringParams(stiffness=11.0, damping=2.4, inertia=0.05),
+    "FrontHair": SpringParams(stiffness=12.0, damping=2.5, inertia=0.05),
+    "Ponytail": SpringParams(stiffness=10.0, damping=2.2, inertia=0.05),
     "orn": SpringParams(stiffness=24.0, damping=4.0, inertia=0.05),
+    "skirt": SpringParams(stiffness=10.0, damping=2.2, inertia=0.04),
+    "ribbon": SpringParams(stiffness=18.0, damping=3.0, inertia=0.03),
+    # NOTE: HSR / Aplaybox FBX rigs ship per-strand prefixes (``HairA``,
+    # ``skirtA``, ``ribbonA``, ``beltA``, ``earringA``, ``Xiudai``,
+    # ``WeaponA``, ``tongue``). Auto-rigging the whole set on import
+    # destabilises the cloth/PBD solver on this asset — some strands
+    # explode out from the head down past the feet on the first few
+    # frames. They are intentionally OMITTED here so March 7th loads
+    # statically; scripts that need decorative physics can opt in
+    # explicitly by adding a profile via the document-level
+    # ``physics_chains`` block (see ``examples/scripts/idle.json``).
+    # MMD / PMX / PMD conventions — bones named in Japanese.
+    "前髪": SpringParams(stiffness=12.0, damping=2.5, inertia=0.05),   # front hair
+    "後髪": SpringParams(stiffness=10.0, damping=2.2, inertia=0.05),   # back hair
+    "横髪": SpringParams(stiffness=11.0, damping=2.4, inertia=0.05),   # side hair
+    "髪": SpringParams(stiffness=12.0, damping=2.5, inertia=0.05),     # generic hair
+    "リボン": SpringParams(stiffness=18.0, damping=3.0, inertia=0.03), # ribbon
+    "スカート": SpringParams(stiffness=10.0, damping=2.2, inertia=0.04), # skirt
+    "ｽｶｰﾄ": SpringParams(stiffness=10.0, damping=2.2, inertia=0.04),  # half-width skirt
+    "袖": SpringParams(stiffness=11.0, damping=2.3, inertia=0.04),    # sleeve
+    "尻尾": SpringParams(stiffness=14.0, damping=2.8, inertia=0.05),  # tail
 }
 _FALLBACK_PROFILE = SpringParams()
 
@@ -435,6 +509,30 @@ def detect_chains(
     return chains
 
 
+def resolve_chain_params_or_none(
+    chain_name: str,
+    profiles: Mapping[str, SpringParams] = DEFAULT_CHAIN_PROFILES,
+) -> SpringParams | None:
+    """Strict variant: return ``None`` when no profile prefix matches ``chain_name``.
+
+    Use this in auto-rig paths so detected chains that *look* like
+    physics-eligible names but actually aren't (fingers, twist bones,
+    PMX append bones, …) get skipped instead of receiving the
+    fallback profile and silently swaying at runtime.
+    """
+    candidates = sorted(profiles.keys(), key=len, reverse=True)
+    for key in candidates:
+        # Exact match (chain name == profile key) OR underscore-separated
+        # token boundary (``hair_C`` starts with ``hair_``). A naked
+        # ``startswith(key)`` would over-match (``hairs`` → ``hair``);
+        # the underscore-suffix guards against that for ASCII names. MMD
+        # bones don't use underscore separators, so we accept a bare
+        # ``startswith`` for non-ASCII keys (``前髪`` matches ``前髪`` only).
+        if chain_name == key or chain_name.startswith(f"{key}_"):
+            return profiles[key]
+    return None
+
+
 def resolve_chain_params(
     chain_name: str,
     profiles: Mapping[str, SpringParams] = DEFAULT_CHAIN_PROFILES,
@@ -445,10 +543,9 @@ def resolve_chain_params(
     over an empty fallback). Falls back to default :class:`SpringParams` if nothing
     matches — useful for custom prefixes the engine doesn't know about.
     """
-    candidates = sorted(profiles.keys(), key=len, reverse=True)
-    for key in candidates:
-        if chain_name == key or chain_name.startswith(f"{key}_"):
-            return profiles[key]
+    strict = resolve_chain_params_or_none(chain_name, profiles)
+    if strict is not None:
+        return strict
     return _FALLBACK_PROFILE
 
 
@@ -456,15 +553,27 @@ def _group_bones_by_prefix(
     bones: Sequence[Node],
     pattern: re.Pattern[str],
 ) -> dict[str, list[tuple[int, Node]]]:
-    """Bucket ``bones`` by name prefix; values are sorted ``(index, node)`` pairs."""
+    """Bucket ``bones`` by name prefix; values are sorted ``(index, node)`` pairs.
+
+    When the pattern captures a ``side`` group (HSR-style ``_L``/``_R``
+    suffix after the index), it is folded into the bucket key so left
+    and right strands form independent chains. Patterns without a
+    ``side`` group fall back to grouping by ``prefix`` alone.
+    """
     grouped: dict[str, list[tuple[int, Node]]] = {}
+    has_side_group = "side" in pattern.groupindex
     for bone in bones:
         match = pattern.match(bone.name)
         if match is None:
             continue
         prefix = match.group("prefix")
         index = int(match.group("index"))
-        grouped.setdefault(prefix, []).append((index, bone))
+        if has_side_group:
+            side = match.group("side")
+            key = f"{prefix}_{side}" if side else prefix
+        else:
+            key = prefix
+        grouped.setdefault(key, []).append((index, bone))
     for entries in grouped.values():
         entries.sort(key=lambda pair: pair[0])
     return grouped
@@ -474,10 +583,25 @@ def _validate_group(
     prefix: str,
     indexed: Sequence[tuple[int, Node]],
 ) -> DetectedChain | None:
-    """Verify a candidate chain is consecutive and parent-linked. Returns ``None`` on rejection."""
+    """Verify ``indexed`` is uniformly-spaced and parent-linked. Returns ``None`` on rejection."""
     indices = [pair[0] for pair in indexed]
-    if indices != list(range(len(indices))):
-        _log.warning("chain %r rejected: indices not 0..N: %s", prefix, indices)
+    # Accept any arithmetic progression with a positive step. glTF authors
+    # typically index from 0 with step 1 (``hair_C_0..3``), MMD authors
+    # from 1 with step 1 (``前髪01..08``), but HSR FBX rigs commonly use
+    # step 2 (``BackHair1, BackHair3, BackHair5, ...``) where the gap
+    # holds twist / auxiliary bones authored elsewhere in the rig. Both
+    # should rig — the parent-chain check below is the real validator.
+    if len(indices) >= 2:                                                # noqa: PLR2004
+        step = indices[1] - indices[0]
+        expected = list(range(indices[0], indices[0] + step * len(indices), step or 1))
+        if step <= 0 or indices != expected:
+            _log.warning("chain %r rejected: indices not uniformly spaced: %s", prefix, indices)
+            return None
+    # Single-bone "chains" are noise — a hair chain by definition has
+    # multiple joints. This guard also stops the underscore-optional
+    # pattern from sweeping in singletons like ``spine01`` or ``neck1``.
+    if len(indices) < 2:                                              # noqa: PLR2004
+        _log.debug("chain %r ignored: single bone, treating as standalone", prefix)
         return None
     joints = tuple(pair[1] for pair in indexed)
     anchor = joints[0].parent

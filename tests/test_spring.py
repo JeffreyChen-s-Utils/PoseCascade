@@ -437,13 +437,36 @@ def test_detect_skips_anchor_without_index_suffix() -> None:
     assert "head_anchor" not in {c.name for c in chains}
 
 
-def test_detect_rejects_non_consecutive_indices() -> None:
+def test_detect_accepts_uniformly_spaced_indices() -> None:
+    """HSR FBX rigs index hair chains with odd-only or even-only steps
+    (``BackHair1 → BackHair3 → BackHair5``); the bones still form a valid
+    parent chain, just with auxiliary indices skipped between them. Accept
+    any positive uniform spacing — the parent-linkage check guards against
+    truly malformed groups."""
     anchor = Node(name="root")
     j0 = Node(name="bad_0", transform=Transform(translation=vec3(0.0, -0.1, 0.0)))
     j2 = Node(name="bad_2", transform=Transform(translation=vec3(0.0, -0.1, 0.0)))
     anchor.add_child(j0)
     j0.add_child(j2)
     chains = detect_chains([anchor, j0, j2])
+    assert len(chains) == 1
+    assert chains[0].name == "bad"
+    assert chains[0].joints == (j0, j2)
+
+
+def test_detect_rejects_non_uniform_indices() -> None:
+    """Indices that aren't a clean arithmetic progression (e.g. [0, 1, 5])
+    still get rejected — uniform spacing is required so an authored typo
+    in the rig surfaces as a warning rather than silently producing a
+    miss-rigged chain."""
+    anchor = Node(name="root")
+    j0 = Node(name="bad_0", transform=Transform(translation=vec3(0.0, -0.1, 0.0)))
+    j1 = Node(name="bad_1", transform=Transform(translation=vec3(0.0, -0.1, 0.0)))
+    j5 = Node(name="bad_5", transform=Transform(translation=vec3(0.0, -0.1, 0.0)))
+    anchor.add_child(j0)
+    j0.add_child(j1)
+    j1.add_child(j5)
+    chains = detect_chains([anchor, j0, j1, j5])
     assert chains == []
 
 

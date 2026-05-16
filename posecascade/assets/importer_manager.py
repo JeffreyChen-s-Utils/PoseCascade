@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+from posecascade.assets.auto_rig import apply_post_import_rig
 from posecascade.assets.types import ImportedScene
 from posecascade.errors import UnsupportedFormatError
 
@@ -67,5 +68,16 @@ class ImporterManager:
         return importer
 
     def load(self, path: Path) -> ImportedScene:
-        """Look up the right importer and load the scene from ``path``."""
-        return self.importer_for(path).load(path)
+        """Look up the right importer, load the scene, run universal auto-rigs.
+
+        Every format goes through the same post-import pipeline (see
+        :mod:`posecascade.assets.auto_rig`): spring chains tagged by bone
+        name, etc. The glTF importer historically did this in-place;
+        moving it here means PMD / PMX / FBX / OBJ imports get the same
+        treatment without duplicating the logic in each plugin. The
+        pass is idempotent so the glTF importer's in-house call (still
+        present for backwards-compat) does no extra work.
+        """
+        imported = self.importer_for(path).load(path)
+        apply_post_import_rig(imported)
+        return imported

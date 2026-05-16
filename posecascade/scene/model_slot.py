@@ -41,6 +41,11 @@ class ModelSlot:
     transform: Transform = field(default_factory=Transform)
     visible: bool = True
     external_parents: tuple[ExternalParentBinding, ...] = field(default_factory=tuple)
+    # Stage slots are passive props (dance floor, walls, environment
+    # PMX models): the renderer draws them like any other slot but the
+    # animation player skips bone / morph / IK / physics passes on
+    # them. Defaults to False so existing model loads stay untouched.
+    is_stage: bool = False
 
 
 @dataclass

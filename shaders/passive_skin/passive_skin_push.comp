@@ -1,0 +1,179 @@
+#version 430 core
+//
+// pass: passive skin LBS + collider push (compute)
+//
+// One invocation per mesh vertex:
+//   1. Reads ``bind_positions[vid]`` (the rest-pose vertex in mesh-local space)
+//   2. Does 4-bone linear blend skinning against ``bone_matrices`` to get the
+//      animated world position
+//   3. Iterates colliders, projecting the world position outside any sphere
+//      or capsule it landed inside — skipping colliders whose excluded-joint
+//      bitmask covers this vertex's dominant joint (so a hand-sphere does
+//      not push the hand's own skin verts)
+//   4. Transforms the result by ``u_worldToLocal`` and writes it as a packed
+//      float[3] into ``out_positions`` — i.e. directly into the mesh's
+//      position VBO, no CPU readback needed.
+//
+// Bindings:
+//   SSBO 0: BindPositions   (read)   — packed float[3] per vert (matches VBO layout)
+//   SSBO 1: Joints          (read)   — 4 uints per vert
+//   SSBO 2: Weights         (read)   — 4 floats per vert
+//   SSBO 3: BoneMatrices    (read)   — mat4 per joint (joint_world × inv_bind)
+//   SSBO 4: OutputPositions (write)  — packed float[3] per vert (bound on the position VBO)
+//   SSBO 5: DominantJoint   (read)   — one int per vert (highest-weight joint)
+//   SSBO 6: ColliderExclude (read)   — bit-flag mask per (collider, joint)
+//   SSBO 7: BindNormals     (read)   — packed float[3] per vert (mesh-local bind normals)
+//   SSBO 8: OutputNormals   (write)  — packed float[3] per vert (bound on the normal VBO)
+//
+//   UBO 0: CollidersUBO              — collider count + flat collider array
+//
+// Uniforms:
+//   u_vertCount     (uint)
+//   u_worldToLocal  (mat4)            — applied after the optional collider push
+//
+// Compute group size 64 is a safe choice across AMD / Intel / NVIDIA; bumping to
+// 128 or 256 gives a marginal win on RDNA / Ampere but loses on Intel iGPUs.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer BindPositions {
+    float bind_positions[];
+};
+layout(std430, binding = 1) readonly buffer Joints {
+    uint joints[];
+};
+layout(std430, binding = 2) readonly buffer Weights {
+    float weights[];
+};
+layout(std430, binding = 3) readonly buffer BoneMatrices {
+    mat4 bone_matrices[];
+};
+layout(std430, binding = 4) writeonly buffer OutputPositions {
+    float out_positions[];
+};
+layout(std430, binding = 5) readonly buffer DominantJoint {
+    int dominant_joint[];
+};
+layout(std430, binding = 6) readonly buffer ColliderExclude {
+    // Flat bitfield: layout[c * BONE_WORDS + word_index] is a 32-bit mask of
+    // joint indices whose dominant verts collider ``c`` must NOT push.
+    uint collider_exclude_bits[];
+};
+layout(std430, binding = 7) readonly buffer BindNormals {
+    float bind_normals[];
+};
+layout(std430, binding = 8) writeonly buffer OutputNormals {
+    float out_normals[];
+};
+
+#define MAX_COLLIDERS 16
+#define BONE_WORDS 16  // ceil(384 / 32) — must match _MAX_BONES in renderer.py
+
+struct GpuCollider {
+    // Sphere: data1=(center.xyz, radius), data2.w=0
+    // Capsule: data1=(a.xyz, radius), data2=(b.xyz, kind=1)
+    // skin_offset is in extras.x; extras.yzw are padding for std140 alignment.
+    vec4 data1;
+    vec4 data2;
+    vec4 extras;
+};
+
+layout(std140, binding = 0) uniform CollidersUBO {
+    uint u_colliderCount;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+    GpuCollider u_colliders[MAX_COLLIDERS];
+};
+
+uniform uint u_vertCount;
+uniform mat4 u_worldToLocal;
+
+
+void main() {
+    uint vid = gl_GlobalInvocationID.x;
+    if (vid >= u_vertCount) {
+        return;
+    }
+
+    vec4 p_bind = vec4(
+        bind_positions[vid * 3u + 0u],
+        bind_positions[vid * 3u + 1u],
+        bind_positions[vid * 3u + 2u],
+        1.0
+    );
+
+    // 4-bone LBS — accumulate weighted joint matrix, then apply.
+    mat4 skin_mat = mat4(0.0);
+    for (int s = 0; s < 4; ++s) {
+        uint j = joints[vid * 4u + uint(s)];
+        float w = weights[vid * 4u + uint(s)];
+        skin_mat += w * bone_matrices[j];
+    }
+    vec4 world_p = skin_mat * p_bind;
+
+    // Collision push — sphere / capsule, with per-vertex bone-filter.
+    int my_dominant = dominant_joint[vid];
+    int dom_word = my_dominant >> 5;            // / 32
+    uint dom_bit = 1u << uint(my_dominant & 31);
+
+    for (uint c = 0u; c < u_colliderCount; ++c) {
+        uint excl = collider_exclude_bits[c * uint(BONE_WORDS) + uint(dom_word)];
+        if ((excl & dom_bit) != 0u) {
+            continue;
+        }
+        GpuCollider cl = u_colliders[c];
+        float r = cl.data1.w + cl.extras.x;
+        if (cl.data2.w < 0.5) {
+            // Sphere
+            vec3 center = cl.data1.xyz;
+            vec3 delta = world_p.xyz - center;
+            float dist_sq = dot(delta, delta);
+            if (dist_sq < r * r) {
+                float d = sqrt(max(dist_sq, 1.0e-12));
+                vec3 norm = delta / d;
+                world_p.xyz = center + norm * r;
+            }
+        } else {
+            // Capsule
+            vec3 a = cl.data1.xyz;
+            vec3 b = cl.data2.xyz;
+            vec3 ab = b - a;
+            float ab_len_sq = dot(ab, ab);
+            if (ab_len_sq > 1.0e-12) {
+                float t = clamp(dot(world_p.xyz - a, ab) / ab_len_sq, 0.0, 1.0);
+                vec3 closest = a + t * ab;
+                vec3 delta = world_p.xyz - closest;
+                float dist_sq = dot(delta, delta);
+                if (dist_sq < r * r) {
+                    float d = sqrt(max(dist_sq, 1.0e-12));
+                    vec3 norm = delta / d;
+                    world_p.xyz = closest + norm * r;
+                }
+            }
+        }
+    }
+
+    // World → mesh-local so the renderer's existing model-matrix uniform
+    // produces correct final world positions.
+    vec4 local_p = u_worldToLocal * world_p;
+    out_positions[vid * 3u + 0u] = local_p.x;
+    out_positions[vid * 3u + 1u] = local_p.y;
+    out_positions[vid * 3u + 2u] = local_p.z;
+
+    // LBS the bind-pose normal through the same combined matrix's 3x3
+    // sub-block — translation column does not apply to normals. Skip
+    // re-orthonormalisation: PBD-free passive skinning never twists hard
+    // enough for the LBS-shortened length to read off. The renderer's
+    // shader normalises on read anyway.
+    vec3 n_bind = vec3(
+        bind_normals[vid * 3u + 0u],
+        bind_normals[vid * 3u + 1u],
+        bind_normals[vid * 3u + 2u]
+    );
+    vec3 n_world = mat3(skin_mat) * n_bind;
+    vec3 n_local = mat3(u_worldToLocal) * n_world;
+    out_normals[vid * 3u + 0u] = n_local.x;
+    out_normals[vid * 3u + 1u] = n_local.y;
+    out_normals[vid * 3u + 2u] = n_local.z;
+}

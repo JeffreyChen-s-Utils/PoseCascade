@@ -102,6 +102,13 @@ def test_renders_pmx_tiny(gl_context: object, offscreen_fbo: int) -> None:
     imported = PmxImporter().load(_TINY_PMX)
     renderer = Renderer(shaders_root=_shaders_root())
     renderer.initialize()
+    # PMX smoke test pins luminance + alpha statistics; disable the
+    # new ground / projected shadow / self-shadow / sky / sRGB passes
+    # so the baseline stays the cube the test was written for.
+    renderer.set_ground_enabled(False)
+    renderer.set_self_shadow_enabled(False)
+    renderer.set_sky_enabled(False)
+    renderer.set_srgb_output_enabled(False)
     renderer.populate_from_scene(imported)
 
     camera = Camera(position=vec3(3.0, 2.0, 3.0), target=vec3(0.0, 0.0, 0.0))

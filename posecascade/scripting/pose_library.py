@@ -13,8 +13,8 @@ override the built-ins of the same name or to add new presets.
 Bone keys go through the rig's ``body_bones`` alias map at runtime, so a
 preset authored in Galaxia / VRoid vocabulary
 (``upper_arm_L``, ``head``, ...) plays on any rig that aliases those
-names. Magnitudes match dance.py's tested ranges so they read clearly
-on the same character without proximity-weight pinching.
+names. Magnitudes are tuned to read clearly on the same character
+without proximity-weight pinching.
 """
 from __future__ import annotations
 
@@ -96,6 +96,37 @@ BUILTIN_POSES: dict[str, PoseSpec] = {
         "upper_arm_R": {"x_rad": -0.60, "z_rad": -0.60},
         "head": {"x_rad": -0.08},
         "chest": {"x_rad": -0.06},
+    },
+    # Neutral rest — both arms in a relaxed casual A-pose with the
+    # hands sitting OUTSIDE the hip silhouette. The character's bind
+    # pose typically ships in T-pose or shallow A-pose; rotating fully
+    # vertical (z_rad magnitude ~0.95+) pushes the hand INTO a flared
+    # dress at hip height. A milder ~0.5 magnitude keeps the arms
+    # angled outward enough that wrists clear the dress side panels.
+    # Sign convention matches the gait's ``arm_hang_rad``: NEGATIVE
+    # z_rad rotates the left arm downward, mirrored on the right.
+    "rest_arms": {
+        "upper_arm_L": {"z_rad": -0.50},
+        "upper_arm_R": {"z_rad": 0.50},
+    },
+    # Single-arm wave: right arm hangs naturally while the left waves
+    # overhead. Replaces ``point_L`` for phases that want a clear
+    # "hello" silhouette — the original ``point_L`` left the right arm
+    # at the bind T-pose horizontal, which read as broken on the
+    # bundled HSR rig. Resting arm uses the same sign convention as
+    # ``rest_arms``.
+    "wave_L": {
+        "upper_arm_L": {"x_rad": -1.40, "z_rad": 0.45},
+        "upper_arm_R": {"z_rad": 0.50},
+        "head": {"y_rad": 0.18},
+        "chest": {"y_rad": 0.04},
+    },
+    # Mirror of wave_L.
+    "wave_R": {
+        "upper_arm_R": {"x_rad": -1.40, "z_rad": -0.45},
+        "upper_arm_L": {"z_rad": -0.50},
+        "head": {"y_rad": -0.18},
+        "chest": {"y_rad": -0.04},
     },
 }
 

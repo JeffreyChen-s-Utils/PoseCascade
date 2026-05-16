@@ -1,13 +1,12 @@
 """Cloth template — point this at a cape / drape mesh on YOUR model.
 
-The bundled ``examples/assets/character.glb`` does not ship a separate
-cape or skirt mesh: the historical mesh slot ``obj2_m18_0`` referenced
-by earlier revisions of this script is body / clothing geometry on the
-current asset, and running cloth simulation on it deforms the torso
-silhouette into a halo around the waist + exposes back-faces that
-toon-cull turns into "hollow" patches. So this script no-ops on the
-bundled character and is left here as a template for users who load a
-model that *does* contain a cape.
+The bundled ``examples/assets/herta/herta.glb`` does not ship a separate
+cape or skirt mesh: the dress is rigged into the body mesh, and running
+cloth simulation on it would deform the torso silhouette into a halo
+around the waist + expose back-faces that toon-cull turns into "hollow"
+patches. So this script no-ops on the bundled character and is left
+here as a template for users who load a model that *does* contain a
+cape.
 
 To use it: copy this file, change :data:`CAPE_NODE_NAME` to the name
 of your model's cape / cloak / scarf node, and adjust the tuning
@@ -24,7 +23,7 @@ Run with::
 
 # Set this to the actual cape / cloak / scarf node name in YOUR model.
 # When the script runs against a scene that doesn't contain this node
-# (e.g. the bundled character.glb, which has no such mesh) ``start()``
+# (e.g. the bundled herta.glb, which has no such mesh) ``start()``
 # logs a one-line skip message and bails out — no cloth is added.
 CAPE_NODE_NAME = "your_cape_mesh_node_name_here"
 

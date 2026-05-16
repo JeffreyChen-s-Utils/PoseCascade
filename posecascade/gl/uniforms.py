@@ -15,6 +15,8 @@ U_TIME = "u_time"
 U_MODEL_MATRIX = "u_modelMatrix"
 U_NORMAL_MATRIX = "u_normalMatrix"
 U_BONE_MATRICES = "u_boneMatrices"
+U_BONE_DQ_REAL = "u_boneDualQuatsReal"
+U_BONE_DQ_DUAL = "u_boneDualQuatsDual"
 
 # Material
 U_BASE_COLOR = "u_baseColor"
@@ -35,6 +37,30 @@ U_EDGE_COLOR = "u_edgeColor"
 U_EDGE_SIZE = "u_edgeSize"
 U_LIGHT_DIRECTION = "u_lightDirection"
 U_LIGHT_COLOR = "u_lightColor"
+U_SECONDARY_LIGHT_COUNT = "u_secondaryLightCount"
+U_SECONDARY_LIGHT_DIRECTIONS = "u_secondaryLightDirections"
+U_SECONDARY_LIGHT_COLORS = "u_secondaryLightColors"
+
+# Ground pass (checker)
+U_CELL_SIZE = "u_cellSize"
+U_COLOR_A = "u_colorA"
+U_COLOR_B = "u_colorB"
+U_FADE_START = "u_fadeStart"
+U_FADE_END = "u_fadeEnd"
+U_SHADOW_COLOR = "u_shadowColor"
+U_GROUND_Y = "u_groundY"
+
+# Self-shadow map (depth pass + toon sampling)
+U_LIGHT_SPACE_MATRIX = "u_lightSpaceMatrix"
+U_SHADOW_MAP = "u_shadowMap"
+U_SHADOW_ENABLED = "u_shadowEnabled"
+U_SHADOW_STRENGTH = "u_shadowStrength"
+
+# Gradient sky pass
+U_ZENITH_COLOR = "u_zenithColor"
+U_HORIZON_COLOR = "u_horizonColor"
+U_GROUND_COLOR = "u_groundColor"
+U_HORIZON_Y = "u_horizonY"
 
 # Vertex attribute locations
 A_POSITION = 0

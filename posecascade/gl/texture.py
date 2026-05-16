@@ -17,6 +17,7 @@ from OpenGL.GL import (
     GL_REPEAT,
     GL_RGBA,
     GL_RGBA8,
+    GL_SRGB8_ALPHA8,
     GL_TEXTURE_2D,
     GL_TEXTURE_MAG_FILTER,
     GL_TEXTURE_MIN_FILTER,
@@ -50,21 +51,31 @@ class GLTexture:
 def upload_texture(pixels: np.ndarray, *, srgb: bool = False) -> GLTexture:
     """Upload an HxWx4 uint8 RGBA buffer to a fresh GL texture and return it.
 
-    ``srgb`` is accepted for API symmetry with future sRGB-aware framebuffers
-    but is currently ignored — we always upload as ``GL_RGBA8`` because the
-    forward framebuffer is linear and the GPU's sRGB→linear sample conversion
-    would otherwise leave colours visibly under-bright on display.
+    ``srgb=True`` stores the texture as ``GL_SRGB8_ALPHA8`` so the GPU
+    decodes sRGB → linear at sample time. Use this for base-colour /
+    diffuse maps that were authored in display-referred sRGB space.
+    ``srgb=False`` keeps the data linear — required for LUT-style
+    textures (toon ramp, sphere map, normal map) where the pixel values
+    are not display colours but encoded data.
+
+    When sRGB-aware framebuffers are enabled at the renderer level, the
+    GPU re-encodes shader output back to sRGB on write — the round trip
+    keeps shader math in linear space without the cumulative banding a
+    manual ``pow(c, 2.2)`` would introduce.
     """
-    _ = srgb  # reserved for when framebuffer-sRGB is wired up
     if pixels.ndim != _RGBA_NDIM or pixels.shape[2] != _RGBA_CHANNELS:
         raise ValueError(f"expected HxWx4 RGBA, got shape {pixels.shape}")
     if pixels.dtype != np.uint8:
         raise ValueError(f"expected uint8 pixels, got {pixels.dtype}")
     height, width, _ = pixels.shape
     contig = np.ascontiguousarray(pixels)
+    internal_format = GL_SRGB8_ALPHA8 if srgb else GL_RGBA8
     texture_id = int(glGenTextures(1))
     glBindTexture(GL_TEXTURE_2D, texture_id)
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, contig)
+    glTexImage2D(
+        GL_TEXTURE_2D, 0, internal_format, width, height, 0,
+        GL_RGBA, GL_UNSIGNED_BYTE, contig,
+    )
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)

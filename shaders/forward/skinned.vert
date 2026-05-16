@@ -16,7 +16,7 @@
 // u_modelMatrix is intentionally absent here — the renderer pre-folds any
 // holder transform into the bone matrices when it gathers them.
 
-#define MAX_BONES 256
+#define MAX_BONES 384
 
 layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec3 a_normal;

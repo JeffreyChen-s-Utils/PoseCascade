@@ -246,6 +246,8 @@ class PhysicsLite:
         linear_damping: float = 0.985,
         iterations: int = 8,
         rest_pull: float = 4.0,
+        track_bone: object | None = None,
+        skin_target: bool = False,
     ) -> ClothPieceHandle | None:
         """Mark ``node``'s mesh as a simulated cloth piece. Returns a handle (or ``None``).
 
@@ -258,10 +260,28 @@ class PhysicsLite:
         max along ``anchor_axis`` exceeds this value are FULLY anchored — useful
         for filtering a multi-piece sleeve mesh down to just the lower flowing
         flaps while leaving the puffy upper part rigid against the body.
+
+        ``track_bone`` (Node, optional): pin the cloth's anchor verts to this
+        bone's world frame. Without it, when the character translates the
+        anchored top of the cloth stays at its initial world position and
+        the skirt visibly detaches from the moving body. Typically the hip
+        / pelvis bone for a skirt, the upper-chest bone for a cape.
+
+        ``skin_target`` (bool, default False): drive each cloth vert's rest
+        position from the mesh's bone skinning weights every tick. The
+        cloth's ``rest_pull`` term then pulls free verts toward this dynamic
+        skinned target, so the cloth follows leg/arm swing while still
+        allowing dynamic drape. Requires the cloth mesh to carry a skin
+        (``SkinRefComponent`` + ``mesh.joints_0`` / ``weights_0``); silently
+        no-ops on unskinned cloth.
         """
         self._require_cloth("add_cloth")
         if not isinstance(node, Node):
             raise TypeError(f"add_cloth expected a Node, got {type(node).__name__}")
+        if track_bone is not None and not isinstance(track_bone, Node):
+            raise TypeError(
+                f"add_cloth track_bone expected a Node, got {type(track_bone).__name__}",
+            )
         piece = self._cloth.add_cloth_for_node(
             node,
             mesh_index=mesh_index,
@@ -276,7 +296,62 @@ class PhysicsLite:
             iterations=iterations,
             rest_pull=rest_pull,
         )
+        if piece is not None and track_bone is not None:
+            self._cloth.register_anchor_follower(piece, track_bone)
+        if piece is not None and skin_target:
+            self._cloth.register_skin_target_follower(piece, node)
         return ClothPieceHandle(piece) if piece is not None else None
+
+    def add_collision_deform(
+        self,
+        node: object,
+        *,
+        mesh_index: int | None = None,
+    ) -> ClothPieceHandle | None:
+        """Mark a skinned mesh for **post-skin collision push-out** every frame.
+
+        Drives the mesh from its bone skinning each tick (rigidly — no
+        cloth dynamics, no springs, no gravity) and then projects every
+        vertex out of any registered colliders. Use this to stop dress,
+        sleeve, or hair-fringe vertices from clipping into the torso /
+        limbs during animation without re-rigging the asset — register
+        the offending mesh here, add body-following capsule / sphere
+        colliders via :meth:`add_capsule_collider` / :meth:`add_sphere_collider`,
+        and the runtime pushes any vertex inside a collider back to its
+        surface every frame.
+
+        Internally this is implemented as a :class:`~posecascade.animation.cloth.ClothPiece`
+        flagged ``passive_skin_deform=True`` — the solver skips Verlet
+        integration and PBD constraints, so the per-frame cost on a
+        30k-vert body mesh is ~1 ms versus ~6 ms for full cloth.
+
+        Requires the mesh to carry a skin (``SkinRefComponent`` plus
+        ``mesh.joints_0`` / ``weights_0``); silently no-ops on unskinned
+        meshes.
+        """
+        self._require_cloth("add_collision_deform")
+        if not isinstance(node, Node):
+            raise TypeError(
+                f"add_collision_deform expected a Node, got {type(node).__name__}",
+            )
+        piece = self._cloth.add_cloth_for_node(
+            node,
+            mesh_index=mesh_index,
+            cloth_name=f"collision_deform_{node.name}",
+            anchor_axis=1,
+            anchor_fraction=0.0,
+            anchor_mode="top_axis",
+            structural_stiffness=0.0,
+            bend_stiffness=0.0,
+            linear_damping=1.0,
+            iterations=1,
+            rest_pull=0.0,
+        )
+        if piece is None:
+            return None
+        piece.params.passive_skin_deform = True
+        self._cloth.register_skin_target_follower(piece, node)
+        return ClothPieceHandle(piece)
 
     def add_sphere_collider(self, center: object, radius: float) -> SphereCollider:
         """Add a sphere collider that pushes cloth verts outside it (e.g. body proxy)."""

@@ -168,6 +168,16 @@ class ClothParams:
     iterations: int = _DEFAULT_ITERATIONS
     substeps: int = _DEFAULT_SUBSTEPS
     rest_pull: float = 4.0
+    # Passive skin-deform mode: when True, the solver short-circuits past
+    # Verlet integration, distance / bend constraints, and external forces
+    # — it ONLY snaps every vertex to its current ``rest_positions``
+    # (typically refreshed each tick by a ``_SkinTargetFollower`` so it
+    # equals the rigid LBS-skinned pose) and then projects against the
+    # registered colliders. Use this to drive a "skinned mesh that gets
+    # pushed out of body capsules" pass without paying for spring
+    # dynamics — e.g. to stop dress / hair / sleeve verts from clipping
+    # into the torso during animation without re-rigging the asset.
+    passive_skin_deform: bool = False
 
 
 @dataclass
@@ -523,6 +533,16 @@ def _integrate_piece(
     colliders: Sequence[object],
 ) -> None:
     """One Verlet step + N constraint iterations + collider projection."""
+    if piece.params.passive_skin_deform:
+        # Skin-only mode: snap positions to ``rest_positions`` (which a
+        # SkinTargetFollower has just refreshed to the LBS-skinned pose).
+        # Collider projection is NOT run here — the cloth host does it
+        # in a second pass that respects per-collider bone filters
+        # (so a hand-collider following Left wrist doesn't try to push
+        # the hand's own skin verts out of itself).
+        np.copyto(piece.prev_positions, piece.positions)
+        np.copyto(piece.positions, piece.rest_positions)
+        return
     inv_mass = piece.inverse_masses[:, None]
     external_accel = _accumulate_force(piece, forces, time) * inv_mass
     # Soft rest-pull keeps the cloth's drape "memory": a free vertex experiences

@@ -30,6 +30,7 @@ import ast
 import math
 import operator as _op
 from collections.abc import Callable
+from functools import lru_cache
 from typing import Any
 
 from posecascade.errors import PoseCascadeError
@@ -105,22 +106,35 @@ _BUILTIN_CONSTANTS: dict[str, float] = {
 def evaluate_expression(source: str, scope: dict[str, float]) -> float:
     """Compile + evaluate ``source`` once against ``scope``.
 
-    Caller is expected to have parsed ``source`` once at load time and
-    cached the result, but for simplicity this function re-parses each
-    call — animation expressions are short and per-frame parsing is
-    cheap. ``scope`` provides per-frame variables (e.g. ``elapsed``,
-    ``phase_t``); the math constants in :data:`_BUILTIN_CONSTANTS` are
-    layered underneath so authors can reference ``tau`` etc. without
-    redefining them.
+    The AST parse is memoised in :func:`_parse_cached` so re-evaluating
+    the same expression every frame (the typical pattern when the same
+    curve drives the animation across hundreds of frames) only pays the
+    ``ast.parse`` cost once. ``scope`` provides per-frame variables
+    (e.g. ``elapsed``, ``phase_t``); the math constants in
+    :data:`_BUILTIN_CONSTANTS` are layered underneath so authors can
+    reference ``tau`` etc. without redefining them.
     """
     if not isinstance(source, str):
         raise ExpressionError(f"expression must be str, got {type(source).__name__}")
-    try:
-        tree = ast.parse(source, mode="eval")
-    except SyntaxError as err:
-        raise ExpressionError(f"syntax error in {source!r}: {err.msg}") from err
+    tree = _parse_cached(source)
     merged: dict[str, float] = {**_BUILTIN_CONSTANTS, **scope}
     return float(_evaluate_node(tree.body, merged, source))
+
+
+@lru_cache(maxsize=512)
+def _parse_cached(source: str) -> ast.Expression:
+    """Parse ``source`` into an AST once and cache the result.
+
+    Animation JSON typically reuses each expression string across every
+    frame of its phase — the same ``"0.5 * sin(elapsed * tau)"`` runs
+    60+ times per second. ``ast.parse`` is ~50 µs per call on short
+    sources; caching the result drops the per-frame expression cost to
+    a dict lookup plus the tree walk.
+    """
+    try:
+        return ast.parse(source, mode="eval")
+    except SyntaxError as err:
+        raise ExpressionError(f"syntax error in {source!r}: {err.msg}") from err
 
 
 def _evaluate_node(node: ast.AST, scope: dict[str, float], source: str) -> float:
@@ -163,7 +177,7 @@ def _evaluate_node(node: ast.AST, scope: dict[str, float], source: str) -> float
 
 def _evaluate_call(node: ast.Call, scope: dict[str, float], source: str) -> float:
     if not isinstance(node.func, ast.Name):
-        raise ExpressionError(f"only direct function calls allowed in {source!r}")
+        raise ExpressionError(f"indirect function call not allowed in {source!r}")
     name = node.func.id
     if name not in _FUNCTIONS:
         raise ExpressionError(

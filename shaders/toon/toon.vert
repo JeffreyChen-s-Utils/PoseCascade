@@ -23,11 +23,14 @@ uniform mat3 u_normalMatrix;
 out vec3 v_normal_world;
 out vec3 v_normal_view;
 out vec2 v_uv;
+out vec3 v_world_pos;
 
 void main() {
     vec3 n_world = normalize(u_normalMatrix * a_normal);
     v_normal_world = n_world;
     v_normal_view = normalize(mat3(u_viewMatrix) * n_world);
     v_uv = a_texcoord_0;
-    gl_Position = u_projMatrix * u_viewMatrix * u_modelMatrix * vec4(a_position, 1.0);
+    vec4 world = u_modelMatrix * vec4(a_position, 1.0);
+    v_world_pos = world.xyz;
+    gl_Position = u_projMatrix * u_viewMatrix * world;
 }

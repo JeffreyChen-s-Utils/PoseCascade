@@ -47,11 +47,13 @@ import json
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from posecascade.errors import PoseCascadeError, ScriptSecurityError
+from posecascade.assets.path_safety import resolve_safe
+from posecascade.errors import PoseCascadeError, ScriptSecurityError, UnsafePathError
 from posecascade.scripting.expressions import (
     ExpressionError,
     evaluate_expression,
@@ -91,6 +93,11 @@ _YAW_NEGLIGIBLE = 1e-4
 # preset's weight curve is ramping through zero. 1e-3 ≈ 0.06° error,
 # below visible threshold.
 _IDENTITY_QUAT_TOL = 1e-3
+# Shared (x, y, z, w) identity quaternion — handed back from the
+# per-frame parent-world cache for orphan / root nodes, and a starting
+# point for chain composition. Never mutated. The component order
+# matches :func:`posecascade.utils.math3d.quat_mul`.
+_IDENTITY_QUAT: np.ndarray = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
 
 
 def _is_identity_quat(q: np.ndarray, tol: float = _IDENTITY_QUAT_TOL) -> bool:
@@ -106,10 +113,16 @@ def _is_identity_quat(q: np.ndarray, tol: float = _IDENTITY_QUAT_TOL) -> bool:
         and abs(float(q[2])) < tol
         and abs(abs(float(q[3])) - 1.0) < tol
     )
-# Default Z-tuck that pulls arms from T-pose down to a vertical hang.
-# Slightly less than ±π/2 so arms angle a few degrees out from the torso
-# instead of clipping the rib cage. Matches walk.py's ARM_HANG.
-_DEFAULT_ARM_HANG_RAD = -1.45
+# Default Z-tuck applied to arms when the gait doesn't override it. The
+# old value of -1.45 rad (~83°) hung the arms vertically against the
+# torso — fine on a stick-figure rig, but on most stylised characters
+# the wide sleeve cuffs / dress flares at hip level got intersected by
+# the wrist. -0.50 rad (~29°) keeps the arms in a gentle A-pose with
+# the hands clearly OUTSIDE the body silhouette; matches the
+# ``rest_arms`` pose magnitude in :mod:`posecascade.scripting.pose_library`
+# so swapping between gait-driven and pose-driven arm states reads
+# continuously.
+_DEFAULT_ARM_HANG_RAD = -0.50
 # Frames over which a released lock target decays its IK pull. ~6
 # frames at 60 FPS = 0.1 s — long enough that the trailing foot
 # tracks the body softly across the step boundary, short enough
@@ -314,13 +327,25 @@ def _resolve_value_curve(
     ``pulse``, ``step``) are pure-math interpolators authored for sharp
     MMD-style accent hits — see each handler's docstring.
     """
-    eval_scope = dict(scope) if scope else {}
-    eval_scope.setdefault("phase_t", float(phase_t))
+    # ``_build_scope`` already seeds ``phase_t`` and the handlers
+    # treat scope as read-only, so we skip the defensive ``dict(scope)``
+    # copy every curve evaluation used to pay. The ``scope or {}`` keeps
+    # the API compatible with callers passing ``None`` (parse-time
+    # validation paths) without re-allocating an empty dict per call.
+    eval_scope = scope if scope is not None else _EMPTY_SCOPE
     if isinstance(spec, (int, float, str)):
         return _resolve_scalar(spec, eval_scope)
+    # Two-element ``[from, to]`` arrays are author-friendly shorthand for a
+    # linear curve — by far the most common parametric shape. The dict
+    # form ``{"kind": "linear", "from": A, "to": B}`` keeps working.
+    if isinstance(spec, list) and len(spec) == _SHORTHAND_LINEAR_LEN:
+        a = _resolve_scalar(spec[0], eval_scope)
+        b = _resolve_scalar(spec[1], eval_scope)
+        return a + (b - a) * float(phase_t)
     if not isinstance(spec, dict):
         raise DeclarativeAnimationError(
-            f"value curve must be scalar or dict, got {type(spec).__name__}",
+            f"value curve must be scalar, [from, to], or dict — "
+            f"got {type(spec).__name__}",
         )
     kind = spec.get("kind", "constant")
     handler = _CURVE_HANDLERS.get(kind)
@@ -330,6 +355,16 @@ def _resolve_value_curve(
             f"{sorted(_CURVE_HANDLERS)}",
         )
     return handler(spec, eval_scope, float(phase_t))
+
+
+_SHORTHAND_LINEAR_LEN = 2
+
+
+# Sentinel used as the read-only "no scope" value for parse-time
+# validation calls into :func:`_resolve_value_curve`. The handlers only
+# read from scope; sharing one frozen dict avoids the per-call ``{}``
+# allocation when no caller scope is provided.
+_EMPTY_SCOPE: dict[str, float] = {}
 
 
 # --- Schema parsing ---------------------------------------------------------
@@ -357,7 +392,7 @@ class Phase:
     duration_sec: float
     body_yaw_rad: Any  # scalar or curve spec
     body_lean_x_rad: Any
-    body_translation: dict[str, Any]
+    body_translation: Any  # dict[str, Any] | list[Any]; shorthand for [x, y, z]
     gait: dict[str, Any] | None
     morphs: dict[str, Any]  # name → value-curve spec
     # bone_key → {"x_rad"?: curve, "y_rad"?: curve, "z_rad"?: curve}.
@@ -528,6 +563,22 @@ class DeclarativeAnimation:
     # naturally keeps clear of the body / arms / hands as the dance
     # moves them. Empty tuple → no colliders.
     colliders: tuple[ColliderSpec, ...]
+    # Auto-emit a standard humanoid body collider set (hip sphere +
+    # thigh + shin capsules) from ``scene.bone_aliases`` at start when
+    # ``cloth_pieces`` is non-empty. Saves authors from re-specifying
+    # the same collider list on every per-character animation. Default
+    # ``True``; set ``"auto_body_colliders": false`` in the document to
+    # opt out (e.g. for non-humanoid rigs or when the explicit list is
+    # already comprehensive).
+    auto_body_colliders: bool = True
+    # Mesh nodes to register for post-skin collision push-out. Each
+    # listed mesh is driven by its bone skinning every tick and then
+    # projected against the registered body colliders — stops dress /
+    # sleeve / hair-fringe verts from clipping into the torso during
+    # animation without re-rigging the asset. Strings are scene node
+    # names; the mesh primitive index can be supplied as a (name,
+    # mesh_index) tuple if a node carries multiple primitives.
+    collision_deform_meshes: tuple[Any, ...] = ()
 
 
 @dataclass
@@ -772,14 +823,24 @@ def _parse_pose(raw: Any) -> tuple[str | None, Any]:
 
 
 _BONE_AXES = ("x_rad", "y_rad", "z_rad")
+# Author-friendly aliases — ``"x"`` reads as ``"x_rad"``, etc. The
+# verbose form is kept canonical for backwards compatibility with
+# every existing JSON; the short form simply rewrites in
+# :func:`_parse_bones` before the canonical axes check fires.
+_BONE_AXIS_ALIASES = {"x": "x_rad", "y": "y_rad", "z": "z_rad"}
 
 
 def _parse_bones(raw: Any) -> dict[str, dict[str, Any]]:
     """Validate the per-phase ``bones`` block.
 
     Each entry is ``{bone_name: {x_rad?: curve, y_rad?: curve, z_rad?: curve}}``.
-    Unknown axes are rejected loudly so a typo (``x_red``) surfaces at parse
-    time instead of silently producing a still pose at runtime.
+    Short-form axis names (``"x"`` / ``"y"`` / ``"z"``) are accepted as
+    aliases for ``"x_rad"`` / ``"y_rad"`` / ``"z_rad"``; mixing the two
+    forms on the same bone (``{"x": ..., "x_rad": ...}``) raises so an
+    author who refactors halfway gets a clear error instead of silently
+    losing one of the writes. Unknown axes are rejected loudly so a typo
+    (``x_red``) surfaces at parse time instead of silently producing a
+    still pose at runtime.
     """
     if not isinstance(raw, dict):
         raise DeclarativeAnimationError("phase 'bones' must be an object")
@@ -789,18 +850,160 @@ def _parse_bones(raw: Any) -> dict[str, dict[str, Any]]:
             raise DeclarativeAnimationError(
                 f"bones[{bone_name!r}] must be an object of axis curves",
             )
-        unknown = set(axes) - set(_BONE_AXES)
-        if unknown:
-            raise DeclarativeAnimationError(
-                f"bones[{bone_name!r}] has unknown axes {sorted(unknown)}; "
-                f"expected any of {list(_BONE_AXES)}",
-            )
-        out[str(bone_name)] = dict(axes)
+        normalised: dict[str, Any] = {}
+        for axis_key, curve in axes.items():
+            canonical = _BONE_AXIS_ALIASES.get(axis_key, axis_key)
+            if canonical not in _BONE_AXES:
+                raise DeclarativeAnimationError(
+                    f"bones[{bone_name!r}] has unknown axis {axis_key!r}; "
+                    f"expected any of {list(_BONE_AXES)} "
+                    f"or short aliases {sorted(_BONE_AXIS_ALIASES)}",
+                )
+            if canonical in normalised:
+                raise DeclarativeAnimationError(
+                    f"bones[{bone_name!r}] writes axis {canonical!r} twice — "
+                    f"don't mix short ({axis_key!r}) and long forms",
+                )
+            normalised[canonical] = curve
+        out[str(bone_name)] = normalised
     return out
 
 
+def resolve_extends(
+    document: dict[str, Any],
+    source_dir: Path | None,
+    _seen: tuple[Path, ...] = (),
+) -> dict[str, Any]:
+    """Deep-merge any ``extends`` chain into ``document``, returning the result.
+
+    The ``extends`` field is the file-system path (relative to
+    ``source_dir``) of another animation JSON to inherit from. Common
+    rig / physics_chains / colliders / ground / wind / pose_library /
+    hand_library / cloth boilerplate can live in a shared "profile"
+    JSON; the child's keys override the parent on a per-key basis. The
+    merge is:
+
+    * Dicts: recursive shallow merge (child wins per-key).
+    * Lists / scalars: child replaces parent wholesale.
+    * ``phases``: never merged from parent — phases are always
+      authored in the child file.
+
+    Merge is **shallow at the top level**: each child key replaces the
+    parent's value entirely. This avoids Frankenstein dicts (mixing
+    ``ground: {kind: flat}`` with ``ground: {kind: stairs}`` would
+    otherwise leak ``y`` from the flat default into the stair spec).
+    To tune only part of a section (e.g. one physics chain's stiffness)
+    the author copies the whole section in their child — the
+    boilerplate that motivated ``extends`` is rarely that fine-grained,
+    and the simpler rule pays back in fewer surprises.
+
+    Two top-level keys do recurse one level: ``pose_library`` and
+    ``hand_library`` merge per-preset, so a child can add or override
+    individual poses without redeclaring the whole library.
+
+    Cycles are rejected. Each ``extends`` reference goes through
+    :func:`resolve_safe` so a profile file cannot point outside its
+    source directory. Maximum chain depth is bounded by ``_MAX_EXTENDS``
+    so a maliciously deep chain cannot tie up the parser.
+    """
+    extends_ref = document.get("extends")
+    if extends_ref is None:
+        return document
+    if not isinstance(extends_ref, str):
+        raise DeclarativeAnimationError(
+            f"'extends' must be a string path, got {type(extends_ref).__name__}",
+        )
+    if source_dir is None:
+        raise DeclarativeAnimationError(
+            "'extends' requires a source directory — declarative loader "
+            "must be invoked through load_animation() with a filename",
+        )
+    if len(_seen) >= _MAX_EXTENDS:
+        raise DeclarativeAnimationError(
+            f"'extends' chain exceeds maximum depth of {_MAX_EXTENDS}",
+        )
+    try:
+        parent_path = resolve_safe(source_dir, extends_ref)
+    except UnsafePathError as err:
+        raise DeclarativeAnimationError(
+            f"'extends' path {extends_ref!r} rejected: {err}",
+        ) from err
+    if parent_path in _seen:
+        cycle = " → ".join(str(p) for p in (*_seen, parent_path))
+        raise DeclarativeAnimationError(f"'extends' cycle detected: {cycle}")
+    try:
+        parent_source = parent_path.read_text(encoding="utf-8")
+    except OSError as err:
+        raise DeclarativeAnimationError(
+            f"failed to read extended profile {extends_ref!r}: {err}",
+        ) from err
+    try:
+        parent_doc = json.loads(parent_source)
+    except json.JSONDecodeError as err:
+        raise DeclarativeAnimationError(
+            f"failed to parse extended profile {extends_ref!r}: "
+            f"{err.msg} at line {err.lineno}",
+        ) from err
+    parent_resolved = resolve_extends(
+        parent_doc, parent_path.parent, (*_seen, parent_path),
+    )
+    # Strip the ``extends`` field from the child copy; it has been
+    # consumed and propagating it would re-trigger inheritance on a
+    # later call. ``parent_resolved`` carried no ``extends`` (already
+    # resolved recursively) so the merge result is also clean.
+    child = {k: v for k, v in document.items() if k != "extends"}
+    return _merge_extends(parent_resolved, child)
+
+
+def _merge_extends(parent: dict[str, Any], child: dict[str, Any]) -> dict[str, Any]:
+    """Shallow top-level merge with pose/hand-library recursion.
+
+    Child keys replace parent keys outright at the top level. The two
+    exceptions are :data:`_EXTENDS_DEEP_MERGE_KEYS` (``pose_library``
+    and ``hand_library``) where per-preset merging is the natural
+    pattern — a child can add a new pose without redeclaring every
+    inherited one. Phases are NEVER inherited: even if the parent
+    declares a ``phases`` list, the child's value wins outright, and
+    a child without ``phases`` does not pull the parent's in
+    (validated downstream in :func:`parse_animation`).
+    """
+    # Exclude ``phases`` from the parent unconditionally — a profile
+    # that happens to include phases (typically a complete animation
+    # the child is just extending for tuning) should not have those
+    # phases bleed through when the child redefines its own timeline.
+    out: dict[str, Any] = {k: v for k, v in parent.items() if k != "phases"}
+    for key, value in child.items():
+        existing = out.get(key)
+        if (
+            key in _EXTENDS_DEEP_MERGE_KEYS
+            and isinstance(existing, dict)
+            and isinstance(value, dict)
+        ):
+            merged: dict[str, Any] = dict(existing)
+            merged.update(value)
+            out[key] = merged
+        else:
+            out[key] = value
+    return out
+
+
+_EXTENDS_DEEP_MERGE_KEYS = frozenset({"pose_library", "hand_library"})
+
+
+# Hard cap on inheritance depth. A chain of more than 4 profiles is
+# almost certainly an authoring mistake (e.g. circular reference that
+# only diverges late) and should be rejected fast.
+_MAX_EXTENDS = 4
+
+
 def parse_animation(document: dict[str, Any]) -> DeclarativeAnimation:
-    """Validate and parse a declarative-animation document."""
+    """Validate and parse a declarative-animation document.
+
+    Call :func:`resolve_extends` first if the document might use the
+    ``extends`` inheritance mechanism; ``parse_animation`` itself does
+    not touch the filesystem, so passing a raw extends-bearing dict here
+    silently ignores the inheritance.
+    """
     if not isinstance(document, dict):
         raise DeclarativeAnimationError("document root must be an object")
     version = document.get("schema_version", _DECLARATIVE_SCHEMA_VERSION)
@@ -819,7 +1022,9 @@ def parse_animation(document: dict[str, Any]) -> DeclarativeAnimation:
         )
     phases = tuple(_parse_phase(p, bpm) for p in phases_raw)
     if not phases:
-        raise DeclarativeAnimationError("animation must have at least one phase")
+        raise DeclarativeAnimationError(
+            "animation must declare at least one 'phases' entry",
+        )
     return DeclarativeAnimation(
         name=str(document.get("name", "unnamed")),
         loop_sec=float(document.get("loop_sec", sum(p.duration_sec for p in phases))),
@@ -837,7 +1042,39 @@ def parse_animation(document: dict[str, Any]) -> DeclarativeAnimation:
         hide_nodes=_parse_hide(document.get("hide")),
         cloth_pieces=_parse_cloth(document.get("cloth")),
         colliders=_parse_colliders(document.get("colliders")),
+        auto_body_colliders=bool(document.get("auto_body_colliders", True)),
+        collision_deform_meshes=_parse_collision_deform_meshes(
+            document.get("collision_deform_meshes"),
+        ),
     )
+
+
+def _parse_collision_deform_meshes(raw: Any) -> tuple[Any, ...]:
+    """Validate the document-level ``collision_deform_meshes`` list.
+
+    Accepts a list of either plain node-name strings or ``(name, mesh_index)``
+    tuples for nodes with multiple mesh primitives. Returns the canonicalised
+    tuple form; entries that don't match either shape raise.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise DeclarativeAnimationError(
+            f"collision_deform_meshes must be a list, got {type(raw).__name__}",
+        )
+    parsed: list[Any] = []
+    for entry in raw:
+        if isinstance(entry, str):
+            parsed.append(entry)
+        elif isinstance(entry, (list, tuple)) and len(entry) == 2:    # noqa: PLR2004
+            name, mesh_index = entry
+            parsed.append((str(name), int(mesh_index)))
+        else:
+            raise DeclarativeAnimationError(
+                f"collision_deform_meshes entry must be a string or "
+                f"[name, mesh_index] pair, got {entry!r}",
+            )
+    return tuple(parsed)
 
 
 def _parse_physics_chains(raw: Any) -> dict[str, dict[str, float]]:
@@ -1223,11 +1460,6 @@ class DeclarativeRuntime:
     # Bone-tracking colliders: list of (collider_obj, kind, head_node, tail_node).
     # ``tail_node`` is None for spheres, a Node for capsules.
     _bone_colliders: list[tuple[Any, str, Any, Any]] = field(default_factory=list)
-    # Cloth pieces whose anchor verts follow a bone each frame.
-    # Tuple is (piece, bone_node, anchor_indices, offsets_in_bone_local).
-    _cloth_anchor_followers: list[tuple[Any, Any, np.ndarray, np.ndarray]] = field(
-        default_factory=list,
-    )
     _root_drive: _BoneDrive | None = None
     _bone_drives: dict[str, _BoneDrive] = field(default_factory=dict)
     _phase_starts: list[float] = field(default_factory=list)
@@ -1242,6 +1474,15 @@ class DeclarativeRuntime:
     # translated body.
     _foot_release: dict[str, tuple[np.ndarray, int]] = field(default_factory=dict)
     _leg_chain_nodes: dict[str, tuple[Any, Any, Any]] = field(default_factory=dict)
+    # Per-frame parent-world rotation cache. Both ``_set_bone`` and
+    # ``_world_delta_to_local`` walk the bone's parent chain to compose
+    # parent-world rotation. Adjacent bones (left arm, right arm, fingers)
+    # share most of that chain — caching per-node within a single
+    # ``_update`` collapses ~8 ancestor walks per bone × dozens of
+    # written bones into a handful of unique chains. Cleared at the top
+    # of each ``_update`` so a parent rotation changed earlier in the
+    # frame doesn't leak into a later bone's reading.
+    _frame_parent_world: dict[int, np.ndarray] = field(default_factory=dict)
 
     # ----- Hook surface (matches ScriptHost expectations) -------------------
     def hooks(self) -> dict[str, Callable[..., Any]]:
@@ -1363,6 +1604,7 @@ class DeclarativeRuntime:
             drive.node.transform.set_rotation(
                 blended.astype(np.float32, copy=False),
             )
+            self._invalidate_parent_world_for(drive.node)
 
     def _world_delta_to_local(
         self, node: Any, delta_world: np.ndarray,
@@ -1373,16 +1615,45 @@ class DeclarativeRuntime:
         ``_apply_pose_blends`` can compose its target the same way
         without duplicating the parent-chain walk.
         """
-        parent_world = quat_axis_angle(vec3(1.0, 0.0, 0.0), 0.0)
-        chain: list[np.ndarray] = []
-        cur = node.parent
-        while cur is not None:
-            chain.append(cur.transform.rotation)
-            cur = cur.parent
-        for r in reversed(chain):
-            parent_world = quat_mul(parent_world, r)
+        parent_world = self._parent_world_rotation(node)
         parent_world_inv = quat_inverse(parent_world)
         return quat_mul(quat_mul(parent_world_inv, delta_world), parent_world)
+
+    def _parent_world_rotation(self, node: Any) -> np.ndarray:
+        """Compose ``node``'s parent-chain world rotation, memoised per frame.
+
+        Recursive with a per-frame cache keyed on ``id(parent)``:
+        once a chain is walked, every descendant whose path passes
+        through the same ancestor reuses the cached partial. A 30-bone
+        write pass over the Herta rig (each bone 5–7 levels deep)
+        used to do ~200 ``quat_mul`` calls; the cache collapses that
+        to ~30 (one per unique parent node visited that frame).
+        """
+        parent = node.parent
+        if parent is None:
+            return _IDENTITY_QUAT
+        cached = self._frame_parent_world.get(id(parent))
+        if cached is not None:
+            return cached
+        grandparent_world = self._parent_world_rotation(parent)
+        result = quat_mul(grandparent_world, parent.transform.rotation)
+        self._frame_parent_world[id(parent)] = result
+        return result
+
+    def _invalidate_parent_world_for(self, node: Any) -> None:
+        """Drop the per-frame cache if ``node`` is currently cached as an ancestor.
+
+        Cache entries are keyed on a node's ``id`` and hold THAT node's
+        world rotation. Writing to a bone that has been cached as an
+        ancestor by an earlier walk (rare in practice — typical
+        animation writes are to leaves like hands / feet / head, which
+        are never cached as parents) would leave a stale composition
+        for any subsequent walk that passes through it. Clearing the
+        whole map is cheaper than tracking descendants, and the common
+        leaf-write path skips this branch entirely.
+        """
+        if id(node) in self._frame_parent_world:
+            self._frame_parent_world.clear()
 
     def _detach_hidden_nodes(self) -> None:
         """Remove every named node in ``animation.hide_nodes`` from its parent.
@@ -1390,7 +1661,7 @@ class DeclarativeRuntime:
         Names go through ``scene.find`` (whatever the parser already
         uses elsewhere) so any descendant matching the name is detached.
         Names that don't resolve are logged and skipped — covers the
-        case where the same dance.json runs against two scenes that
+        case where the same animation runs against two scenes that
         share most prop names but not all.
         """
         for name in self.animation.hide_nodes:
@@ -1427,7 +1698,16 @@ class DeclarativeRuntime:
         """
         if self.cloth_host is None:
             return
-        if not self.animation.cloth_pieces and not self.animation.colliders:
+        wants_auto = (
+            (self.animation.cloth_pieces or self.animation.collision_deform_meshes)
+            and self.animation.auto_body_colliders
+        )
+        if (
+            not self.animation.cloth_pieces
+            and not self.animation.colliders
+            and not self.animation.collision_deform_meshes
+            and not wants_auto
+        ):
             return
         try:
             from posecascade.animation.cloth import (  # noqa: PLC0415
@@ -1437,6 +1717,7 @@ class DeclarativeRuntime:
         except ImportError as err:
             _log.warning("declarative: cloth module unavailable: %s", err)
             return
+        self._register_collision_deform_meshes()
         for piece in self.animation.cloth_pieces:
             node = self.scene.find(piece.mesh_node)
             if node is None:
@@ -1459,7 +1740,7 @@ class DeclarativeRuntime:
                 rest_pull=piece.rest_pull,
             )
             self._maybe_register_anchor_follower(piece, cloth_piece)
-        for spec in self.animation.colliders:
+        for spec in self._resolve_collider_specs():
             head_node = self.scene.find(spec.follow_bone)
             if head_node is None:
                 _log.warning(
@@ -1496,25 +1777,110 @@ class DeclarativeRuntime:
             self._bone_colliders.append(
                 (collider, spec.kind, head_node, tail_node),
             )
+            self._register_collider_bone_filter(collider, head_node, tail_node)
+
+    def _register_collider_bone_filter(
+        self, collider: object, head_node: Any, tail_node: Any | None,
+    ) -> None:
+        """Tell the host which skin joints this collider should NOT push.
+
+        Registers ``head_node`` (and ``tail_node`` if distinct) plus every
+        descendant — the passive-skin-deform filter then leaves verts
+        weighted to those bones alone so a hand sphere doesn't inflate
+        the hand mesh, and a thigh capsule doesn't push the thigh skin
+        out of itself. Silent no-op if the host doesn't support the
+        filter API (e.g. a stub host in tests).
+        """
+        if not hasattr(self.cloth_host, "register_collider_bone_filter"):
+            return
+        self.cloth_host.register_collider_bone_filter(collider, head_node)
+        if tail_node is not None and tail_node is not head_node:
+            self.cloth_host.register_collider_bone_filter(collider, tail_node)
+
+    def _register_collision_deform_meshes(self) -> None:
+        """Register every ``collision_deform_meshes`` entry with the cloth host.
+
+        Each mesh becomes a ``passive_skin_deform`` cloth piece: the
+        cloth host drives it from the scene's bone skinning every tick
+        (no dynamics) and projects it against the registered colliders.
+        Missing nodes or unskinned meshes are logged + skipped — never
+        a hard failure, because a swap to a different rig may simply
+        omit the named mesh.
+        """
+        if not self.animation.collision_deform_meshes:
+            return
+        for entry in self.animation.collision_deform_meshes:
+            if isinstance(entry, tuple):
+                node_name, mesh_index = entry
+            else:
+                node_name, mesh_index = entry, None
+            node = self.scene.find(node_name)
+            if node is None:
+                _log.warning(
+                    "declarative: collision_deform mesh node %r not in scene; skipping",
+                    node_name,
+                )
+                continue
+            piece = self.cloth_host.add_cloth_for_node(
+                node,
+                mesh_index=mesh_index,
+                cloth_name=f"collision_deform_{node_name}",
+                anchor_axis=1,
+                anchor_fraction=0.0,
+                anchor_mode="top_axis",
+                structural_stiffness=0.0,
+                bend_stiffness=0.0,
+                linear_damping=1.0,
+                iterations=1,
+                rest_pull=0.0,
+            )
+            if piece is None:
+                continue
+            piece.params.passive_skin_deform = True
+            self.cloth_host.register_skin_target_follower(piece, node)
+
+    def _resolve_collider_specs(self) -> list[ColliderSpec]:
+        """Return the final collider list = explicit JSON + auto-emit body set.
+
+        Explicit specs from ``animation.colliders`` always win on the
+        ``(follow_bone, end_bone, kind)`` key, so a document that wants
+        a custom hip-sphere radius gets exactly that without the engine
+        appending its default one too. Auto-emit only fires when cloth
+        pieces are registered AND the document didn't opt out via
+        ``auto_body_colliders: false`` — keeps non-humanoid rigs out of
+        the humanoid leg-collider machinery.
+        """
+        explicit = list(self.animation.colliders)
+        if not (
+            self.animation.cloth_pieces and self.animation.auto_body_colliders
+        ):
+            return explicit
+        from posecascade.animation.auto_colliders import (  # noqa: PLC0415
+            emit_humanoid_body_colliders,
+        )
+        aliases = getattr(self.scene, "bone_aliases", {}) or {}
+        existing = {(s.follow_bone, s.end_bone, s.kind) for s in explicit}
+        merged = list(explicit)
+        for auto in emit_humanoid_body_colliders(
+            aliases, spec_factory=ColliderSpec,
+        ):
+            key = (auto.follow_bone, auto.end_bone, auto.kind)
+            if key not in existing:
+                merged.append(auto)
+                existing.add(key)
+        return merged
 
     def _maybe_register_anchor_follower(
         self, spec: ClothPieceSpec, cloth_piece: Any,
     ) -> None:
-        """Capture every cloth vertex's offset in the track-bone's local frame.
+        """Register the cloth piece's anchor verts to follow ``spec.track_bone``.
 
-        Two index sets land in the follower record:
-
-        - ``anchor_indices`` + ``anchor_offsets``: pinned verts that get their
-          ``positions`` and ``prev_positions`` snapped to the bone's current
-          world position each frame (the waistband stays glued to the hip).
-        - ``all_offsets``: every vert (anchor or free). The whole cloth's
-          ``rest_positions`` is rebuilt from these each frame so the
-          ``rest_pull`` force in the integrator pulls free verts toward where
-          the body is NOW — without this, the body rotating yaw lifts the
-          anchored top of the skirt but leaves the free bottom's rest target
-          at the init-world location, and the structural edges pull the
-          bottom band upward toward the rotated top, shoving the skirt above
-          the shirt's hem.
+        Forwarded to :meth:`ClothHost.register_anchor_follower` — the host
+        snaps each tracked piece's anchor ``positions`` / ``prev_positions``
+        / ``rest_positions`` to the bone's current world frame at the
+        start of every :meth:`ClothHost.tick`, so the waistband stays
+        glued to a moving hip / shoulder bone instead of floating in
+        space when the body translates.
 
         Skips silently when the spec has no track bone, the bone isn't in
         the scene, or the cloth host returned no piece (the latter happens
@@ -1529,55 +1895,7 @@ class DeclarativeRuntime:
                 spec.track_bone,
             )
             return
-        anchor_indices = np.flatnonzero(
-            np.asarray(cloth_piece.inverse_masses, dtype=np.float32) == 0.0,
-        )
-        if anchor_indices.size == 0:
-            return
-        bone_world_start = _world_matrix(bone_node)
-        bone_world_inv = np.linalg.inv(bone_world_start).astype(np.float32, copy=False)
-        all_world = np.asarray(cloth_piece.positions, dtype=np.float32)
-        homog = np.column_stack(
-            [all_world, np.ones((all_world.shape[0], 1), dtype=np.float32)],
-        )
-        all_offsets_local = (homog @ bone_world_inv.T)[:, :3].astype(np.float32, copy=False)
-        anchor_offsets_local = all_offsets_local[anchor_indices]
-        self._cloth_anchor_followers.append(
-            (cloth_piece, bone_node, anchor_indices, anchor_offsets_local, all_offsets_local),
-        )
-
-    def _update_cloth_anchors(self) -> None:
-        """Snap each tracked piece's anchor verts (only) to the bone's frame.
-
-        Anchor verts have ``positions``, ``prev_positions``, and
-        ``rest_positions`` all teleported to the bone's current world
-        position. ``prev_positions`` matches ``positions`` so the Verlet
-        step doesn't see a teleport-induced velocity spike, and
-        ``rest_positions`` follows so the structural edges between an
-        anchor vert and its free neighbours rest at the rotated waistband
-        rather than the init-pose waistband.
-
-        Free verts are left to simulate. Their ``rest_positions`` stay at
-        the init-world coords on purpose — pulling them toward a bone-
-        tracked rest each frame turned the hip's natural oscillation into
-        a constant force on every vert, and the cloth visibly resonated
-        whenever the body or a collider moved. Gravity + structural
-        constraints + the anchored top band do enough work to keep the
-        skirt drape sensible without that extra coupling.
-        """
-        if not self._cloth_anchor_followers:
-            return
-        for piece, bone_node, anchor_indices, anchor_offsets, _all_offsets in (
-            self._cloth_anchor_followers
-        ):
-            bone_world = _world_matrix(bone_node)
-            homog_a = np.column_stack(
-                [anchor_offsets, np.ones((anchor_offsets.shape[0], 1), dtype=np.float32)],
-            )
-            new_anchor_world = (homog_a @ bone_world.T)[:, :3].astype(np.float32, copy=False)
-            piece.positions[anchor_indices] = new_anchor_world
-            piece.prev_positions[anchor_indices] = new_anchor_world
-            piece.rest_positions[anchor_indices] = new_anchor_world
+        self.cloth_host.register_anchor_follower(cloth_piece, bone_node)
 
     def _update_bone_colliders(self) -> None:
         """Refresh each bone-following collider's geometry from its bones.
@@ -1720,6 +2038,12 @@ class DeclarativeRuntime:
 
     # ----- update -----------------------------------------------------------
     def _update(self, _dt: float) -> None:
+        # Fresh per-frame parent-world cache. ``_parent_world_rotation``
+        # populates it lazily; clearing here guarantees the very first
+        # lookup of the frame walks the live transforms, and any
+        # bone write within the same frame falls through the per-write
+        # invalidation in ``_invalidate_parent_world_below``.
+        self._frame_parent_world.clear()
         elapsed = self.time() % self.animation.loop_sec
         phase_idx, phase_t, phase_elapsed = self._phase_index_at(elapsed)
         phase = self.animation.phases[phase_idx]
@@ -1802,8 +2126,6 @@ class DeclarativeRuntime:
             self._apply_lyrics(elapsed)
         if self._bone_colliders:
             self._update_bone_colliders()
-        if self._cloth_anchor_followers:
-            self._update_cloth_anchors()
 
     def _apply_camera(self, elapsed: float) -> None:
         """Lerp between bracketing camera keyframes and write to ``camera_api``.
@@ -2291,6 +2613,13 @@ class DeclarativeRuntime:
         flips the Z and X signs so the L/R arms mirror without needing
         per-side amplitudes. The composed body-frame delta is then
         yaw-conjugated to world before going through ``_set_bone``.
+
+        Some rigs (Sketchfab FBX rips, March 7th) ship with shoulder
+        rest rotations that ALREADY hang the arms at a natural A-pose.
+        On those rigs, set ``arm_hang_rad: 0.0`` in the gait — the rest
+        pose is the desired hang, no additional Z rotation needed. The
+        side-flipping convention here assumes T-pose; with both rests
+        identical, ``side * arm_hang`` introduces visible asymmetry.
         """
         body_delta = quat_mul(
             quat_axis_angle(vec3(1.0, 0.0, 0.0), side * swing),
@@ -2313,14 +2642,7 @@ class DeclarativeRuntime:
         drive = self._bone_drives.get(bone_name)
         if drive is None:
             return
-        parent_world = quat_axis_angle(vec3(1.0, 0.0, 0.0), 0.0)
-        chain: list[np.ndarray] = []
-        cur = drive.node.parent
-        while cur is not None:
-            chain.append(cur.transform.rotation)
-            cur = cur.parent
-        for r in reversed(chain):
-            parent_world = quat_mul(parent_world, r)
+        parent_world = self._parent_world_rotation(drive.node)
         parent_world_inv = quat_inverse(parent_world)
         delta_local = quat_mul(
             quat_mul(parent_world_inv, delta_world),
@@ -2329,6 +2651,7 @@ class DeclarativeRuntime:
         drive.node.transform.set_rotation(
             quat_mul(delta_local, drive.rest_rotation).astype(np.float32, copy=False),
         )
+        self._invalidate_parent_world_for(drive.node)
 
     # ----- on_event ---------------------------------------------------------
     def _on_event(self, name: str, _payload: object) -> None:
@@ -2490,8 +2813,29 @@ def _world_position(node: Any) -> np.ndarray:
 
 
 def _resolve_translation(
-    spec: dict[str, Any], phase_t: float, scope: dict[str, float] | None = None,
+    spec: Any, phase_t: float, scope: dict[str, float] | None = None,
 ) -> tuple[float, float, float]:
+    # Shorthand: ``[x, y, z]`` array form. Each element is itself a
+    # value curve (number, expression string, [from,to], or dict), so
+    # authors who want a static origin can write ``[0, 0, 0]`` and
+    # those who want one axis moving can write
+    # ``[0, "0.005 * sin(...)", 0]``.
+    if isinstance(spec, list):
+        if len(spec) != _VEC3_LEN:
+            raise DeclarativeAnimationError(
+                f"body.translation array must have 3 entries (x, y, z), "
+                f"got {len(spec)}",
+            )
+        return (
+            _resolve_value_curve(spec[0], phase_t, scope),
+            _resolve_value_curve(spec[1], phase_t, scope),
+            _resolve_value_curve(spec[2], phase_t, scope),
+        )
+    if not isinstance(spec, dict):
+        raise DeclarativeAnimationError(
+            f"body.translation must be a dict or [x, y, z] array, "
+            f"got {type(spec).__name__}",
+        )
     if "stair" in spec:
         return _resolve_stair_translation(spec["stair"], phase_t)
     return (
@@ -2574,10 +2918,9 @@ def load_animation(
         raise DeclarativeAnimationError(
             f"failed to parse {filename}: {err.msg} at line {err.lineno}",
         ) from err
-    parsed = parse_animation(document)
-    from pathlib import Path  # noqa: PLC0415
-
     source_dir = Path(filename).resolve().parent if filename else None
+    document = resolve_extends(document, source_dir)
+    parsed = parse_animation(document)
     runtime = DeclarativeRuntime(
         animation=parsed,
         scene=api["scene"],
@@ -2602,4 +2945,5 @@ __all__ = [
     "RigBindings",
     "load_animation",
     "parse_animation",
+    "resolve_extends",
 ]

@@ -90,7 +90,7 @@ def test_parse_rejects_unsupported_schema_version() -> None:
 def test_parse_rejects_empty_phases() -> None:
     doc = _minimal_doc()
     doc["phases"] = []
-    with pytest.raises(DeclarativeAnimationError, match="at least one phase"):
+    with pytest.raises(DeclarativeAnimationError, match="at least one 'phases'"):
         parse_animation(doc)
 
 
@@ -1097,7 +1097,7 @@ def test_pose_phase_bones_override_preset_per_axis() -> None:
 
 def test_new_pose_presets_register_in_builtin_library() -> None:
     """The arm-clipping fix added three presets. Pin their names so a
-    rename doesn't silently break dance.json (which references them)."""
+    rename doesn't silently break example scripts that reference them."""
     from posecascade.scripting.pose_library import BUILTIN_POSES  # noqa: PLC0415
     for name in ("reach_R_soft", "reach_L_soft", "arms_open"):
         assert name in BUILTIN_POSES, f"missing built-in preset {name!r}"
@@ -1204,18 +1204,17 @@ def test_colliders_register_and_track_bones_per_frame() -> None:
     np.testing.assert_allclose(moved_center[0], 1.5, atol=1e-3)
 
 
-def test_cloth_rest_positions_only_anchor_band_follows_track_bone() -> None:
-    """Only the anchor verts' rest_positions follow the track_bone each frame.
+def test_cloth_rest_positions_track_bone_full_transform() -> None:
+    """ALL cloth verts follow the track_bone's full transform each tick.
 
-    Free verts' rest_positions stay at their init-world coords on purpose —
-    pulling them toward a bone-tracked rest each frame turned the hip's
-    natural oscillation into a constant force on every vert, and the cloth
-    visibly resonated whenever the body or a collider moved. Gravity +
-    structural constraints + the anchor band do enough work to keep the
-    drape sensible without that extra coupling.
-
-    The anchor band still tracks so the waistband rotates with the hip and
-    its structural neighbours rest at the rotated position.
+    Tracking only the anchors and letting free verts simulate around
+    their init-world rest position visually TORE the cloth in half when
+    the body yaw flipped between gait phases: anchors snapped 180 deg
+    while free verts stayed at the original orientation, and structural
+    edges spanned impossible distances. The fix tracks the bone's full
+    transform (rotation + translation) and applies it to every vert in
+    ``positions`` / ``prev_positions`` / ``rest_positions`` each tick,
+    so the whole cloth moves as one rigid frame between simulator steps.
     """
     from posecascade.animation.cloth_host import ClothHost  # noqa: PLC0415
     from posecascade.assets.types import ImportedScene, Mesh  # noqa: PLC0415
@@ -1270,21 +1269,19 @@ def test_cloth_rest_positions_only_anchor_band_follows_track_bone() -> None:
     assert anchor_idx.size > 0 and free_idx.size > 0
 
     bone.transform.set_rotation(quat_from_axis_angle(vec3(0.0, 1.0, 0.0), 0.5))
-    runtime._update_cloth_anchors()
+    # Anchor update now lives on the cloth host and runs at the start of each tick.
+    host.tick(1.0 / 60.0)
 
     # Anchor band rest moved.
     assert not np.allclose(
         rest_before[anchor_idx], piece.rest_positions[anchor_idx], atol=1e-4,
     ), "anchor-vert rest should track the bone"
-    # Free band rest stayed put.
-    np.testing.assert_allclose(
-        rest_before[free_idx], piece.rest_positions[free_idx], atol=1e-6,
-        err_msg=(
-            "free-vert rest should stay at init-world coords — letting it "
-            "track the bone makes every body oscillation push energy into "
-            "the cloth via rest_pull, causing visible flapping."
-        ),
-    )
+    # Free band rest ALSO moved — the bone's rotation propagates through
+    # the whole cloth so structural edges between anchors and free verts
+    # stay at their rest length when the body yaws.
+    assert not np.allclose(
+        rest_before[free_idx], piece.rest_positions[free_idx], atol=1e-4,
+    ), "free-vert rest should track the bone's full transform too"
 
 
 def test_collider_unknown_bone_logged_and_skipped() -> None:
@@ -1306,10 +1303,98 @@ def test_collider_unknown_bone_logged_and_skipped() -> None:
     assert cloth_host.colliders == []
 
 
+def test_auto_body_colliders_emitted_when_cloth_present() -> None:
+    """A document declaring cloth but no explicit colliders gets the
+    standard humanoid body set auto-attached from ``scene.bone_aliases``.
+    Engine-layer concern: per-character collider wiring shouldn't be
+    re-written on every script."""
+    scene = _build_minimal_scene()
+    # Wire bone aliases: canonical names happen to MATCH the bone-node
+    # names in this minimal scene, but the alias map is what the
+    # auto-emitter consumes, so set it explicitly.
+    for canonical in (
+        "hip",
+        "upper_leg_L", "lower_leg_L", "foot_L",
+        "upper_leg_R", "lower_leg_R", "foot_R",
+    ):
+        scene.bone_aliases[canonical] = scene.find(canonical)
+    cloth_host = _StubClothHost()
+    doc = _minimal_doc()
+    doc["cloth"] = [{"mesh_node": "chest"}]
+    # No "colliders" key — auto-emit is the only source.
+    parsed = parse_animation(doc)
+    assert parsed.auto_body_colliders is True
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+        cloth_host=cloth_host,
+    )
+    runtime.hooks()["start"]()
+    # 1 hip sphere + 2 thigh + 2 shin capsules = 5
+    assert len(cloth_host.colliders) == 5
+    kinds = sorted(type(c).__name__ for c in cloth_host.colliders)
+    assert kinds == [
+        "CapsuleCollider", "CapsuleCollider", "CapsuleCollider",
+        "CapsuleCollider", "SphereCollider",
+    ]
+
+
+def test_auto_body_colliders_disabled_by_flag() -> None:
+    """Setting ``"auto_body_colliders": false`` on the document opts out
+    even when cloth is declared. Lets non-humanoid rigs use cloth
+    without inheriting the humanoid leg colliders."""
+    scene = _build_minimal_scene()
+    for canonical in ("hip", "upper_leg_L", "lower_leg_L"):
+        scene.bone_aliases[canonical] = scene.find(canonical)
+    cloth_host = _StubClothHost()
+    doc = _minimal_doc()
+    doc["cloth"] = [{"mesh_node": "chest"}]
+    doc["auto_body_colliders"] = False
+    parsed = parse_animation(doc)
+    assert parsed.auto_body_colliders is False
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+        cloth_host=cloth_host,
+    )
+    runtime.hooks()["start"]()
+    assert cloth_host.colliders == []
+
+
+def test_auto_body_colliders_merge_with_explicit() -> None:
+    """Explicit colliders win on duplicate bone keys; auto-emit only
+    fills gaps the JSON didn't already cover."""
+    scene = _build_minimal_scene()
+    for canonical in (
+        "hip", "upper_leg_L", "lower_leg_L", "upper_leg_R", "lower_leg_R",
+    ):
+        scene.bone_aliases[canonical] = scene.find(canonical)
+    cloth_host = _StubClothHost()
+    doc = _minimal_doc()
+    doc["cloth"] = [{"mesh_node": "chest"}]
+    # Explicit hip sphere with a wider radius than the default 0.10.
+    doc["colliders"] = [
+        {"kind": "sphere", "follow_bone": "hip", "radius": 0.18},
+    ]
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+        cloth_host=cloth_host,
+    )
+    runtime.hooks()["start"]()
+    # Explicit hip (0.18) + 2 auto thigh capsules — auto hip is suppressed
+    # because the explicit one already covers (kind, follow_bone, end_bone).
+    spheres = [c for c in cloth_host.colliders if type(c).__name__ == "SphereCollider"]
+    assert len(spheres) == 1
+    assert spheres[0].radius == pytest.approx(0.18)
+    capsules = [
+        c for c in cloth_host.colliders if type(c).__name__ == "CapsuleCollider"
+    ]
+    assert len(capsules) == 2
+
+
 def test_hide_detaches_named_nodes_from_scene() -> None:
     """Document-root 'hide' detaches each named node from its parent at
-    start. Useful for character.glb files that bundle props (Stairs,
-    room, lights) the dance doesn't want."""
+    start. Useful for asset bundles that ship props (Stairs, room,
+    lights) the dance doesn't want."""
     scene = _build_minimal_scene()
     # Add a prop sibling to Sketchfab_model so we have something to hide.
     scene.root.add_child(_node("Stairs"))
@@ -1819,7 +1904,7 @@ def test_parse_bones_section_accepts_per_axis_curves() -> None:
 
     doc_bad = _minimal_doc()
     doc_bad["phases"][0]["bones"] = {"head": {"x_red": 0.5}}  # typo
-    with pytest.raises(DeclarativeAnimationError, match="unknown axes"):
+    with pytest.raises(DeclarativeAnimationError, match="unknown axis"):
         parse_animation(doc_bad)
 
 
@@ -1974,41 +2059,184 @@ def test_runtime_phase_without_bones_is_backward_compatible() -> None:
     hooks["update"](0.0)  # must not raise
 
 
-def test_dance_example_runs_full_loop_without_errors() -> None:
-    """The shipped MMD-style dance JSON parses, binds, and runs every
-    frame of its 16 s loop without raising. Guards the per-phase
-    expression DSL inside body translation / yaw / lean / morph fields
-    so a typo in the example would surface as a test failure rather
-    than silently breaking the demo."""
+def test_walk_example_runs_full_loop_without_errors() -> None:
+    """The shipped walk JSON parses, binds, and runs every frame of its
+    loop without raising. Guards the per-phase expression DSL inside
+    body translation / yaw / lean / gait fields so a typo in the
+    example would surface as a test failure rather than silently
+    breaking the demo."""
     from pathlib import Path  # noqa: PLC0415
 
-    from posecascade.scripting.morph_api import MorphApi  # noqa: PLC0415
     scene = _build_minimal_scene()
-    morph_api = MorphApi()
+    t_now = [0.0]
     api = {
         "scene": scene,
         "time": lambda: t_now[0],
-        "morphs": morph_api,
     }
-    source = (
-        Path(__file__).parent.parent / "examples" / "scripts" / "dance.json"
-    ).read_text(encoding="utf-8")
-    hooks = load_animation(source, "dance.json", api)
-    t_now = [0.0]
+    walk_path = (
+        Path(__file__).parent.parent / "examples" / "scripts" / "walk.json"
+    )
+    source = walk_path.read_text(encoding="utf-8")
+    # Pass the full path so ``extends`` resolves against the example's
+    # directory; the bare filename would search CWD and miss the
+    # ``_herta_profile.json`` sibling.
+    hooks = load_animation(source, str(walk_path), api)
     hooks["start"]()
     fps = 30
-    # Cover the full loop length so every phase + every cross-fade
-    # window gets a frame, and the final wrap back to phase 0 also
-    # ticks. Re-fetched from the parsed document so the test doesn't
-    # hard-code a length the example may grow past.
     import json as _json  # noqa: PLC0415
     total_seconds = float(_json.loads(source)["loop_sec"])
     for i in range(int(total_seconds * fps)):
         t_now[0] = i / fps
         hooks["update"](1.0 / fps)
-    weights = dict(morph_api.current_weights())
-    assert "smile" in weights
-    # Smile is always written by at least one phase — exact final
-    # value depends on how the dance choreography evolves, so assert
-    # it stays in [0, 1] not at a fixed endpoint.
-    assert 0.0 <= weights["smile"] <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# extends — JSON profile inheritance.
+# ---------------------------------------------------------------------------
+
+
+def test_extends_merges_profile_into_child(tmp_path) -> None:
+    """A child JSON's ``extends`` pulls the parent's top-level keys in.
+
+    Child overrides parent on a per-key basis at the top level; parent
+    values pass through untouched for any key the child omits.
+    """
+    from posecascade.scripting.declarative import resolve_extends  # noqa: PLC0415
+
+    profile = {
+        "schema_version": 1,
+        "rig": {"character_root": "Root"},
+        "physics_chains": {"hair_L": {"stiffness": 1.0}},
+        "wind": {"speed": 0.05},
+    }
+    (tmp_path / "profile.json").write_text(json.dumps(profile))
+    child = {
+        "schema_version": 1,
+        "extends": "profile.json",
+        "name": "child",
+        "wind": {"speed": 0.20},  # overrides parent's speed
+        "phases": [{"name": "p", "duration_sec": 1.0}],
+    }
+    merged = resolve_extends(child, tmp_path)
+    # Inherited verbatim:
+    assert merged["rig"]["character_root"] == "Root"
+    assert merged["physics_chains"]["hair_L"]["stiffness"] == 1.0
+    # Overridden:
+    assert merged["wind"]["speed"] == 0.20
+    # ``extends`` field is consumed.
+    assert "extends" not in merged
+
+
+def test_extends_rejects_traversal_outside_source_dir(tmp_path) -> None:
+    """``extends`` paths that try to escape via ``..`` raise loudly."""
+    from posecascade.scripting.declarative import resolve_extends  # noqa: PLC0415
+
+    child = {"schema_version": 1, "extends": "../escape.json"}
+    with pytest.raises(DeclarativeAnimationError, match="rejected"):
+        resolve_extends(child, tmp_path)
+
+
+def test_extends_rejects_cycle(tmp_path) -> None:
+    """A → B → A cycle raises rather than looping forever."""
+    from posecascade.scripting.declarative import resolve_extends  # noqa: PLC0415
+
+    (tmp_path / "a.json").write_text(
+        json.dumps({"schema_version": 1, "extends": "b.json"}),
+    )
+    (tmp_path / "b.json").write_text(
+        json.dumps({"schema_version": 1, "extends": "a.json"}),
+    )
+    child = {"schema_version": 1, "extends": "a.json"}
+    with pytest.raises(DeclarativeAnimationError, match="cycle"):
+        resolve_extends(child, tmp_path)
+
+
+def test_extends_never_inherits_parent_phases(tmp_path) -> None:
+    """Phases are choreography, never inherited — even if the parent has them."""
+    from posecascade.scripting.declarative import resolve_extends  # noqa: PLC0415
+
+    parent_with_phases = {
+        "schema_version": 1,
+        "phases": [{"name": "parent_phase", "duration_sec": 5.0}],
+    }
+    (tmp_path / "parent.json").write_text(json.dumps(parent_with_phases))
+    child = {
+        "schema_version": 1,
+        "extends": "parent.json",
+        "phases": [{"name": "child_phase", "duration_sec": 1.0}],
+    }
+    merged = resolve_extends(child, tmp_path)
+    assert [p["name"] for p in merged["phases"]] == ["child_phase"]
+
+
+def test_extends_pose_library_merges_per_preset(tmp_path) -> None:
+    """``pose_library`` and ``hand_library`` are the only top-level keys that
+    deep-merge — a child can add a new pose without redeclaring every
+    inherited one."""
+    from posecascade.scripting.declarative import resolve_extends  # noqa: PLC0415
+
+    profile = {
+        "schema_version": 1,
+        "pose_library": {"a": {"head": {"x_rad": 0.1}}},
+    }
+    (tmp_path / "profile.json").write_text(json.dumps(profile))
+    child = {
+        "schema_version": 1,
+        "extends": "profile.json",
+        "pose_library": {"b": {"head": {"x_rad": 0.2}}},
+    }
+    merged = resolve_extends(child, tmp_path)
+    # Both presets present — parent's "a" survived alongside child's "b".
+    assert set(merged["pose_library"]) == {"a", "b"}
+
+
+# ---------------------------------------------------------------------------
+# Shorthand syntax — [from, to] curves, [x, y, z] translation, bone axis aliases.
+# ---------------------------------------------------------------------------
+
+
+def test_curve_array_shorthand_resolves_as_linear() -> None:
+    """``[from, to]`` arrays evaluate the same as ``{kind: 'linear', from, to}``."""
+    from posecascade.scripting.declarative import _resolve_value_curve  # noqa: PLC0415
+
+    # phase_t at the midpoint should land halfway between endpoints.
+    assert _resolve_value_curve([2.0, 8.0], 0.5) == 5.0
+    # At endpoints, exact:
+    assert _resolve_value_curve([2.0, 8.0], 0.0) == 2.0
+    assert _resolve_value_curve([2.0, 8.0], 1.0) == 8.0
+
+
+def test_translation_array_shorthand_unpacks_per_axis() -> None:
+    """``[x, y, z]`` translation array evaluates per-axis the same as the dict form."""
+    from posecascade.scripting.declarative import _resolve_translation  # noqa: PLC0415
+
+    # Static origin via shorthand.
+    out = _resolve_translation([0.0, 1.5, -2.0], 0.5, {})
+    assert out == (0.0, 1.5, -2.0)
+    # Each axis is itself a value curve — animated middle axis works.
+    out = _resolve_translation([0.0, [0.0, 4.0], 0.0], 0.25, {})
+    assert out[0] == 0.0
+    assert out[1] == 1.0   # linear 0→4 at t=0.25
+    assert out[2] == 0.0
+
+
+def test_translation_array_rejects_wrong_length() -> None:
+    """A 2- or 4-element translation array is an authoring error."""
+    from posecascade.scripting.declarative import _resolve_translation  # noqa: PLC0415
+
+    with pytest.raises(DeclarativeAnimationError, match="3 entries"):
+        _resolve_translation([0.0, 1.0], 0.0, {})
+
+
+def test_bone_axis_aliases_accept_short_form() -> None:
+    """``{x: ...}`` reads as ``{x_rad: ...}`` and mixing the two raises."""
+    doc = _minimal_doc()
+    doc["phases"][0]["bones"] = {"head": {"x": 0.5}}
+    parsed = parse_animation(doc)
+    assert parsed.phases[0].bones["head"]["x_rad"] == 0.5
+
+    doc_mix = _minimal_doc()
+    doc_mix["phases"][0]["bones"] = {"head": {"x": 0.5, "x_rad": 0.5}}
+    with pytest.raises(DeclarativeAnimationError, match="twice"):
+        parse_animation(doc_mix)
+

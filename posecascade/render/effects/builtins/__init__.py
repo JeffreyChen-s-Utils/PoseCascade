@@ -16,6 +16,7 @@ from posecascade.render.effects.loader import load_descriptor_from_toml
 _BUILTIN_NAMES: tuple[str, ...] = (
     "autoluminous",
     "hgshadow",
+    "mmd_tone",
     "o_greener",
     "ikeshita_ray",
 )

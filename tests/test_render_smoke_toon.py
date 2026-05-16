@@ -128,6 +128,14 @@ def _draw_toon(pmx_path: Path) -> np.ndarray:
     imported = PmxImporter().load(pmx_path)
     renderer = Renderer(shaders_root=_shaders_root())
     renderer.initialize()
+    # Toon smoke test pins the cube + outline pixel ratio against a
+    # golden image; ground / projected shadow / self-shadow / sky /
+    # sRGB output would all invalidate that comparison. The editor
+    # still defaults all of them on for interactive use.
+    renderer.set_ground_enabled(False)
+    renderer.set_self_shadow_enabled(False)
+    renderer.set_sky_enabled(False)
+    renderer.set_srgb_output_enabled(False)
     renderer.populate_from_scene(imported)
     camera = Camera(position=vec3(3.0, 2.0, 3.0), target=vec3(0.0, 0.0, 0.0))
     renderer.draw(imported.scene, camera, VIEWPORT_SIZE)

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "extends": "_herta_profile.json",
+  "name": "model_idle_breathing",
+  "loop_sec": 4.0,
+
+  "phases": [
+    {
+      "name": "breathe",
+      "duration_sec": 4.0,
+      "pose": "rest_arms",
+      "body": {"translation": [0.0, "0.005 * sin(elapsed * tau / 4)", 0.0]},
+      "bones": {
+        "chest": {"x": "0.025 * sin(elapsed * tau / 4)"},
+        "head":  {
+          "x": "0.018 * sin(elapsed * tau / 4)",
+          "y": "0.04 * sin(elapsed * tau / 8)"
+        }
+      },
+      "morphs": {
+        "blink": "max(0, sin(elapsed * tau / 3) - 0.95) * 20",
+        "smile": 0.30
+      }
+    }
+  ]
+}

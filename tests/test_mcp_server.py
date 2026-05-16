@@ -73,11 +73,11 @@ def test_read_animation_text_rejects_path_traversal() -> None:
 
 def test_inspect_model_reports_glb_structure(tmp_path: Path) -> None:
     """Inspecting a real bundled GLB returns the expected summary keys."""
-    # examples/assets/character.glb is the canonical large character ship
+    # examples/assets/herta/herta.glb is the canonical character GLB
     # in the repo. If it's missing on a CI shallow clone, skip cleanly.
-    target = Path("examples/assets/character.glb")
+    target = Path("examples/assets/herta/herta.glb")
     if not (mcp_server._PROJECT_ROOT / target).is_file():           # noqa: SLF001
-        pytest.skip("character.glb not present in this checkout")
+        pytest.skip("herta.glb not present in this checkout")
     info = mcp_server.inspect_model(str(target))
     assert "error" not in info, info
     assert info["format"] == ".glb"

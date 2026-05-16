@@ -1,161 +1,57 @@
 {
   "schema_version": 1,
-  "name": "stair_walk_declarative_demo",
-  "loop_sec": 16.0,
+  "extends": "_herta_profile.json",
+  "name": "walk_forward_demo",
+  "loop_sec": 8.0,
+  "auto_body_colliders": false,
 
-  "rig": {
-    "character_root": "Sketchfab_model",
-    "leg_chain_l": ["upper_leg_L", "lower_leg_L", "foot_L"],
-    "leg_chain_r": ["upper_leg_R", "lower_leg_R", "foot_R"],
-    "knee_limit_min": [-2.4, 0, 0],
-    "knee_limit_max": [0.1, 0, 0],
-    "body_bones": {
-      "head": "head",
-      "chest": "chest",
-      "hip": "hip",
-      "upper_arm_L": "upper_arm_L",
-      "upper_arm_R": "upper_arm_R",
-      "upper_leg_L": "upper_leg_L",
-      "upper_leg_R": "upper_leg_R",
-      "lower_leg_L": "lower_leg_L",
-      "lower_leg_R": "lower_leg_R",
-      "foot_L": "foot_L",
-      "foot_R": "foot_R"
+  "cloth": [
+    {
+      "mesh_node": "Skirt",
+      "track_bone": "hip",
+      "structural_stiffness": 0.85,
+      "bend_stiffness": 0.20,
+      "linear_damping": 0.96,
+      "anchor_axis": 1,
+      "anchor_fraction": 0.18,
+      "anchor_mode": "top_axis",
+      "iterations": 10,
+      "substeps": 3,
+      "rest_pull": 30.0
     }
-  },
-
-  "ground": {
-    "kind": "stairs",
-    "base_z": -0.20,
-    "step_depth": 0.04,
-    "step_rise": 0.02,
-    "count": 5,
-    "forward_sign": -1
-  },
-
-  "physics_chains": {
-    "hair_C":  {"stiffness": 14.0, "damping": 0.45, "inertia": 0.015},
-    "hair_L":  {"stiffness": 12.0, "damping": 0.40, "inertia": 0.015},
-    "hair_R":  {"stiffness": 12.0, "damping": 0.40, "inertia": 0.015},
-    "hair_LL": {"stiffness":  8.5, "damping": 0.30, "inertia": 0.020},
-    "hair_RR": {"stiffness":  8.5, "damping": 0.30, "inertia": 0.020},
-    "orn":     {"stiffness": 22.0, "damping": 0.80, "inertia": 0.020}
-  },
-
-  "wind": {
-    "direction": [1.0, 0.0, 0.0],
-    "speed": 0.4,
-    "turbulence_amplitude": 0.10,
-    "turbulence_frequency_hz": 1.0
-  },
+  ],
 
   "phases": [
     {
       "name": "walk_forward",
       "duration_sec": 4.0,
-      "body": {
-        "yaw_rad": "pi",
-        "translation": {
-          "x": 0,
-          "y": 0,
-          "z": {"kind": "linear", "from": 0.0, "to": -0.20}
-        }
-      },
+      "body": {"yaw_rad": "pi", "translation": [0, 0, [0.0, -2.0]]},
       "gait": {
         "kind": "walking",
         "step_cycle_sec": 1.0,
-        "leg_swing_amplitude": 0.50,
+        "leg_swing_amplitude": 0.17,
         "knee_bend": -0.30,
-        "arm_swing_amplitude": 0.40
-      }
-    },
-    {
-      "name": "climb_up",
-      "duration_sec": 5.0,
-      "body": {
-        "yaw_rad": "pi",
-        "lean_x_rad": 0.10,
-        "translation": {
-          "stair": {
-            "base_z": -0.20,
-            "rise": 0.10,
-            "forward": 0.20,
-            "step_count": 5,
-            "ascending": true,
-            "rise_window": [0.40, 0.75],
-            "forward_sign": -1
-          }
-        }
+        "arm_hang_rad": 0.0
       },
-      "gait": {
-        "kind": "stride",
-        "step_count": 5,
-        "leading_lift_rad": -0.70,
-        "trailing_back_rad": 0.25,
-        "knee_bend_rad": 0.30,
-        "arm_swing_amplitude_rad": 0.40,
-        "knee_bell": [0.10, 0.65],
-        "forward_bell": [0.10, 0.65]
-      }
-    },
-    {
-      "name": "turn_top",
-      "duration_sec": 1.0,
-      "body": {
-        "yaw_rad": {"kind": "linear", "from": "pi", "to": 0.0},
-        "translation": {
-          "x": 0,
-          "y": 0.10,
-          "z": -0.40
-        }
-      }
-    },
-    {
-      "name": "descend",
-      "duration_sec": 4.0,
-      "body": {
-        "yaw_rad": 0.0,
-        "lean_x_rad": -0.05,
-        "translation": {
-          "stair": {
-            "base_z": -0.20,
-            "rise": 0.10,
-            "forward": 0.20,
-            "step_count": 5,
-            "ascending": false,
-            "rise_window": [0.40, 0.75],
-            "forward_sign": -1
-          }
-        }
-      },
-      "gait": {
-        "kind": "stride",
-        "step_count": 5,
-        "leading_lift_rad": -0.70,
-        "trailing_back_rad": 0.25,
-        "knee_bend_rad": 0.30,
-        "arm_swing_amplitude_rad": 0.40,
-        "knee_bell": [0.10, 0.65],
-        "forward_bell": [0.10, 0.65]
+      "bones": {
+        "upper_arm_L": {"z": -0.5235987755982988},
+        "upper_arm_R": {"z":  0.5235987755982988}
       }
     },
     {
       "name": "walk_back",
-      "duration_sec": 2.0,
-      "body": {
-        "yaw_rad": 0.0,
-        "translation": {
-          "x": 0,
-          "y": 0,
-          "z": {"kind": "linear", "from": -0.20, "to": 0.0}
-        }
-      },
+      "duration_sec": 4.0,
+      "body": {"translation": [0, 0, [-2.0, 0.0]]},
       "gait": {
         "kind": "walking",
         "step_cycle_sec": 1.0,
-        "leg_swing_amplitude": 0.50,
+        "leg_swing_amplitude": 0.17,
         "knee_bend": -0.30,
-        "arm_swing_amplitude": 0.40
+        "arm_hang_rad": 0.0
+      },
+      "bones": {
+        "upper_arm_L": {"z": -0.5235987755982988},
+        "upper_arm_R": {"z":  0.5235987755982988}
       }
     }
   ]

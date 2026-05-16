@@ -5,8 +5,8 @@ import numpy as np
 
 from posecascade.animation.cloth import SphereCollider
 from posecascade.animation.cloth_host import ClothHost
-from posecascade.assets.types import ImportedScene, Mesh
-from posecascade.scene.component import ClothComponent
+from posecascade.assets.types import ImportedScene, Mesh, Skin
+from posecascade.scene.component import ClothComponent, SkinRefComponent
 from posecascade.scene.node import Node
 from posecascade.scene.scene import Scene
 from posecascade.utils.math3d import vec3
@@ -87,6 +87,7 @@ def test_tick_advances_cloth_under_gravity() -> None:
     scene, _node, mesh = _scene_with_cloth_node()
     imported = _make_imported(scene, mesh)
     host = ClothHost()
+    # floor_y defaults to None now; nothing to disable.
     host.install_default_forces()
     host.register_imported_scene(imported)
     initial_positions = host.find_piece("cape").positions.copy()
@@ -96,6 +97,20 @@ def test_tick_advances_cloth_under_gravity() -> None:
     # Free verts should have dropped (Y decreased) under gravity.
     free = host.find_piece("cape").inverse_masses > 0.0
     assert np.mean(final[free, 1]) < np.mean(initial_positions[free, 1])
+
+
+def test_floor_clamp_holds_cloth_above_floor() -> None:
+    """Setting ``floor_y=0`` keeps cloth verts from dropping through the ground."""
+    scene, _node, mesh = _scene_with_cloth_node()
+    imported = _make_imported(scene, mesh)
+    host = ClothHost()
+    host.floor_y = 0.0  # opt in for this test
+    host.install_default_forces()
+    host.register_imported_scene(imported)
+    for _ in range(30):
+        host.tick(1.0 / 60.0)
+    piece = host.find_piece("cape")
+    assert float(np.min(piece.positions[:, 1])) >= -1.0e-5
 
 
 def test_iter_local_state_yields_positions_and_normals() -> None:
@@ -121,6 +136,93 @@ def test_local_positions_round_trip_through_world_matrix() -> None:
     host.register_imported_scene(imported)
     binding, positions_local, _normals = next(iter(host.iter_local_state()))
     np.testing.assert_allclose(positions_local, mesh.positions, atol=1.0e-4)
+
+
+def test_anchor_follower_tracks_bone_translation() -> None:
+    """A registered anchor follower drags pinned verts along with a translating bone.
+
+    Without the follower the anchor verts would stay at their init-pose
+    world positions while the bone walked away (skirt detaches from
+    body). With it, every :meth:`tick` snaps anchors to the bone's
+    current world frame.
+    """
+    scene, _node, mesh = _scene_with_cloth_node()
+    bone = Node(name="hip_bone")
+    scene.root.add_child(bone)
+    imported = _make_imported(scene, mesh)
+    host = ClothHost()
+    host.register_imported_scene(imported)
+    piece = host.find_piece("cape")
+    anchor_mask = piece.inverse_masses == 0.0
+    anchor_xs_before = piece.positions[anchor_mask, 0].copy()
+    assert host.register_anchor_follower(piece, bone) is True
+    # Translate the bone 1.5 m along +X and tick once. Anchor verts must follow.
+    bone.transform.set_translation(vec3(1.5, 0.0, 0.0))
+    host.tick(1.0 / 60.0)
+    anchor_xs_after = piece.positions[anchor_mask, 0]
+    np.testing.assert_allclose(anchor_xs_after, anchor_xs_before + 1.5, atol=1.0e-4)
+    # ``prev_positions`` must match ``positions`` so the Verlet step doesn't
+    # see a teleport as a velocity spike.
+    np.testing.assert_allclose(
+        piece.prev_positions[anchor_mask], piece.positions[anchor_mask],
+    )
+
+
+def test_register_anchor_follower_skips_pieces_without_anchors() -> None:
+    """Cloth with no pinned verts (all free) yields no follower record."""
+    scene, _node, mesh = _scene_with_cloth_node()
+    imported = _make_imported(scene, mesh)
+    host = ClothHost()
+    host.register_imported_scene(imported)
+    piece = host.find_piece("cape")
+    # Free every vertex so anchor_indices comes back empty.
+    piece.inverse_masses[:] = 1.0
+    bone = Node(name="hip_bone")
+    scene.root.add_child(bone)
+    assert host.register_anchor_follower(piece, bone) is False
+
+
+def test_anchor_follower_drags_free_verts_with_bone_translation() -> None:
+    """Free verts shift with the bone's translation delta — without this
+    the body walks away while the cloth's free band gets pulled back to
+    its init world position via ``rest_pull``, stretching the skirt."""
+    scene, _node, mesh = _scene_with_cloth_node()
+    bone = Node(name="hip_bone")
+    scene.root.add_child(bone)
+    imported = _make_imported(scene, mesh)
+    host = ClothHost()
+    host.register_imported_scene(imported)
+    piece = host.find_piece("cape")
+    free_idx = np.flatnonzero(piece.inverse_masses > 0.0)
+    rest_before = piece.rest_positions[free_idx].copy()
+    pos_before = piece.positions[free_idx].copy()
+    host.register_anchor_follower(piece, bone)
+    # Translate the bone 2 m along -Z (typical walking direction) and tick.
+    bone.transform.set_translation(vec3(0.0, 0.0, -2.0))
+    host.tick(1.0 / 60.0)
+    # Free verts (rest + current positions) shifted by exactly the delta.
+    np.testing.assert_allclose(
+        piece.rest_positions[free_idx, 2], rest_before[:, 2] - 2.0, atol=1.0e-4,
+    )
+    # Positions also shifted before the solver step ran on top.
+    # (Allow a small delta from one gravity step.)
+    assert np.all(piece.positions[free_idx, 2] < pos_before[:, 2] - 1.5)
+
+
+def test_remove_pieces_for_subtree_drops_anchor_followers() -> None:
+    """Followers are cleaned up alongside their cloth piece when the subtree is removed."""
+    scene, node, mesh = _scene_with_cloth_node()
+    bone = Node(name="hip_bone")
+    scene.root.add_child(bone)
+    imported = _make_imported(scene, mesh)
+    host = ClothHost()
+    host.register_imported_scene(imported)
+    piece = host.find_piece("cape")
+    host.register_anchor_follower(piece, bone)
+    assert len(host._anchor_followers) == 1
+    removed = host.remove_pieces_for_subtree(node)
+    assert removed == 1
+    assert host._anchor_followers == []
 
 
 def test_local_state_tracks_parent_translation_applied_after_register() -> None:
@@ -289,3 +391,108 @@ def test_singular_world_matrix_rejected() -> None:
     host.register_imported_scene(imported)
     # Singular matrix ⇒ binding skipped with a warning, no crash.
     assert host.bindings() == ()
+
+
+def _make_skinned_imported(
+    scene: Scene, node: Node, mesh: Mesh, bone: Node,
+) -> ImportedScene:
+    """Attach a single-bone skin to ``node`` and return an ImportedScene."""
+    num_verts = mesh.positions.shape[0]
+    skinned_mesh = Mesh(
+        name=mesh.name,
+        positions=mesh.positions,
+        indices=mesh.indices,
+        joints_0=np.zeros((num_verts, 4), dtype=np.uint16),
+        weights_0=np.tile(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), (num_verts, 1)),
+    )
+    skin = Skin(
+        name="skin",
+        joints=(bone,),
+        inverse_bind_matrices=np.eye(4, dtype=np.float32)[None, ...],
+    )
+    node.add_component(SkinRefComponent(skin=skin))
+    return ImportedScene(meshes=(skinned_mesh,), textures=(), skins=(skin,), scene=scene)
+
+
+def test_skin_target_follower_drives_rest_positions_from_bone() -> None:
+    """With a single-bone skin where every vert has weight 1.0 on the bone,
+    each tick should set ``rest_positions`` to the bone-translated bind verts."""
+    scene, node, mesh = _scene_with_cloth_node()
+    bone = Node(name="hip_bone")
+    scene.root.add_child(bone)
+    imported = _make_skinned_imported(scene, node, mesh, bone)
+    host = ClothHost()
+    host.install_default_forces()
+    host.register_imported_scene(imported)
+    piece = host.find_piece("cape")
+    assert host.register_skin_target_follower(piece, node) is True
+
+    # Translate the bone +X by 0.7 m and tick. Rest positions should follow.
+    bone.transform.set_translation(vec3(0.7, 0.0, 0.0))
+    host.tick(1.0 / 60.0)
+    expected = mesh.positions + np.array([0.7, 0.0, 0.0], dtype=np.float32)
+    np.testing.assert_allclose(piece.rest_positions, expected, atol=1.0e-4)
+
+
+def test_skin_target_follower_skips_node_without_skin() -> None:
+    """A cloth node without a SkinRefComponent rejects the follower registration."""
+    scene, node, mesh = _scene_with_cloth_node()
+    imported = _make_imported(scene, mesh)
+    host = ClothHost()
+    host.register_imported_scene(imported)
+    piece = host.find_piece("cape")
+    assert host.register_skin_target_follower(piece, node) is False
+
+
+def test_skin_target_follower_skips_unskinned_mesh() -> None:
+    """A skinned node whose mesh primitive has no joints/weights is rejected."""
+    scene, node, mesh = _scene_with_cloth_node()
+    bone = Node(name="hip_bone")
+    scene.root.add_child(bone)
+    # Skin attached to the node but the mesh primitive carries no joints_0/weights_0.
+    skin = Skin(
+        name="skin",
+        joints=(bone,),
+        inverse_bind_matrices=np.eye(4, dtype=np.float32)[None, ...],
+    )
+    node.add_component(SkinRefComponent(skin=skin))
+    imported = _make_imported(scene, mesh)
+    host = ClothHost()
+    host.register_imported_scene(imported)
+    piece = host.find_piece("cape")
+    assert host.register_skin_target_follower(piece, node) is False
+
+
+def test_remove_pieces_for_subtree_drops_skin_followers() -> None:
+    """Skin-target followers are cleaned up alongside their cloth piece."""
+    scene, node, mesh = _scene_with_cloth_node()
+    bone = Node(name="hip_bone")
+    scene.root.add_child(bone)
+    imported = _make_skinned_imported(scene, node, mesh, bone)
+    host = ClothHost()
+    host.register_imported_scene(imported)
+    piece = host.find_piece("cape")
+    host.register_skin_target_follower(piece, node)
+    assert host._skin_followers  # noqa: SLF001
+
+    removed = host.remove_pieces_for_subtree(node)
+
+    assert removed == 1
+    assert host._skin_followers == []  # noqa: SLF001
+
+
+def test_reset_clears_skin_followers() -> None:
+    """``reset()`` drops skin-target followers along with the rest of host state."""
+    scene, node, mesh = _scene_with_cloth_node()
+    bone = Node(name="hip_bone")
+    scene.root.add_child(bone)
+    imported = _make_skinned_imported(scene, node, mesh, bone)
+    host = ClothHost()
+    host.register_imported_scene(imported)
+    piece = host.find_piece("cape")
+    host.register_skin_target_follower(piece, node)
+    assert host._skin_followers  # noqa: SLF001
+
+    host.reset()
+
+    assert host._skin_followers == []  # noqa: SLF001

@@ -147,6 +147,15 @@ def test_renders_cube(gl_context: object, offscreen_fbo: int) -> None:
     pillow = pytest.importorskip("PIL.Image")
     renderer = Renderer(shaders_root=_shaders_root())
     renderer.initialize()
+    # Cube test pins the cube-vs-background pixel ratio; every new
+    # render pass (ground, projected shadow, self-shadow, sky,
+    # sRGB-aware output) would change the baseline. All default-on for
+    # the editor — the smoke test opts out so it keeps measuring what
+    # it always did.
+    renderer.set_ground_enabled(False)
+    renderer.set_self_shadow_enabled(False)
+    renderer.set_sky_enabled(False)
+    renderer.set_srgb_output_enabled(False)
 
     cube = _cube_mesh()
     scene = Scene(name="cube_scene")

@@ -12,7 +12,7 @@
 //   u_boneMatrices[MAX_BONES] — pre-multiplied (joint world × inverse bind),
 //     uploaded by the renderer once per frame per skinned mesh.
 
-#define MAX_BONES 256
+#define MAX_BONES 384
 
 layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec3 a_normal;
@@ -27,6 +27,7 @@ uniform mat4 u_boneMatrices[MAX_BONES];
 out vec3 v_normal_world;
 out vec3 v_normal_view;
 out vec2 v_uv;
+out vec3 v_world_pos;
 
 void main() {
     mat4 skin =
@@ -42,5 +43,6 @@ void main() {
     v_normal_world = n_world;
     v_normal_view = normalize(mat3(u_viewMatrix) * n_world);
     v_uv = a_texcoord_0;
+    v_world_pos = skinned_position.xyz;
     gl_Position = u_projMatrix * u_viewMatrix * skinned_position;
 }
