@@ -253,13 +253,20 @@ jobs:
           persist-credentials: false   # Nuitka build; no push
       - uses: actions/setup-python@v5
         with: { python-version: "3.14" }
-      - name: Install project + Nuitka toolchain
+      - name: Install build deps + project + Nuitka toolchain
         env:
           SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.compute_version.outputs.version }}
         run: |
+          pip install --upgrade pip
+          pip install "setuptools>=68" "wheel" "Cython>=3.0" "numpy>=1.26" "setuptools-scm>=8"
           pip install -e .
           pip install "nuitka>=2.5" ordered-set zstandard
       - name: Build the cloth Cython kernel in-place
+        # ``python setup.py build_ext --inplace`` invokes setup.py
+        # directly against the active interpreter, bypassing pip's
+        # PEP 517 build-isolation env. That means setuptools, wheel,
+        # Cython, and numpy headers all have to be visible in the
+        # active env at this point — installed in the previous step.
         env:
           SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.compute_version.outputs.version }}
         run: python setup.py build_ext --inplace
@@ -326,21 +333,26 @@ jobs:
           TAG: ${{ needs.compute_version.outputs.tag }}
           # Scope the token to this step only. ``GH_TOKEN`` is the
           # conventional name; bash receives it as a normal env var
-          # and we hand it to git via an ephemeral extraheader on the
-          # single push command (no global ``.git/config`` mutation,
-          # no token in process argv, no token in shell history).
+          # and we put it into the push URL — token lives in argv for
+          # the duration of the single ``git push`` command, no
+          # ``.git/config`` mutation, no leakage to subsequent steps.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$TAG" -m "Release $TAG"
-          # ``http.extraheader`` set via ``-c`` is per-invocation only
-          # and doesn't write the token to ``.git/config`` on disk.
-          # ``AUTHORIZATION:`` capitalisation matters — git lowercases
-          # before comparing, but other tooling along the way does not.
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: Bearer $GH_TOKEN" \
-              push "https://github.com/$REPO.git" "$TAG"
+          # Token-in-URL form. ``-c http.<url>.extraheader=...`` was
+          # the previous approach but git's CLI config parser
+          # doesn't carry a value containing spaces through to the
+          # HTTP layer reliably for subsections that include the
+          # ``://`` and ``/`` characters of an URL, so the push hit
+          # "fatal: could not read Username for 'https://github.com'".
+          # ``x-access-token:<token>@github.com`` is the documented
+          # pattern (the literal string ``x-access-token`` is the
+          # GitHub-Actions convention for the username field; the
+          # token is the password).
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "$TAG"
       - uses: actions/download-artifact@v4
         with:
           name: PoseCascade-exe
