@@ -45,18 +45,31 @@ jobs:
           # the latest ``v*`` tag. Without ``fetch-depth: 0`` the
           # checkout is shallow and ``git tag --list`` returns nothing.
           fetch-depth: 0
-          # IMPORTANT: use a PAT, not GITHUB_TOKEN, to push the new
-          # tag. GitHub Actions deliberately suppresses workflow
-          # triggers from pushes authenticated by GITHUB_TOKEN to
-          # prevent recursion — that means a tag pushed here with
-          # GITHUB_TOKEN would NOT trigger ``wheels.yml`` and the
-          # release pipeline would silently no-op (tag created, no
-          # build, no PyPI upload, no GitHub Release). The PAT
-          # workaround is the documented escape hatch:
-          # https://docs.github.com/en/actions/security-guides/automatic-token-authentication#using-the-github_token-in-a-workflow
-          # Create a fine-grained PAT scoped to this repo with
-          # Contents: read+write, store it as ``RELEASE_PAT``.
-          token: ${{ secrets.RELEASE_PAT }}
+          # Prefer ``RELEASE_PAT`` (a fine-grained PAT with Contents
+          # read+write) so the subsequent ``git push origin "$TAG"``
+          # is authored under user credentials — that's the only way
+          # GitHub Actions will trigger ``wheels.yml`` from this
+          # workflow's tag push. Falls back to ``GITHUB_TOKEN`` when
+          # the secret isn't set so the workflow at least runs and
+          # produces tags; the "Verify trigger setup" step below
+          # warns when the fallback is in use so downstream silence
+          # isn't mysterious. PAT setup is in DEVELOPMENT.md.
+          token: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Verify trigger setup
+        # GitHub Actions deliberately suppresses workflow triggers
+        # from pushes authenticated by the default ``GITHUB_TOKEN``
+        # (anti-recursion measure). Surface the consequence early so
+        # a missing PAT manifests as a workflow warning instead of a
+        # silent "tag created, nothing builds" mystery.
+        env:
+          HAS_PAT: ${{ secrets.RELEASE_PAT != '' }}
+        run: |
+          if [ "$HAS_PAT" = "false" ]; then
+            echo "::warning::RELEASE_PAT secret is not set. The new tag will be pushed under GITHUB_TOKEN, which does NOT trigger wheels.yml. PyPI publish and GitHub Release will not happen. Set the RELEASE_PAT secret (see DEVELOPMENT.md → 'One-time GitHub configuration')."
+          else
+            echo "RELEASE_PAT detected — tag push will trigger wheels.yml normally."
+          fi
 
       - name: Compute next version
         id: version
