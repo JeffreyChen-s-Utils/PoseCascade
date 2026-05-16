@@ -112,16 +112,27 @@ class OutlinerDock(QDockWidget):
         self.node_selected.emit(node)
 
     def _on_context_menu(self, pos: object) -> None:
+        # Right-click clears the highlight, regardless of which row (or
+        # empty space) was right-clicked. The selection-changed signal
+        # propagates ``None`` to the viewport so the selection overlay
+        # disappears immediately. The context menu still shows for
+        # right-clicks on real rows so Delete keeps working — we capture
+        # the right-clicked node up front so the menu acts on it even
+        # though the tree selection has just been cleared.
         item = self._tree.itemAt(pos)  # type: ignore[arg-type]
-        if item is None:
-            return
-        node = self._node_for_item.get(id(item))
-        if node is None or node.parent is None:
-            # Root node — no delete (would orphan the whole scene).
+        right_clicked_node: Node | None = None
+        if item is not None:
+            right_clicked_node = self._node_for_item.get(id(item))
+        self._tree.clearSelection()
+        if right_clicked_node is None or right_clicked_node.parent is None:
+            # Root row or empty area — nothing to delete; the
+            # clearSelection above is the only action.
             return
         menu = QMenu(self._tree)
         action = menu.addAction("Delete")
-        action.triggered.connect(self._delete_selected)
+        action.triggered.connect(
+            lambda: self._delete_node(right_clicked_node),
+        )
         menu.exec(self._tree.mapToGlobal(pos))  # type: ignore[arg-type]
 
     def _delete_selected(self) -> None:
@@ -139,4 +150,21 @@ class OutlinerDock(QDockWidget):
         if deleted and self._scene is not None:
             # Re-render the tree from the now-mutated scene. Cheap because
             # node counts are small in typical editor sessions.
+            self.set_scene(self._scene)
+
+    def _delete_node(self, node: Node | None) -> None:
+        """Detach one specific node — used by the right-click ``Delete`` menu.
+
+        The right-click handler clears the tree's selection before
+        showing the menu (so the highlight is cancelled immediately),
+        which means ``selectedItems()`` is empty by the time the menu's
+        callback fires. We capture the right-clicked node at menu
+        construction and route through this helper so Delete still
+        works on the row the user actually pointed at.
+        """
+        if node is None or node.parent is None:
+            return
+        node.parent.remove_child(node)
+        self.node_deleted.emit(node)
+        if self._scene is not None:
             self.set_scene(self._scene)

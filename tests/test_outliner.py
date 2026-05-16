@@ -142,3 +142,71 @@ def test_outliner_delete_root_is_noop(qapp: Any) -> None:
     assert scene.root is not None
     assert len(scene.root.children) == 2
     assert received == []
+
+
+def test_outliner_right_click_clears_selection(qapp: Any) -> None:
+    """Right-click anywhere in the tree clears the highlight via selection-change.
+
+    The selection drives the viewport overlay through ``node_selected``;
+    right-click on a row must emit ``node_selected(None)`` so the
+    overlay disappears even while the context menu is being shown.
+    """
+    del qapp
+    dock = OutlinerDock()
+    scene = _build_scene()
+    dock.set_scene(scene)
+    # Seed a selection so we can verify the clear actually does work.
+    grand = scene.root.children[0].children[0]
+    dock.select_node(grand)
+    assert dock.widget().selectedItems()
+
+    received: list[Node | None] = []
+    dock.node_selected.connect(received.append)
+    # ``_on_context_menu`` is what fires on right-click. The Qt
+    # signature passes the position; we pass an arbitrary
+    # ``QPoint`` outside any row so the menu doesn't try to ``exec``.
+    from PySide6.QtCore import QPoint  # noqa: PLC0415
+
+    dock._on_context_menu(QPoint(-1, -1))  # noqa: SLF001
+
+    # Selection cleared → node_selected(None) emitted.
+    assert not dock.widget().selectedItems()
+    assert received == [None]
+
+
+def test_outliner_right_click_delete_uses_captured_node(qapp: Any) -> None:
+    """``_delete_node`` removes the captured node even with no tree selection.
+
+    The right-click handler clears the tree's selection before showing
+    the menu, so ``_delete_selected`` (which reads ``selectedItems``)
+    can't be used. ``_delete_node`` takes the captured node directly.
+    """
+    del qapp
+    dock = OutlinerDock()
+    scene = _build_scene()
+    dock.set_scene(scene)
+    target = scene.root.children[0]
+
+    received: list[Node] = []
+    dock.node_deleted.connect(received.append)
+    # Selection is empty (mirrors the post-clearSelection state).
+    dock.widget().clearSelection()
+    dock._delete_node(target)  # noqa: SLF001
+
+    assert [n.name for n in received] == ["child_a"]
+    assert [n.name for n in scene.root.children] == ["child_b"]
+
+
+def test_viewport_set_selected_holder_mirrors_into_renderer(qapp: Any) -> None:
+    """The new viewport setter is what bridges the outliner click → highlight."""
+    del qapp
+    from posecascade.ui.viewport import Viewport  # noqa: PLC0415
+
+    viewport = Viewport()
+    scene = _build_scene()
+    viewport.set_scene(scene)
+    target = scene.root.children[1]
+    viewport.set_selected_holder(target)
+    assert viewport.selected_holder is target
+    viewport.set_selected_holder(None)
+    assert viewport.selected_holder is None

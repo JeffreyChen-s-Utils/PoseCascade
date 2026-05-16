@@ -109,6 +109,21 @@ class Viewport(QOpenGLWidget):
     def selected_holder(self) -> Node | None:
         return self._selected_holder
 
+    def set_selected_holder(self, node: Node | None) -> None:
+        """Mirror an external selection (e.g. outliner click) into the overlay.
+
+        Pass ``None`` to clear the highlight. Idempotent — repeated calls
+        with the same node skip the renderer update + repaint so a busy
+        signal source (outliner left-key navigation) doesn't churn the
+        viewport at every keystroke.
+        """
+        if self._selected_holder is node:
+            return
+        self._selected_holder = node
+        if self._renderer is not None:
+            self._renderer.set_selected_holder(node)
+        self.update()
+
     def initializeGL(self) -> None:  # noqa: N802 — Qt override
         self._gl_context = claim_current_thread()
         self._renderer = Renderer(shaders_root=self._shaders_root)

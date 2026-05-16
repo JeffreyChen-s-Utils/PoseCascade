@@ -479,6 +479,12 @@ class MainWindow(QMainWindow):
 
     def _on_outliner_selection(self, node: Node | None) -> None:
         self._inspector.set_node(node)
+        # Mirror the outliner selection into the viewport's selection
+        # overlay. Passing ``None`` clears the highlight, which is what
+        # the outliner's right-click handler relies on (it clears the
+        # tree's selection before showing the context menu so the
+        # highlight disappears immediately).
+        self._viewport.set_selected_holder(node)
         self._update_status_text(selected_name=(node.name if node is not None else None))
 
     def _on_outliner_delete(self, node: Node) -> None:
