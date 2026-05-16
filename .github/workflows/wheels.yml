@@ -44,7 +44,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # need full tag history
+          fetch-depth: 0           # need full tag history
+          persist-credentials: false   # read-only job; don't store the token
       - id: v
         shell: bash
         # The commit message is passed through an env var, not
@@ -108,10 +109,16 @@ jobs:
           - { os: macos-latest, python: "312" }
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false   # read-only build; no push
       - uses: actions/setup-python@v5
         with: { python-version: "3.x" }
       - name: Build wheels
-        uses: pypa/cibuildwheel@v2.21
+        # ``@v2`` (major-version pin) tracks the latest stable 2.x —
+        # the previous ``@v2.21`` pin predated Python 3.14's promotion
+        # to a stable build target and rejected the ``cp314-*`` build
+        # config with "No build identifiers selected".
+        uses: pypa/cibuildwheel@v2
         env:
           CIBW_BUILD: cp${{ matrix.python }}-*
           # On push-to-main, compute_version drives the wheel
@@ -141,7 +148,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # setuptools-scm reads tag history
+          fetch-depth: 0               # setuptools-scm reads tag history
+          persist-credentials: false   # read-only sdist build; no push
       - uses: actions/setup-python@v5
         with: { python-version: "3.14" }
       - name: Build sdist
@@ -198,6 +206,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false   # Nuitka build; no push
       - uses: actions/setup-python@v5
         with: { python-version: "3.14" }
       - name: Install project + Nuitka toolchain
