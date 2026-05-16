@@ -83,14 +83,19 @@ test-skip = "*-macosx_*"  # Qt offscreen + GL fixtures are flaky on macOS runner
 [tool.cibuildwheel.linux]
 # Cython kernels need numpy headers at compile time; the manylinux image
 # pulls numpy from PyPI per Python so each wheel is built against the
-# matching numpy ABI.
-before-build = "pip install 'numpy>=1.26' 'Cython>=3.0'"
+# matching numpy ABI. Use TOML literal-string syntax (single-quoted)
+# so the embedded double-quotes round-trip into the actual shell
+# command — Windows cmd.exe interprets single quotes as literal
+# characters and treats ``>=`` as a stream redirect, which is why
+# the previous form failed there with "Process exit code 1" in the
+# ``before_build`` cibuildwheel stage.
+before-build = 'pip install "numpy>=1.26" "Cython>=3.0"'
 
 [tool.cibuildwheel.macos]
-before-build = "pip install 'numpy>=1.26' 'Cython>=3.0'"
+before-build = 'pip install "numpy>=1.26" "Cython>=3.0"'
 
 [tool.cibuildwheel.windows]
-before-build = "pip install 'numpy>=1.26' 'Cython>=3.0'"
+before-build = 'pip install "numpy>=1.26" "Cython>=3.0"'
 
 [tool.ruff]
 target-version = "py312"
