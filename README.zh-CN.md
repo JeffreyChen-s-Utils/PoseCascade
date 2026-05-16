@@ -1,7 +1,7 @@
 # PoseCascade
 
 > **语言**：[English](README.md) · [繁體中文](README.zh-TW.md) · **简体中文**
-> **文档**：[Read the Docs 源代码](docs/)（Sphinx）
+> **文档**：<https://posecascade.readthedocs.io/en/latest/>
 
 一个基于 PySide6 + OpenGL 的桌面引擎，用于导入 3D 模型并以沙箱化脚本驱动它们。
 视觉目标是 MMD 风格：卡通着色 + 锐利的 inverted-hull 描边、带 sphere map 的 PMX 材质、
@@ -18,7 +18,7 @@ VMD 风格动画曲线、IK + 脚掌贴地、morph target，以及可实时摆�
   可选的对偶四元数蒙皮（保持关节体积）、默认 AutoLuminous bloom、MMD tone-curve 后处理、
   程序化舞台抽象（地板 + 背墙 + 侧墙），以及一个 selection-overlay pass，会用对比色把
   选中的 top-level holder 再描一次边。完整 pass 顺序与每个 pass 的开关见
-  [`docs/rendering_pipeline.md`](docs/rendering_pipeline.md)。
+  [`docs/rendering_pipeline.md`](https://posecascade.readthedocs.io/en/latest/rendering_pipeline.html)。
 - **VMD 驱动动画**：per-bone / per-morph / per-camera 轨道，使用 MMD 惯用的四控制点
   贝塞尔插值、IK 求解器、脚掌贴地器、slot 之间的 external-parent 绑定、display-frame
   分组以及 physics 链。
@@ -30,13 +30,15 @@ VMD 风格动画曲线、IK + 脚掌贴地、morph target，以及可实时摆�
   gaits、body trajectories、morph 时间线、行内 expression DSL，加上 `extends`
   继承机制与数组简写（`[from, to]` 曲线、`[x, y, z]` 平移、bones 的 `x`/`y`/`z`
   轴别名），把典型动画文件长度压到原本长写法的 1/3。
-  详见 [`docs/declarative_animation.md`](docs/declarative_animation.md)。
+  详见
+  [`docs/declarative_animation.md`](https://posecascade.readthedocs.io/en/latest/declarative_animation.html)。
 - **编辑器内动画编辑器**（新）：两个共用同一份 in-memory document 的右侧 dock——
   JSON 编辑器具备语法着色、行号 gutter、parse error 行内标记、Format 按钮、
   dirty indicator；Phase 方块 dock 则有横向时间轴（拖拽重排 + 拖边缘调 duration）、
   纵向卡片列表，加上 inline 表单覆盖所有常用字段（name / duration / blends /
   pose / gait / body translation / bones / morphs）。两边都接 Ctrl+Z / Ctrl+Y
-  undo/redo。详见 [`docs/animation_editor.md`](docs/animation_editor.md)。
+  undo/redo。详见
+  [`docs/animation_editor.md`](https://posecascade.readthedocs.io/en/latest/animation_editor.html)。
 - **GPU compute 蒙皮**（新）：用 OpenGL 4.3 compute shader 把 `passive_skin_deform`
   布料的 LBS + 碰撞推开 + world-to-local 都搬到 GPU，直接写进 mesh 的 position
   与 normal VBO。在 30k-vert 身体 mesh 上把每帧 cloth + apply_cloth 从 ~9 ms 降到
@@ -46,7 +48,7 @@ VMD 风格动画曲线、IK + 脚掌贴地、morph target，以及可实时摆�
   数学 API,让用户摆姿势、打 keyframe、做动画,不必碰引擎内部。
 - **MCP 服务器**：一个 Model Context Protocol 服务器,让任何支持 MCP 的 LLM agent
   都能驱动引擎——列出并验证声明式动画脚本、检查模型、跑布料 benchmark。详见
-  [`docs/mcp.md`](docs/mcp.md)。
+  [`docs/mcp.md`](https://posecascade.readthedocs.io/en/latest/mcp.html)。
 
 ## 快速开始
 
@@ -113,22 +115,23 @@ python examples/compare_lights.py   # 只开主光 vs + HighDef rim + fill
 
 ## 文档
 
-[`docs/`](docs/) 下的 Sphinx 树涵盖：
+<https://posecascade.readthedocs.io/en/latest/> 上的 Sphinx 树涵盖：
 
-- [`docs/rendering_pipeline.md`](docs/rendering_pipeline.md) —— 每个
-  render pass 做什么、开关怎么按。
-- [`docs/declarative_animation.md`](docs/declarative_animation.md) ——
-  撰写 JSON 动画：phases、gaits、curves、expression DSL、`extends`
-  profile 继承,以及数组简写。
-- [`docs/animation_editor.md`](docs/animation_editor.md) —— 编辑器内
-  JSON dock + Phase blocks dock(时间轴 + 曲线编辑器 + undo/redo)
-  的使用说明。
-- [`docs/mcp.md`](docs/mcp.md) —— Model Context Protocol 服务器的
-  工具、参数、返回格式。
-- [`docs/packaging_pyinstaller.md`](docs/packaging_pyinstaller.md)
+- [Rendering pipeline](https://posecascade.readthedocs.io/en/latest/rendering_pipeline.html)
+  —— 每个 render pass 做什么、开关怎么按。
+- [Declarative animation](https://posecascade.readthedocs.io/en/latest/declarative_animation.html)
+  —— 撰写 JSON 动画:phases、gaits、curves、expression DSL、
+  `extends` profile 继承,以及数组简写。
+- [Animation editor](https://posecascade.readthedocs.io/en/latest/animation_editor.html)
+  —— 编辑器内 JSON dock + Phase blocks dock(时间轴 + 曲线编辑器
+  + undo/redo)的使用说明。
+- [MCP server](https://posecascade.readthedocs.io/en/latest/mcp.html)
+  —— Model Context Protocol 服务器的工具、参数、返回格式。
+- [Packaging with PyInstaller](https://posecascade.readthedocs.io/en/latest/packaging_pyinstaller.html)
   —— 用 PyInstaller 把 PoseCascade 打包成独立可执行文件。
-- [`docs/packaging_nuitka.md`](docs/packaging_nuitka.md) —— 同样的
-  事改用 Nuitka(编译成原生二进制,体积更小 / 启动更快,但 build 较久)。
+- [Packaging with Nuitka](https://posecascade.readthedocs.io/en/latest/packaging_nuitka.html)
+  —— 同样的事改用 Nuitka(编译成原生二进制,体积更小 / 启动更快,
+  但 build 较久)。
 
 贡献者 / 维护者文档(开发流程、CI、release pipeline、性能数字)在
 [`DEVELOPMENT.md`](DEVELOPMENT.md)。
