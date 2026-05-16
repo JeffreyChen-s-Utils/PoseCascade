@@ -23,12 +23,17 @@ on:
     branches: [main]
   pull_request:
 
-permissions:
-  contents: read
+# No workflow-level ``permissions:`` block. SonarCloud rules
+# githubactions:S8233 and githubactions:S8264 enforce
+# least-privilege at the job level — even a bare ``contents: read``
+# at the workflow scope is over-broad because it cascades to every
+# job. Each job below declares its own grant.
 
 jobs:
   lint:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -41,6 +46,8 @@ jobs:
 
   security:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -56,6 +63,8 @@ jobs:
   test:
     name: pytest (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:

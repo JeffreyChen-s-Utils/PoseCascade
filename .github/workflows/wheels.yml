@@ -20,15 +20,13 @@ on:
       - ".github/workflows/wheels.yml"
   workflow_dispatch:
 
-# Workflow-level default: read-only. Each ``write`` capability the
-# pipeline needs is granted on the specific job that needs it (see
-# the ``permissions:`` blocks on ``publish`` and ``tag_and_release``
-# below). SonarCloud rule githubactions:S8233 — workflow-level write
-# permissions are over-broad: every job in the workflow inherits
-# them, including ones that have no business touching the repo
-# contents or minting OIDC tokens.
-permissions:
-  contents: read
+# No workflow-level ``permissions:`` block. SonarCloud rules
+# githubactions:S8233 (write) and githubactions:S8264 (read) both
+# enforce least-privilege at the job level: any permission granted
+# on the workflow is inherited by every job in the workflow, which
+# is over-broad even for a bare ``contents: read``. Each job below
+# carries its own ``permissions:`` block scoped to exactly what
+# that one job touches.
 
 jobs:
   # ---------------------------------------------------------------------
@@ -44,6 +42,8 @@ jobs:
       && !contains(github.event.head_commit.message, '[skip release]')
       && !contains(github.event.head_commit.message, '[skip ci]')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read   # read git tags only
     outputs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
@@ -106,6 +106,8 @@ jobs:
           || needs.compute_version.result == 'skipped')
     name: ${{ matrix.os }} / cp${{ matrix.python }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read   # read source for cibuildwheel
     strategy:
       fail-fast: false
       matrix:
@@ -159,6 +161,8 @@ jobs:
           || needs.compute_version.result == 'skipped')
     name: Source distribution
     runs-on: ubuntu-latest
+    permissions:
+      contents: read   # read source for sdist build
     steps:
       - uses: actions/checkout@v4
         with:
@@ -224,6 +228,8 @@ jobs:
       always()
       && needs.publish.result == 'success'
     runs-on: windows-latest
+    permissions:
+      contents: read   # read source for Nuitka build
     steps:
       - uses: actions/checkout@v4
         with:
