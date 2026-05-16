@@ -125,11 +125,14 @@ jobs:
         # rewrite by an upstream maintainer can't silently change
         # the code that runs in this job). The trailing comment is
         # the human-readable tag this SHA corresponds to; the
-        # comment doesn't affect resolution. v2.23.4 is the latest
-        # v2.x release and recognises ``cp314-*`` as a stable build
-        # target (cp314 was added in 2.22+; the previous ``@v2.21``
-        # pin predated it).
-        uses: pypa/cibuildwheel@9c4c401dc4f05c17d0d2f64ca4a63304f976415c  # v2.23.4
+        # comment doesn't affect resolution.
+        #
+        # v3.4.1 is the current stable line and ships cp314 as a
+        # regular release-Python target. v2.23.4 still classified
+        # cp314 as prerelease (``BuildSelector(... prerelease_pythons
+        # =False)`` rejected ``cp314-*`` with "No build identifiers
+        # selected"), which is why the matrix needs the 3.x line.
+        uses: pypa/cibuildwheel@d16cc544083d96996f923fc4b318fee3cb14b34e  # v3.4.1
         env:
           CIBW_BUILD: cp${{ matrix.python }}-*
           # On push-to-main, compute_version drives the wheel
