@@ -211,17 +211,29 @@ jobs:
         with:
           name: sdist
           path: dist
-      - name: Publish to PyPI
-        # SHA-pinned (SonarCloud rule githubactions:S7637). The
-        # trailing comment names the human-readable tag this SHA
-        # resolves to. Authenticates via the ``PYPI_API_TOKEN`` repo
-        # secret — create it once at
-        # https://pypi.org/manage/account/token/ (scope to the
-        # ``posecascade`` project) and add it under
-        # Settings → Secrets and variables → Actions.
-        uses: pypa/gh-action-pypi-publish@6733eb7d741f0b11ec6a39b58540dab7590f9b7d  # v1.14.0
+      - uses: actions/setup-python@v5
         with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
+          python-version: "3.14"
+      - name: Install twine
+        run: pip install --upgrade twine
+      - name: Publish to PyPI
+        # Direct ``twine upload`` instead of pypa/gh-action-pypi-publish.
+        # The action is a Docker-based GitHub Action that resolves its
+        # container image tag from the action's ``uses:`` ref — when
+        # pinned to a SHA, Docker tries to pull
+        # ghcr.io/pypa/gh-action-pypi-publish:<SHA> which the maintainer
+        # never publishes (only ``v1.x.y`` tags exist on ghcr.io), so
+        # the pull fails with ``manifest unknown``. SonarCloud rule
+        # githubactions:S7637 requires SHA pinning on third-party
+        # actions, so the cleanest exit is to drop the action entirely
+        # and call twine ourselves — no third-party action involved,
+        # rule cleared, image-pull problem gone. ``--skip-existing``
+        # makes re-runs idempotent if the same version was already
+        # uploaded.
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: twine upload --skip-existing --non-interactive dist/*
 
   # ---------------------------------------------------------------------
   # build_exe: Nuitka --onefile Windows .exe with the same version.
