@@ -6,8 +6,11 @@ name: Tests
 # * ``security`` — ``bandit`` over ``posecascade/`` with the project's
 #   skip config. Also fast.
 # * ``test`` — the full pytest suite under Linux + Python 3.12 / 3.13 /
-#   3.14. Uses ``xvfb-run`` so the Qt + offscreen-GL fixtures have a
-#   virtual display; Cython kernel is compiled in-place by
+#   3.14. Uses Qt's ``offscreen`` platform plugin (via the
+#   ``QT_QPA_PLATFORM`` env var) so ``QApplication`` constructs
+#   without needing a real display, and GL-dependent tests skip
+#   cleanly when the offscreen plugin can't provide a working GL
+#   context. Cython kernel is compiled in-place by
 #   ``pip install -e .[dev,ai]``.
 #
 # Windows / macOS test runs are intentionally out of scope here —
@@ -63,23 +66,34 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install system libs for Qt + offscreen GL
-        # libxcb-cursor0 is needed by Qt 6.5+ on every Linux runner.
-        # libgl1 / libegl1 / libdbus-1-3 are the minimum to get
-        # QOpenGLContext::create to succeed under ``xvfb``.
+        # Qt 6.7+ on Linux dynamically resolves these even with the
+        # ``offscreen`` plugin: ``libegl1`` / ``libgl1`` back
+        # ``QOffscreenSurface`` + ``QOpenGLContext``, ``libfontconfig1``
+        # / ``libfreetype6`` keep ``QFontDatabase`` from issuing
+        # ``qFatal`` on first ``QApplication`` instantiation,
+        # ``libxkbcommon0`` is referenced by every Qt platform plugin
+        # (offscreen included), and ``libdbus-1-3`` is hard-wired to
+        # ``QGuiApplicationPrivate`` initialisation.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            xvfb libegl1 libgl1 libxkbcommon0 libdbus-1-3 \
-            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
-            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-cursor0
+            libegl1 libgl1 libxkbcommon0 libdbus-1-3 \
+            libfontconfig1 libfreetype6
       - name: Install project (editable + dev extras)
         run: pip install -e ".[dev,ai]"
-      - name: Run pytest under xvfb
-        # ``xvfb-run -a`` allocates a virtual X display per invocation
-        # so Qt's QApplication can create real (offscreen) windows.
-        # Test_export_video skips on CI because ffmpeg isn't installed
-        # by default; keep that exclusion explicit so a missing
-        # ffmpeg doesn't fail the suite.
+      - name: Run pytest
+        # ``QT_QPA_PLATFORM=offscreen`` avoids the xcb plugin entirely
+        # — the failure mode "Fatal Python error: Aborted" inside
+        # ``QApplication([])`` is xcb's ``qFatal`` after it fails to
+        # connect to the (non-existent) display. ``offscreen`` needs
+        # no display at all and still backs ``QOffscreenSurface`` +
+        # ``QOpenGLContext`` so the GL fixtures keep working where
+        # the platform supports them (or skip cleanly where it
+        # doesn't). Test_export_video is excluded because ffmpeg
+        # isn't installed by default on Ubuntu runners; the engine
+        # itself never depends on ffmpeg, only that one test does.
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: |
-          xvfb-run -a python -m pytest tests/ -q \
+          python -m pytest tests/ -q \
             --ignore=tests/test_export_video.py
