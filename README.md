@@ -1,7 +1,7 @@
 # PoseCascade
 
 > **Languages**: **English** · [繁體中文](README.zh-TW.md) · [简体中文](README.zh-CN.md)
-> **Documentation**: [Read the Docs source](docs/) (Sphinx)
+> **Documentation**: <https://posecascade.readthedocs.io/en/latest/>
 
 A PySide6 + OpenGL desktop engine for importing 3D models and driving
 them with sandboxed scripts. The visual target is MMD: toon shading
@@ -25,8 +25,8 @@ PBD cloth solver fast enough to drape several pieces in real time.
   dance-stage abstraction (floor + back wall + side walls), and a
   selection-overlay pass that re-outlines the picked top-level holder
   in a bright contrast colour. See
-  [`docs/rendering_pipeline.md`](docs/rendering_pipeline.md) for the
-  full pass order + per-pass toggles.
+  [`docs/rendering_pipeline.md`](https://posecascade.readthedocs.io/en/latest/rendering_pipeline.html)
+  for the full pass order + per-pass toggles.
 - **VMD-driven animation**: per-bone / per-morph / per-camera tracks
   with the four-control-point bezier interpolation MMD uses, IK
   solver, foot planter, external-parent bindings between slots,
@@ -43,7 +43,8 @@ PBD cloth solver fast enough to drape several pieces in real time.
   profile-inheritance mechanism and array shorthands (`[from, to]`
   curves, `[x, y, z]` translation, `x` / `y` / `z` bone axis aliases)
   so a typical authoring file is a third the size of one written
-  out longhand. See [`docs/declarative_animation.md`](docs/declarative_animation.md).
+  out longhand. See
+  [`docs/declarative_animation.md`](https://posecascade.readthedocs.io/en/latest/declarative_animation.html).
 - **In-editor animation editor** (new): two right-column docks
   bound to one shared document — a JSON editor with syntax
   highlighting, line-number gutter, inline error marks, format
@@ -52,7 +53,8 @@ PBD cloth solver fast enough to drape several pieces in real time.
   vertical phase cards, and an inline form covering every common
   field (name / duration / blends / pose / gait / body translation /
   bones / morphs). Ctrl+Z / Ctrl+Y undo/redo across both views.
-  See [`docs/animation_editor.md`](docs/animation_editor.md).
+  See
+  [`docs/animation_editor.md`](https://posecascade.readthedocs.io/en/latest/animation_editor.html).
 - **GPU compute skinning** (new): an OpenGL 4.3 compute-shader path
   for `passive_skin_deform` cloth pieces does LBS + collider push +
   world-to-local on the GPU, writing directly into the mesh's
@@ -66,7 +68,7 @@ PBD cloth solver fast enough to drape several pieces in real time.
 - **MCP server**: a Model Context Protocol server lets any MCP-aware
   LLM agent drive the engine — list and validate declarative animation
   scripts, inspect models, and benchmark the cloth solver. See
-  [`docs/mcp.md`](docs/mcp.md).
+  [`docs/mcp.md`](https://posecascade.readthedocs.io/en/latest/mcp.html).
 
 ## Quick start
 
@@ -135,23 +137,25 @@ python examples/compare_lights.py   # primary only vs + HighDef rim + fill
 
 ## Documentation
 
-The Sphinx tree under [`docs/`](docs/) covers:
+The Sphinx tree at <https://posecascade.readthedocs.io/en/latest/>
+covers:
 
-- [`docs/rendering_pipeline.md`](docs/rendering_pipeline.md) — what each
-  render pass does and the toggles that turn it on / off.
-- [`docs/declarative_animation.md`](docs/declarative_animation.md) —
-  authoring JSON animations: phases, gaits, curves, the expression
+- [Rendering pipeline](https://posecascade.readthedocs.io/en/latest/rendering_pipeline.html)
+  — what each render pass does and the toggles that turn it on / off.
+- [Declarative animation](https://posecascade.readthedocs.io/en/latest/declarative_animation.html)
+  — authoring JSON animations: phases, gaits, curves, the expression
   DSL, `extends` profile inheritance, and the array shorthands.
-- [`docs/animation_editor.md`](docs/animation_editor.md) — using the
-  in-editor JSON dock + phase blocks dock with timeline + curve
-  editor + undo/redo.
-- [`docs/mcp.md`](docs/mcp.md) — the Model Context Protocol server
-  surface (tools, parameters, return shapes).
-- [`docs/packaging_pyinstaller.md`](docs/packaging_pyinstaller.md) —
-  shipping PoseCascade as a standalone executable with PyInstaller.
-- [`docs/packaging_nuitka.md`](docs/packaging_nuitka.md) — same
-  again with Nuitka (compiled binary, smaller / faster, longer
-  build).
+- [Animation editor](https://posecascade.readthedocs.io/en/latest/animation_editor.html)
+  — using the in-editor JSON dock + phase blocks dock with timeline
+  + curve editor + undo/redo.
+- [MCP server](https://posecascade.readthedocs.io/en/latest/mcp.html)
+  — the Model Context Protocol server surface (tools, parameters,
+  return shapes).
+- [Packaging with PyInstaller](https://posecascade.readthedocs.io/en/latest/packaging_pyinstaller.html)
+  — shipping PoseCascade as a standalone executable with PyInstaller.
+- [Packaging with Nuitka](https://posecascade.readthedocs.io/en/latest/packaging_nuitka.html)
+  — same again with Nuitka (compiled binary, smaller / faster,
+  longer build).
 
 For contributor / maintainer notes (dev workflow, CI workflows,
 release pipeline, performance numbers), see

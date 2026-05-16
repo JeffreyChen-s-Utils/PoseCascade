@@ -1,7 +1,7 @@
 # PoseCascade
 
 > **語言**：[English](README.md) · **繁體中文** · [简体中文](README.zh-CN.md)
-> **文件**：[Read the Docs 原始碼](docs/)（Sphinx）
+> **文件**：<https://posecascade.readthedocs.io/en/latest/>
 
 一個以 PySide6 + OpenGL 打造的桌面引擎，用來匯入 3D 模型並以沙箱化腳本驅動它們。
 視覺目標是 MMD 風格：卡通著色搭配清晰的 inverted-hull 描邊、PMX 材質帶 sphere map、
@@ -18,7 +18,7 @@ VMD 風格動畫曲線、IK + 腳掌貼地、morph target，以及可即時擺�
   可選的對偶四元數蒙皮（保持關節體積）、預設 AutoLuminous bloom、MMD tone-curve 後處理、
   程序化舞台抽象（地板 + 背牆 + 側牆），以及一個 selection-overlay pass，會用對比色把
   選中的 top-level holder 再描一次邊。完整 pass 順序與每個 pass 的開關見
-  [`docs/rendering_pipeline.md`](docs/rendering_pipeline.md)。
+  [`docs/rendering_pipeline.md`](https://posecascade.readthedocs.io/en/latest/rendering_pipeline.html)。
 - **VMD 驅動動畫**：per-bone / per-morph / per-camera 軌道，使用 MMD 慣用的四控制點
   貝茲插值、IK 求解器、腳掌貼地器、slot 之間的 external-parent 綁定、display-frame
   群組以及 physics 鏈。
@@ -30,13 +30,14 @@ VMD 風格動畫曲線、IK + 腳掌貼地、morph target，以及可即時擺�
   gaits、body trajectories、morph 時間線、行內 expression DSL，加上 `extends`
   繼承機制與陣列簡寫（`[from, to]` 曲線、`[x, y, z]` 平移、bones 的 `x`/`y`/`z`
   軸別名），把典型動畫檔長度縮到原本長寫法的 1/3。詳見
-  [`docs/declarative_animation.md`](docs/declarative_animation.md)。
+  [`docs/declarative_animation.md`](https://posecascade.readthedocs.io/en/latest/declarative_animation.html)。
 - **編輯器內動畫編輯器**（新）：兩個共用同一份 in-memory document 的右側 dock——
   JSON 編輯器具備語法上色、行號 gutter、parse error 行內標記、Format 按鈕、
   dirty indicator；Phase 方塊 dock 則有橫向時間軸（拖曳重排 + 拖邊緣調 duration）、
   縱向卡片列表，加上 inline 表單覆蓋所有常用欄位（name / duration / blends /
   pose / gait / body translation / bones / morphs）。兩邊都接 Ctrl+Z / Ctrl+Y
-  undo/redo。詳見 [`docs/animation_editor.md`](docs/animation_editor.md)。
+  undo/redo。詳見
+  [`docs/animation_editor.md`](https://posecascade.readthedocs.io/en/latest/animation_editor.html)。
 - **GPU compute 蒙皮**（新）：用 OpenGL 4.3 compute shader 把 `passive_skin_deform`
   布料的 LBS + 碰撞推開 + world-to-local 都搬到 GPU，直接寫進 mesh 的 position
   與 normal VBO。在 30k-vert 身體 mesh 上把每幀 cloth + apply_cloth 從 ~9 ms 降到
@@ -46,7 +47,7 @@ VMD 風格動畫曲線、IK + 腳掌貼地、morph target，以及可即時擺�
   數學 API，讓使用者擺姿勢、打 keyframe、做動畫，不必碰引擎內部。
 - **MCP 伺服器**：一個 Model Context Protocol 伺服器，讓任何支援 MCP 的 LLM agent
   都能驅動引擎——列出並驗證聲明式動畫腳本、檢查模型、跑布料 benchmark。詳見
-  [`docs/mcp.md`](docs/mcp.md)。
+  [`docs/mcp.md`](https://posecascade.readthedocs.io/en/latest/mcp.html)。
 
 ## 快速開始
 
@@ -113,22 +114,23 @@ python examples/compare_lights.py   # 只開主光 vs + HighDef rim + fill
 
 ## 文件
 
-[`docs/`](docs/) 下的 Sphinx 樹涵蓋：
+<https://posecascade.readthedocs.io/en/latest/> 上的 Sphinx 樹涵蓋：
 
-- [`docs/rendering_pipeline.md`](docs/rendering_pipeline.md) —— 每個 render
-  pass 做什麼、開關怎麼按。
-- [`docs/declarative_animation.md`](docs/declarative_animation.md) ——
-  撰寫 JSON 動畫：phases、gaits、curves、expression DSL、`extends`
-  profile 繼承,以及陣列簡寫。
-- [`docs/animation_editor.md`](docs/animation_editor.md) —— 編輯器內
-  JSON dock + Phase blocks dock(時間軸 + 曲線編輯器 + undo/redo)
-  的使用說明。
-- [`docs/mcp.md`](docs/mcp.md) —— Model Context Protocol 伺服器的
-  工具、參數、回傳格式。
-- [`docs/packaging_pyinstaller.md`](docs/packaging_pyinstaller.md)
+- [Rendering pipeline](https://posecascade.readthedocs.io/en/latest/rendering_pipeline.html)
+  —— 每個 render pass 做什麼、開關怎麼按。
+- [Declarative animation](https://posecascade.readthedocs.io/en/latest/declarative_animation.html)
+  —— 撰寫 JSON 動畫:phases、gaits、curves、expression DSL、
+  `extends` profile 繼承,以及陣列簡寫。
+- [Animation editor](https://posecascade.readthedocs.io/en/latest/animation_editor.html)
+  —— 編輯器內 JSON dock + Phase blocks dock(時間軸 + 曲線編輯器
+  + undo/redo)的使用說明。
+- [MCP server](https://posecascade.readthedocs.io/en/latest/mcp.html)
+  —— Model Context Protocol 伺服器的工具、參數、回傳格式。
+- [Packaging with PyInstaller](https://posecascade.readthedocs.io/en/latest/packaging_pyinstaller.html)
   —— 用 PyInstaller 把 PoseCascade 包成獨立執行檔。
-- [`docs/packaging_nuitka.md`](docs/packaging_nuitka.md) —— 同樣的
-  事改用 Nuitka(編譯成原生二進位,體積更小 / 啟動更快,但 build 較久)。
+- [Packaging with Nuitka](https://posecascade.readthedocs.io/en/latest/packaging_nuitka.html)
+  —— 同樣的事改用 Nuitka(編譯成原生二進位,體積更小 / 啟動更快,
+  但 build 較久)。
 
 貢獻者 / 維護者文件(開發流程、CI、release pipeline、效能數字)在
 [`DEVELOPMENT.md`](DEVELOPMENT.md)。
