@@ -253,13 +253,20 @@ jobs:
           persist-credentials: false   # Nuitka build; no push
       - uses: actions/setup-python@v5
         with: { python-version: "3.14" }
-      - name: Install project + Nuitka toolchain
+      - name: Install build deps + project + Nuitka toolchain
         env:
           SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.compute_version.outputs.version }}
         run: |
+          pip install --upgrade pip
+          pip install "setuptools>=68" "wheel" "Cython>=3.0" "numpy>=1.26" "setuptools-scm>=8"
           pip install -e .
           pip install "nuitka>=2.5" ordered-set zstandard
       - name: Build the cloth Cython kernel in-place
+        # ``python setup.py build_ext --inplace`` invokes setup.py
+        # directly against the active interpreter, bypassing pip's
+        # PEP 517 build-isolation env. That means setuptools, wheel,
+        # Cython, and numpy headers all have to be visible in the
+        # active env at this point — installed in the previous step.
         env:
           SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.compute_version.outputs.version }}
         run: python setup.py build_ext --inplace
