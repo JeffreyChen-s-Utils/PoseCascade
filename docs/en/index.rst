@@ -541,48 +541,12 @@ degrades to a pure-NumPy fallback. Same API, ~9× slower.
 
 A separate **GPU compute path** handles ``passive_skin_deform``
 cloth pieces — large character meshes that need LBS + collider push
-on every vertex but don't need full PBD. The OpenGL 4.3 compute
-shader at ``shaders/passive_skin/passive_skin_push.comp`` writes
-directly into the mesh's existing position + normal VBOs, dropping
-the per-frame cost on a 30 k-vert body mesh from ~9 ms on the CPU
-to under 0.05 ms. Falls back transparently to the CPU LBS path
-when the context lacks 4.3 / compute support. See
-:doc:`/rendering_pipeline` for the dispatcher API and integration
-details.
-
-Benchmarks (480-vert skirt, 8 iterations / step, 100-step warmup,
-best of three runs):
-
-.. list-table::
-   :header-rows: 1
-   :widths: 50 25 25
-
-   * - Stage
-     - ms/step
-     - vs baseline
-   * - Baseline (pre-tuning)
-     - 3.225
-     - —
-   * - NumPy: einsum + combined bincount
-     - 2.085
-     - −35%
-   * - Cython kernel
-     - 0.356
-     - **−89%**
-   * - Cython + broad-phase + bin culling
-     - 0.36–0.38
-     - + extra 30% for single-bin colliders
-
-Reproduce locally with the MCP ``cloth_benchmark`` tool, or directly:
-
-.. code-block:: python
-
-   from posecascade.mcp.server import _cloth_benchmark_impl
-   result = _cloth_benchmark_impl(rows=20, cols=24, steps=600)
-   print(result["ms_per_step"], result["native_kernel"])
-
-``native_kernel: true`` means the Cython extension loaded; ``false``
-means the NumPy fallback is running.
+on every vertex but don't need full PBD. The engine auto-routes to
+it when the active OpenGL context is 4.3 or newer and falls back
+transparently to the CPU LBS path otherwise; nothing else changes
+on the authoring side. See :doc:`/rendering_pipeline` for the
+fallback conditions and the platforms that exercise the GPU path
+out of the box.
 
 ----
 
@@ -654,100 +618,6 @@ For the full surface (signatures, path safety, schema details), see
 
 ----
 
-Project layout
---------------
-
-::
-
-   PoseCascade/
-   ├── posecascade/                # main package
-   │   ├── animation/              # cloth, skin, morphs, IK, VMD tracks
-   │   │   ├── cloth.py            # PBD solver (Python orchestration)
-   │   │   └── _cloth_kernels.pyx  # Cython inner loop
-   │   ├── app/                    # QApplication bootstrap, main window
-   │   ├── assets/                 # cache, path safety, importer manager
-   │   ├── gl/                     # GL context, shaders, framebuffers
-   │   ├── mcp/                    # Model Context Protocol server
-   │   ├── render/                 # render graph, materials, lights
-   │   ├── scene/                  # scene graph, transforms, components
-   │   ├── scripting/              # sandbox host + declarative runtime
-   │   └── ui/                     # viewport, outliner, inspector, timeline
-   ├── importers/<format>/         # per-format importer plugins
-   ├── shaders/                    # GLSL by render pass
-   ├── examples/                   # bundled models + animation scripts
-   ├── tests/                      # pytest suite mirroring the package
-   ├── docs/                       # this Sphinx tree
-   ├── schemas/                    # JSON schemas (declarative animation)
-   ├── setup.py                    # cythonize build hook
-   └── pyproject.toml              # metadata + ruff / bandit config
-
-----
-
-Development workflow
---------------------
-
-Definition of Done
-^^^^^^^^^^^^^^^^^^
-
-Every change must satisfy three gates before commit (see
-``CLAUDE.md``):
-
-.. code-block:: bash
-
-   .venv/Scripts/python.exe -m pytest tests/
-   .venv/Scripts/python.exe -m ruff check .
-   .venv/Scripts/python.exe -m bandit -c pyproject.toml -r posecascade/
-
-The ``-c`` flag on bandit is **required** — without it bandit ignores
-the project skip config and the run will be noisy.
-
-Rebuilding the Cython kernel
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-The cloth Cython kernel must be re-built in place after any change
-to ``_cloth_kernels.pyx``:
-
-.. code-block:: bash
-
-   .venv/Scripts/python.exe setup.py build_ext --inplace
-
-Tests
-^^^^^
-
-Tests mirror the package layout: each production module
-``posecascade/<area>/<feature>.py`` has a paired
-``tests/test_<feature>.py``. Run the whole suite:
-
-.. code-block:: bash
-
-   .venv/Scripts/python.exe -m pytest tests/
-
-GL-heavy tests use the ``gl_context`` fixture which spins up an
-offscreen ``QOpenGLContext`` — they skip cleanly with
-``pytest.skip("no GL")`` on systems where context creation fails,
-so headless CI runners don't false-fail.
-
-Golden-image tests under ``tests/render/`` diff the rendered frame
-against ``tests/golden/*.png`` using SSIM with a documented per-test
-tolerance.
-
-Linting + security
-^^^^^^^^^^^^^^^^^^
-
-Ruff catches most style issues automatically. The project enforces
-SonarQube / Codacy / pylint default rules (complexity ≤ 15,
-function length ≤ 75 lines, file length ≤ 1000 lines, no magic
-numbers, no bare ``except``, no mutable default args). Bandit
-scans for security-relevant patterns (``pickle.load``, ``yaml.load``
-without SafeLoader, MD5 / SHA-1 for security, ``shell=True``).
-
-Project-wide skips live in ``.bandit`` and mirror in
-``pyproject.toml`` ``[tool.bandit]``. Per-line suppressions need a
-brief justification on the same line, e.g.
-``# nosec B102  # restricted globals; see sandbox.py``.
-
-----
-
 Troubleshooting
 ---------------
 
@@ -764,18 +634,6 @@ Intel iGPUs without a current driver, Qt may fall back to OpenGL
   (``libgl1-mesa-glx`` on Debian-based Linux).
 * If you only need the MCP server, the ``ai`` extra works on any
   CPU — no GL context is created.
-
-Cloth solver is slow
-^^^^^^^^^^^^^^^^^^^^
-
-Check ``cloth_benchmark`` reports ``native_kernel: true``. If
-``false``, the Cython extension didn't compile. Look for warnings
-from ``pip install -e .`` and verify a C compiler is on PATH:
-
-* **Windows**: install Microsoft Build Tools 2022 with the C++
-  workload. Re-run ``pip install -e .[dev]``.
-* **Linux**: ``apt install build-essential python3.14-dev``.
-* **macOS**: ``xcode-select --install``.
 
 Imported model is invisible / appears as a single bone
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

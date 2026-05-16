@@ -495,43 +495,9 @@ Cython 擴展沒編譯的話，kernel 會透明退回 NumPy fallback。一樣的
 
 另外有一條 **GPU compute 路徑**，專處理 ``passive_skin_deform`` 布料
 （大型角色 mesh 需要 LBS + collider push 但不需要完整 PBD 的場景）。
-OpenGL 4.3 compute shader 位於
-``shaders/passive_skin/passive_skin_push.comp``，直接寫進 mesh 既有的
-position / normal VBO，在 30k-vert 身體 mesh 上把每幀成本從 ~9 ms（CPU）
-壓到 0.05 ms 以下。GL 版本低於 4.3 / compute 編譯失敗時透明退回 CPU LBS。
-dispatcher API 與整合細節見 :doc:`/rendering_pipeline`。
-
-Benchmark（480-vert 裙、每步 8 次迭代、100-step warmup、三次中最佳）：
-
-.. list-table::
-   :header-rows: 1
-   :widths: 50 25 25
-
-   * - 階段
-     - ms/step
-     - vs baseline
-   * - Baseline（優化前）
-     - 3.225
-     - —
-   * - NumPy：einsum + 合併 bincount
-     - 2.085
-     - −35%
-   * - Cython kernel
-     - 0.356
-     - **−89%**
-   * - Cython + broad-phase + bin culling
-     - 0.36–0.38
-     - 單 bin collider 多省 30%
-
-本地重現可以呼叫 MCP 的 ``cloth_benchmark`` 工具，或直接：
-
-.. code-block:: python
-
-   from posecascade.mcp.server import _cloth_benchmark_impl
-   result = _cloth_benchmark_impl(rows=20, cols=24, steps=600)
-   print(result["ms_per_step"], result["native_kernel"])
-
-``native_kernel: true`` 代表 Cython 擴展有載入；``false`` 代表跑的是 NumPy fallback。
+作用中的 OpenGL context 為 4.3 以上時引擎自動切到這條快速路徑，否則
+透明退回 CPU LBS，作者那一側沒任何感覺。回退條件與哪些平台預設走 GPU
+路徑的說明，見 :doc:`/rendering_pipeline`。
 
 ----
 
@@ -597,94 +563,6 @@ Repo 內附的 ``.mcp.json`` 是專案層級設定，Claude Code（與其他 MCP
 
 ----
 
-專案結構
---------
-
-::
-
-   PoseCascade/
-   ├── posecascade/                # 主套件
-   │   ├── animation/              # 布料、蒙皮、morph、IK、VMD 軌道
-   │   │   ├── cloth.py            # PBD 求解器（Python 編排）
-   │   │   └── _cloth_kernels.pyx  # Cython 內迴圈
-   │   ├── app/                    # QApplication bootstrap、主視窗
-   │   ├── assets/                 # 快取、路徑安全、importer 管理
-   │   ├── gl/                     # GL context、shader、framebuffer
-   │   ├── mcp/                    # Model Context Protocol 伺服器
-   │   ├── render/                 # 渲染圖、材質、燈光
-   │   ├── scene/                  # scene graph、transform、component
-   │   ├── scripting/              # 沙箱 host + 聲明式 runtime
-   │   └── ui/                     # viewport、outliner、inspector、timeline
-   ├── importers/<format>/         # 每個格式各自的 importer 外掛
-   ├── shaders/                    # 按 render pass 分類的 GLSL
-   ├── examples/                   # 隨附模型 + 動畫腳本
-   ├── tests/                      # pytest 測試，鏡射套件結構
-   ├── docs/                       # 這份 Sphinx 樹
-   ├── schemas/                    # JSON schema（聲明式動畫）
-   ├── setup.py                    # cythonize build hook
-   └── pyproject.toml              # metadata + ruff / bandit 設定
-
-----
-
-開發流程
---------
-
-Definition of Done
-^^^^^^^^^^^^^^^^^^
-
-每個變更在 commit 之前都要過三道閘門（詳見 ``CLAUDE.md``）：
-
-.. code-block:: bash
-
-   .venv/Scripts/python.exe -m pytest tests/
-   .venv/Scripts/python.exe -m ruff check .
-   .venv/Scripts/python.exe -m bandit -c pyproject.toml -r posecascade/
-
-bandit 的 ``-c`` flag 是 **必須的**——沒有它 bandit 會忽略專案 skip 設定，
-跑出來會很吵。
-
-重建 Cython kernel
-^^^^^^^^^^^^^^^^^^
-
-每次改 ``_cloth_kernels.pyx`` 之後布料 Cython kernel 都要重新就地建構：
-
-.. code-block:: bash
-
-   .venv/Scripts/python.exe setup.py build_ext --inplace
-
-測試
-^^^^
-
-測試結構鏡射套件結構：每個 production 模組
-``posecascade/<area>/<feature>.py`` 都有配對的 ``tests/test_<feature>.py``。
-跑整套：
-
-.. code-block:: bash
-
-   .venv/Scripts/python.exe -m pytest tests/
-
-GL-heavy 測試用 ``gl_context`` fixture，會起一個 offscreen ``QOpenGLContext`` ——
-建立 context 失敗的系統會 clean skip 成 ``pytest.skip("no GL")``，
-這樣 headless CI runner 不會 false-fail。
-
-``tests/render/`` 底下的 golden-image 測試會把渲染出來的 frame 跟
-``tests/golden/*.png`` 用 SSIM 比較（每個測試自己的容差）。
-
-Lint + 安全
-^^^^^^^^^^^
-
-Ruff 自動抓大部分 style 問題。專案套用 SonarQube / Codacy / pylint
-預設規則（複雜度 ≤ 15、function 長度 ≤ 75 行、檔案長度 ≤ 1000 行、
-不准 magic number、不准 bare ``except``、不准 mutable default arg）。
-Bandit 掃安全相關 pattern（``pickle.load``、沒帶 SafeLoader 的 ``yaml.load``、
-給安全用途的 MD5 / SHA-1、``shell=True``）。
-
-專案範圍的 skip 放在 ``.bandit``，並鏡射到 ``pyproject.toml`` 的
-``[tool.bandit]``。Per-line 抑制需要在同一行附簡短理由，例如
-``# nosec B102  # restricted globals; see sandbox.py``。
-
-----
-
 疑難排解
 --------
 
@@ -700,17 +578,6 @@ iGPU 上，Qt 可能 fall back 到 OpenGL 1.4 然後在 shader compile 時 crash
   或在 Debian 系 Linux 上裝 Mesa software rasteriser（``libgl1-mesa-glx``）。
 * 只需要 MCP 伺服器的話，``ai`` extra 在任何 CPU 上都能跑——
   不會建 GL context。
-
-布料 solver 跑很慢
-^^^^^^^^^^^^^^^^^^
-
-檢查 ``cloth_benchmark`` 回報 ``native_kernel: true``。如果是 ``false``，
-Cython 擴展沒編譯。找 ``pip install -e .`` 的警告，並確認 C 編譯器在 PATH 上：
-
-* **Windows**：裝 Microsoft Build Tools 2022 + C++ workload。重跑
-  ``pip install -e .[dev]``。
-* **Linux**：``apt install build-essential python3.14-dev``。
-* **macOS**：``xcode-select --install``。
 
 匯入的模型看不見 / 只剩一根骨頭
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

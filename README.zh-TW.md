@@ -111,125 +111,23 @@ python examples/compare_dqs.py      # LBS 糖果包裝 vs DQS 極限扭轉
 python examples/compare_lights.py   # 只開主光 vs + HighDef rim + fill
 ```
 
-## 專案結構
+## 文件
 
-```
-PoseCascade/
-├── posecascade/                  # 主套件
-│   ├── animation/                # 布料、蒙皮、morph、IK、VMD 軌道
-│   │   ├── cloth.py              # PBD 求解器（Python 編排層）
-│   │   └── _cloth_kernels.pyx    # Cython 內迴圈（由 setup.py 建構）
-│   ├── app/                      # QApplication bootstrap、主視窗
-│   ├── assets/                   # 快取、路徑安全、importer 管理員
-│   ├── gl/                       # GL context、shader、framebuffer
-│   ├── mcp/                      # Model Context Protocol 伺服器
-│   ├── render/                   # 渲染圖、材質、燈光
-│   ├── scene/                    # scene graph、transform、component
-│   ├── scripting/                # 沙箱腳本主機 + 聲明式 runtime
-│   └── ui/                       # viewport、outliner、inspector、timeline
-├── importers/<format>/           # 每個格式各自的 importer 外掛
-├── shaders/                      # 按 render pass 分類的 GLSL
-├── examples/                     # 隨附模型 + 動畫腳本
-├── tests/                        # pytest 測試套件，鏡射套件結構
-├── docs/                         # 設計 + 整合文件
-├── schemas/                      # JSON schema（聲明式動畫）
-├── setup.py                      # cythonize build hook
-└── pyproject.toml                # 專案 metadata + ruff / bandit 設定
-```
+[`docs/`](docs/) 下的 Sphinx 樹涵蓋：
 
-## 開發
+- [`docs/rendering_pipeline.md`](docs/rendering_pipeline.md) —— 每個 render
+  pass 做什麼、開關怎麼按。
+- [`docs/declarative_animation.md`](docs/declarative_animation.md) ——
+  撰寫 JSON 動畫：phases、gaits、curves、expression DSL、`extends`
+  profile 繼承,以及陣列簡寫。
+- [`docs/animation_editor.md`](docs/animation_editor.md) —— 編輯器內
+  JSON dock + Phase blocks dock(時間軸 + 曲線編輯器 + undo/redo)
+  的使用說明。
+- [`docs/mcp.md`](docs/mcp.md) —— Model Context Protocol 伺服器的
+  工具、參數、回傳格式。
 
-[`CLAUDE.md`](CLAUDE.md) 裡的 Definition of Done 要求每個變更在 commit 之前
-都要通過三道閘門。本地重現：
-
-```bash
-.venv/Scripts/python.exe -m pytest tests/             # unit + offscreen-GL 測試
-.venv/Scripts/python.exe -m ruff check .              # lint + style
-.venv/Scripts/python.exe -m bandit -c pyproject.toml -r posecascade/
-```
-
-布料 Cython kernel 每次改 `.pyx` 原始碼後都要重新就地建構：
-
-```bash
-.venv/Scripts/python.exe setup.py build_ext --inplace
-```
-
-要散布的時候，`pyproject.toml` 裡的 `[tool.cibuildwheel]` 區段會在
-Win / macOS / Linux × 各支援 Python 版本上產出預建 wheel；
-`.github/workflows/wheels.yml` 在 tag push 時觸發那個流程。
-
-## 持續整合 + 自動發布
-
-三個 GitHub Actions workflow 串起整條 pipeline：
-
-- **`tests.yml`** 在每個 PR 跟每次 push 到 `main` 跑 `ruff` + `bandit` +
-  完整 `pytest`（透過 `xvfb-run` 讓 Qt 跑得起來）。三個 Python 版本
-  （3.12 / 3.13 / 3.14）在 Ubuntu 上。
-- **`release.yml`** 在每次 push 到 `main` 跑——讀最新的 `v*` git tag，
-  bump patch 版本（commit subject 含 `[release major]` / `[release minor]`
-  則改成對應的 bump），然後 push 新 tag。docs-only PR 想跳過時在 merge
-  commit message 裡寫 `[skip release]`。
-- **`wheels.yml`** 在新 tag push 時觸發，透過 `cibuildwheel` 跑全 OS ×
-  Python 矩陣、跑 in-wheel smoke test，然後透過 Trusted Publishing
-  **自動發布到 PyPI**——repo 不需要存任何 API token。
-
-整體效果：merge 一個 PR 就會自動發成一版新的 PyPI release。版號透過
-setuptools-scm 讀剛 push 進去的 tag 取得，`pyproject.toml` 的
-`dynamic = ["version"]` 開啟這個機制。一次性的 PyPI Trusted Publishing
-設定、bump 訊息規則、yank / revert 指引、本地 dry-run 食譜，都在
-[`docs/release_pipeline.md`](docs/release_pipeline.md)。
-
-## 視覺管線
-
-前向渲染器每幀依固定順序跑六個 pass —— depth-map 陰影 pass、scene、地面、
-projected shadow、selection overlay、後處理 effect chain。每個 pass 都有開關
-（`set_ground_enabled`、`set_self_shadow_enabled`、`set_projected_shadow_enabled`、
-`set_selected_holder`），這樣 smoke test 與 headless render 可以選擇關掉某些 pass
-而不影響其他 pass 的像素保真度。完整拆解——pass 順序、shader 檔案、light-space
-數學、texture unit、MMD-fluence gap——都在
-[`docs/rendering_pipeline.md`](docs/rendering_pipeline.md)。
-
-## 效能備註
-
-最近兩條主要的優化路線：布料求解器與渲染器熱路徑。
-
-**布料** —— 480-vert 裙子 benchmark
-（`posecascade.mcp.server.cloth_benchmark`）：
-
-| 階段                                   | ms/step (best) |  vs baseline |
-|----------------------------------------|---------------:|-------------:|
-| Baseline（優化前）                     |          3.225 |            — |
-| NumPy：einsum + 合併 bincount          |          2.085 |         −35% |
-| Cython kernel                          |          0.356 |     **−89%** |
-| Cython + broad-phase + bin culling     |  0.36–0.38（單 bin collider 多省 30%） | — |
-
-showcase 場景中 30k-vert 身體 mesh 那條 passive_skin LBS + 碰撞推開，
-GPU compute 路徑把原本 ~9 ms 的 CPU 成本壓到 0.05 ms 以下，直接寫進 mesh
-既有的 position / normal VBO，沒有 CPU readback。
-
-**渲染器** —— 768×768 showcase 場景開全部 pass（shadow + projected shadow
-+ ground + outline + toon），用 `tools/bench_renderer.py` 跑：
-
-| 階段                                   | ms/frame |    FPS |
-|----------------------------------------|---------:|-------:|
-| Baseline                               |     7.88 |    127 |
-| 每幀 uniform-state 快取                |     6.09 |    164 |
-| + shadow pass 拉出 glUseProgram        |     5.04 |    198 |
-| + 批次 bone-matrix matmul              | **~4.50**| **~220**|
-
-提升來源：per-program「這幀已上傳過」的 uniform 快取省下大約 85% 的
-`glUniformMatrix4fv` / `ascontiguousarray` 呼叫；把 `glUseProgram` 拉出
-depth 與 projected-shadow pass 的 per-mesh 內迴圈；以及把
-`_compute_bone_matrices` 裡每個關節的 Python matmul 換成單一批次 `np.matmul`。
-
-**聲明式 runtime** —— 每幀 parent-world rotation 快取、`lru_cache` 化的
-expression AST 解析、以及只在載入時跑的 `extends` 解析（沒有 per-frame 成本）。
-在 showcase 上 JSON 驅動的 update 穩定在 0.6 ms 左右。
-
-渲染器熱路徑的每幀計時都用 `posecascade.utils.profiling.frame_section` 包起來，
-UI overlay（或自訂測試）能從 `current_stats().sections` 拉出每幀分解。
-`tools/bench_renderer.py` 把 showcase 場景跑指定幀數並印出細目—— renderer 變更
-push 之前可以先用它抓 regression。
+貢獻者 / 維護者文件(開發流程、CI、release pipeline、效能數字)在
+[`DEVELOPMENT.md`](DEVELOPMENT.md)。
 
 ## 授權
 

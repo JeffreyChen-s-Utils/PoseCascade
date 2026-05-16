@@ -133,140 +133,24 @@ python examples/compare_dqs.py      # LBS candy-wrapper vs DQS at extreme twist
 python examples/compare_lights.py   # primary only vs + HighDef rim + fill
 ```
 
-## Project layout
+## Documentation
 
-```
-PoseCascade/
-├── posecascade/                  # main package
-│   ├── animation/                # cloth, skin, morphs, IK, VMD tracks
-│   │   ├── cloth.py              # PBD solver (Python orchestration)
-│   │   └── _cloth_kernels.pyx    # Cython inner loop (built by setup.py)
-│   ├── app/                      # QApplication bootstrap, main window
-│   ├── assets/                   # cache, path safety, importer manager
-│   ├── gl/                       # GL context, shaders, framebuffers
-│   ├── mcp/                      # Model Context Protocol server
-│   ├── render/                   # render graph, materials, lights
-│   ├── scene/                    # scene graph, transforms, components
-│   ├── scripting/                # sandboxed script host + declarative runtime
-│   └── ui/                       # viewport, outliner, inspector, timeline
-├── importers/<format>/           # per-format importer plugins
-├── shaders/                      # GLSL by render pass
-├── examples/                     # bundled models + animation scripts
-├── tests/                        # pytest suite mirroring the package
-├── docs/                         # design + integration docs
-├── schemas/                      # JSON schemas (declarative animation)
-├── setup.py                      # cythonize build hook
-└── pyproject.toml                # project metadata + ruff / bandit config
-```
+The Sphinx tree under [`docs/`](docs/) covers:
 
-## Development
+- [`docs/rendering_pipeline.md`](docs/rendering_pipeline.md) — what each
+  render pass does and the toggles that turn it on / off.
+- [`docs/declarative_animation.md`](docs/declarative_animation.md) —
+  authoring JSON animations: phases, gaits, curves, the expression
+  DSL, `extends` profile inheritance, and the array shorthands.
+- [`docs/animation_editor.md`](docs/animation_editor.md) — using the
+  in-editor JSON dock + phase blocks dock with timeline + curve
+  editor + undo/redo.
+- [`docs/mcp.md`](docs/mcp.md) — the Model Context Protocol server
+  surface (tools, parameters, return shapes).
 
-The Definition of Done (see [`CLAUDE.md`](CLAUDE.md)) requires every
-change to satisfy three gates before commit. Reproduce locally:
-
-```bash
-.venv/Scripts/python.exe -m pytest tests/             # unit + offscreen-GL tests
-.venv/Scripts/python.exe -m ruff check .              # lint + style
-.venv/Scripts/python.exe -m bandit -c pyproject.toml -r posecascade/
-```
-
-The cloth Cython kernel needs an in-place build whenever the `.pyx`
-source changes:
-
-```bash
-.venv/Scripts/python.exe setup.py build_ext --inplace
-```
-
-For distribution, the `[tool.cibuildwheel]` section in
-`pyproject.toml` produces pre-built wheels across Win / macOS / Linux
-× supported Python versions; `.github/workflows/wheels.yml` drives
-that on tag pushes.
-
-## Continuous integration + release
-
-Three GitHub Actions workflows wire the project up:
-
-- **`tests.yml`** runs `ruff` + `bandit` + the full `pytest` suite
-  (under `xvfb-run` for Qt) on every pull request and every push
-  to `main`. Three Python versions (3.12 / 3.13 / 3.14) on Ubuntu.
-- **`release.yml`** runs on every push to `main` — reads the latest
-  `v*` git tag, bumps the patch version (or major / minor if the
-  commit subject contains `[release major]` / `[release minor]`),
-  and pushes the new tag. Include `[skip release]` in the merge
-  commit message to opt out for docs-only PRs.
-- **`wheels.yml`** triggers on the new tag push, builds the full
-  OS × Python matrix via `cibuildwheel`, runs an in-wheel smoke
-  test, and **publishes to PyPI** through Trusted Publishing — no
-  API token is stored in repo secrets.
-
-Net effect: a merged PR becomes a new PyPI release automatically.
-The version comes from setuptools-scm reading the tag the release
-workflow pushed; `pyproject.toml`'s `dynamic = ["version"]` block
-opts into that mechanism. See
-[`docs/release_pipeline.md`](docs/release_pipeline.md) for the
-one-time PyPI Trusted-Publishing setup, bump-message rules,
-yank / revert guidance, and a local dry-run recipe.
-
-## Visual pipeline
-
-The forward renderer runs six passes per frame in fixed order — depth-
-map shadow pass, scene, ground, projected shadow, selection overlay,
-post-process effect chain. Each pass has a toggle (`set_ground_enabled`,
-`set_self_shadow_enabled`, `set_projected_shadow_enabled`,
-`set_selected_holder`) so smoke tests and headless renders can opt
-out without losing pixel fidelity. The full breakdown — pass order,
-shader files, light-space math, texture units, MMD-fluence gaps —
-lives in [`docs/rendering_pipeline.md`](docs/rendering_pipeline.md).
-
-## Performance notes
-
-Two passes through the engine have been the recent focus: the cloth
-solver and the renderer hot path.
-
-**Cloth** — 480-vert skirt benchmark
-(`posecascade.mcp.server.cloth_benchmark`):
-
-| Stage                                  | ms/step (best) | vs baseline |
-|----------------------------------------|---------------:|------------:|
-| Baseline (pre-tuning)                  |          3.225 |           — |
-| NumPy: einsum + combined-bincount      |          2.085 |        −35% |
-| Cython kernel                          |          0.356 |    **−89%** |
-| Cython + broad-phase + bin culling     |          0.36–0.38 (single-bin colliders save 30%) | — |
-
-On the bundled 30 k-vert body mesh in the showcase scene, the GPU
-compute skinning path turns the same passive_skin LBS + collider
-push from a ~9 ms CPU cost into well under 0.05 ms — written
-directly into the mesh's existing position + normal VBOs with no
-CPU readback.
-
-**Renderer** — showcase scene at 768×768 with shadow + projected
-shadow + ground + outline + toon, driven by `tools/bench_renderer.py`:
-
-| Stage                                  | ms/frame |    FPS |
-|----------------------------------------|---------:|-------:|
-| Baseline                               |     7.88 |    127 |
-| Per-frame uniform-state cache          |     6.09 |    164 |
-| + glUseProgram hoisting in shadow pass |     5.04 |    198 |
-| + batched bone-matrix matmul           | **~4.50**| **~220**|
-
-Wins come from a per-program "already uploaded this frame" cache
-that skips ~85% of `glUniformMatrix4fv` / `ascontiguousarray` calls,
-hoisting `glUseProgram` out of per-mesh inner loops in the depth +
-projected-shadow passes, and replacing per-joint Python matmul in
-`_compute_bone_matrices` with a single batched `np.matmul`.
-
-**Declarative runtime** — per-frame parent-world rotation cache,
-an `lru_cache`-backed AST parse for the expression DSL, and an
-`extends` resolver that runs at load time (no per-frame cost). On
-showcase the JSON-driven update step holds steady around 0.6 ms.
-
-Per-frame timing for the renderer hot path is wrapped in
-`posecascade.utils.profiling.frame_section` so a UI overlay (or a
-custom test) can pull a per-frame breakdown out of
-`current_stats().sections`. `tools/bench_renderer.py` drives the
-showcase scene through a fixed number of frames and prints the
-breakdown — useful for spotting regressions before pushing renderer
-changes.
+For contributor / maintainer notes (dev workflow, CI workflows,
+release pipeline, performance numbers), see
+[`DEVELOPMENT.md`](DEVELOPMENT.md).
 
 ## License
 

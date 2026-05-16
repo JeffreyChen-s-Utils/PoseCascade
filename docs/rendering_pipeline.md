@@ -409,124 +409,34 @@ Stack it after `autoluminous` for the canonical MMD post chain. Not
 seeded by default — opt-in via the effect-chain UI or
 `controller.effect_chain.append(load_builtin("mmd_tone"))`.
 
-## CPU-side performance — per-frame uniform-state cache
-
-The forward renderer's hot path used to re-upload the same constant
-uniforms (view / projection / light / shadow / secondary lights /
-bone-matrix palettes) on **every mesh** of **every pass**, paying a
-`np.ascontiguousarray` + `glUniform*` round-trip per upload. On the
-showcase scene with 30 meshes × 3 passes this was ~360 redundant
-matrix uploads per frame and a similar count of array conversions.
-
-The renderer now tracks per-program, per-frame state and skips the
-upload when it's already been written this frame:
-
-```python
-@dataclass
-class _ProgramFrameState:
-    camera_uploaded: bool = False
-    lights_uploaded: bool = False
-    shadow_uploaded: bool = False
-    skin_uploaded: set[int] = field(default_factory=set)
-```
-
-Cleared at the top of every `draw()`. Each upload helper
-(`_set_camera_uniforms`, `_bind_secondary_lights`,
-`_bind_shadow_uniforms`, the skinned branch of
-`_set_geometry_uniforms`) early-returns when its flag is already
-set. View / projection / light vectors and the light-space matrix
-are pre-converted to `float32` once at the top of the frame and
-shared by reference through every per-mesh call.
-
-The shadow pass and the projected-shadow pass additionally hoist
-`glUseProgram` out of the per-mesh inner loop — every skinned mesh
-draws through the same program, so we switch programs only on a
-transition between skinned and unskinned.
-
-`_compute_bone_matrices` was Python-looping a per-joint `world(joint) @ inverse_bind`
-matmul (354 calls per skin per frame on the bundled rig). It now
-stacks all joint world matrices into a single `(J, 4, 4)` buffer
-and issues one batched `np.matmul` against the inverse-bind stack.
-
-Net effect on the showcase scene at 768×768
-(`tools/bench_renderer.py`, three-run averages):
-
-| Step                                   | ms/frame |    FPS |
-|----------------------------------------|---------:|-------:|
-| Baseline                               |     7.88 |    127 |
-| Per-frame uniform-state cache          |     6.09 |    164 |
-| + `glUseProgram` hoisting              |     5.04 |    198 |
-| + batched bone-matrix matmul           | **~4.50**| **~220** |
-
-The `frame_section` breakdown shows `scene_nodes` falling from
-2.68 ms → 0.92 ms (2.9× faster), `shadow_pass` from 3.97 ms → 2.85
-ms, and `projected_shadow` from 0.64 ms → 0.23 ms across the three
-steps. The remaining `shadow_pass` time is dominated by real GPU
-work (depth pass at 2048² for 30+ meshes).
-
 ## GPU compute passive-skin path
 
-`shaders/passive_skin/passive_skin_push.comp` is an OpenGL 4.3
-compute shader that does LBS + collider push + world-to-local
-transform for `passive_skin_deform` cloth pieces on the GPU,
-writing directly into the mesh's existing position + normal VBOs.
-No CPU readback; the next draw call sees the deformed positions
-through the unchanged `glVertexAttribPointer` bindings.
+Large character meshes that flag a cloth piece as
+`passive_skin_deform` (the "skinned mesh that gets pushed out of
+body capsules" pattern — the bundled showcase scene uses this on
+The Herta's body mesh) take an automatic fast path on contexts that
+support OpenGL 4.3 compute shaders. The engine dispatches a compute
+shader that does the LBS + collider push + world-to-local transform
+on the GPU and writes the result directly into the mesh's existing
+position + normal VBOs — no CPU readback, no per-frame upload.
 
-The dispatcher lives in `posecascade/gl/compute_skin.py`:
+The transition is invisible to scripts: register the cloth piece the
+usual way, and the engine routes it through GPU compute when:
 
-```python
-dispatcher = PassiveSkinDispatcher.try_create(shader_path)
-if dispatcher is None:
-    # Driver lacks GL 4.3 / compute — caller stays on CPU LBS.
-    return
-dispatcher.register_piece(
-    piece_id=id(piece),
-    output_position_vbo=gl_mesh.vbos[gl_mesh.position_vbo_index],
-    output_normal_vbo=gl_mesh.vbos[gl_mesh.normal_vbo_index],
-    bind_positions=..., bind_normals=...,
-    joints_per_vert=..., weights_per_vert=...,
-    dominant_joint=...,
-)
-dispatcher.dispatch(
-    piece_id, bone_matrices, world_to_local,
-    colliders, exclude_bits,
-)
-```
+* the active context is OpenGL 4.3 or newer,
+* the compute shader compiles on this driver,
+* the mesh has a normal VBO,
+* the cloth piece has a registered skin-target follower with bind
+  normals available.
 
-Per-piece static buffers (bind positions, bind normals, joint
-indices, weights, dominant-joint-per-vert, collider exclude
-bitmask) are allocated once. Per-frame the dispatcher uploads the
-joint world × inverse-bind palette (shared SSBO across all pieces)
-and the active collider list (UBO, 16-collider cap), then issues
-one `glDispatchCompute(ceil(N / 64), 1, 1)` per piece and a
-`GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT`
-memory barrier so the next draw sees the updated VBO.
+Any failure transparently falls back to the CPU LBS path so the
+animation keeps working on older drivers, macOS legacy GL (capped
+at 4.1), or any platform where compute is stubbed.
 
-`ClothHost.mark_gpu_managed(piece)` toggles the host's CPU LBS off
-for that piece — `_update_skin_targets` still computes the joint
-matrix palette (the renderer's bone-matrix cache reads from it) but
-skips the per-vert gather + matmul that previously dominated the
-hot path. `_project_passive_pieces` and `iter_local_state` also
-skip GPU-managed pieces; the renderer's `apply_cloth_state` adopts
-them late so a script that adds a passive-skin cloth post-load is
-picked up automatically.
-
-On the bundled Herta body mesh (30 k verts, 354 bones, 7 active
-colliders) the per-frame cloth + apply_cloth budget drops from
-~9 ms on the CPU path to under 0.05 ms on GPU compute. Fallback to
-CPU is automatic when:
-
-* the active context is older than 4.3,
-* the compute shader fails to compile (rare; some drivers stub
-  compute even when they advertise 4.3),
-* the mesh has no normal VBO (the shader writes both),
-* the piece has no `_SkinTargetFollower` with `bind_normals`.
-
-Both `examples/_demo_lib.py` and `examples/mmd_demo.py` request
-`QSurfaceFormat.setVersion(4, 3)` so the headless demos exercise
-the GPU path; the interactive viewport's context picks up 4.3 too
-on any reasonable driver.
+To force the headless demos onto the 4.3 path, both
+`examples/_demo_lib.py` and `examples/mmd_demo.py` already request
+`QSurfaceFormat.setVersion(4, 3)`. The interactive viewport's
+context picks up 4.3 on any reasonable driver.
 
 ## What's missing vs full MMD parity
 

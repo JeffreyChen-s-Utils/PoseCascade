@@ -130,39 +130,3 @@ A typical iteration:
 Save + Reload are deliberately distinct: an author who's halfway
 through a malformed edit can Save the buffer for later without
 risking the runtime seeing a parse error.
-
-## API surface (for tests / external tools)
-
-* `posecascade.ui.animation_json_document.AnimationJsonDocument` —
-  the shared model. `load_file(path)`, `save_file()`, `text()`,
-  `set_text(text)`, `phases()`, `add_phase()`, `duplicate_phase(idx)`,
-  `move_phase(from, to)`, `remove_phase(idx)`,
-  `update_phase_field(idx, key, value)`. Signal: `changed`.
-* `posecascade.ui.animation_command_stack.AnimationCommandStack` —
-  whole-document snapshot stack with `begin_transaction` /
-  `end_transaction` / `push_snapshot` / `undo` / `redo` / `clear`
-  and a `changed` signal. Signal-only `can_undo` / `can_redo`
-  predicates back UI button enable state.
-* `posecascade.ui.animation_json_dock.AnimationJsonDock` and
-  `posecascade.ui.phase_blocks_dock.PhaseBlocksDock` — Qt docks.
-  Both accept a shared `AnimationJsonDocument` and a shared
-  `AnimationCommandStack` so MainWindow can wire one instance into
-  both.
-* `posecascade.ui.curve_editor.CurveEditor` — reusable single-curve
-  editor. `value()` / `set_value(value)` round-trip every accepted
-  shape. Signal: `changed(value)`.
-* `posecascade.ui.phase_editors` — `GaitEditor`,
-  `TranslationEditor`, `BonesEditor`, `MorphsEditor`. Same
-  `value()` / `set_value()` / `changed` contract.
-* `posecascade.ui.phase_timeline_view.PhaseTimelineView` — the
-  horizontal bar strip. Signals: `phase_selected(int)`,
-  `phase_moved(int, int)`, `phase_duration_changed(int, float)`.
-
-The tests under `tests/test_animation_json_dock.py`,
-`tests/test_phase_blocks_dock.py`,
-`tests/test_animation_command_stack.py`,
-`tests/test_phase_editors.py`,
-`tests/test_phase_timeline_view.py`,
-`tests/test_curve_editor.py`, and
-`tests/test_json_highlighter.py` exercise each surface against the
-real `QApplication` (no Qt stubbing).
