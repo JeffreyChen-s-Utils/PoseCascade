@@ -47,6 +47,18 @@ jobs:
           fetch-depth: 0   # need full tag history
       - id: v
         shell: bash
+        # The commit message is passed through an env var, not
+        # interpolated into the script body. ``${{ github.event.* }}``
+        # expressions are baked into the shell text at workflow
+        # render time, so a commit subject containing single quotes
+        # (or worse, ``'; rm -rf /; '``) would break out of the
+        # ``msg='...'`` assignment and execute arbitrary code on the
+        # runner. Routing the value through env (which goes through
+        # GitHub Actions' standard string-passing path, not shell
+        # parsing) closes that injection sink — flagged by SonarCloud
+        # as a Security Hotspot on the previous workflow design.
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
           set -euo pipefail
           latest=$(git tag --list 'v*' --sort=-v:refname | head -n1)
@@ -57,11 +69,10 @@ jobs:
             current="${latest#v}"
             IFS='.' read -r major minor patch <<< "$current"
             major=${major:-0}; minor=${minor:-0}; patch=${patch:-0}
-            msg='${{ github.event.head_commit.message }}'
-            if echo "$msg" | grep -qiE '\[release[[:space:]]+major\]'; then
+            if printf '%s' "$COMMIT_MSG" | grep -qiE '\[release[[:space:]]+major\]'; then
               major=$((major + 1)); minor=0; patch=0
               bump="major"
-            elif echo "$msg" | grep -qiE '\[release[[:space:]]+minor\]'; then
+            elif printf '%s' "$COMMIT_MSG" | grep -qiE '\[release[[:space:]]+minor\]'; then
               minor=$((minor + 1)); patch=0
               bump="minor"
             else
