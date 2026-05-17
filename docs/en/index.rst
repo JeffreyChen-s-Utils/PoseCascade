@@ -93,7 +93,9 @@ the model and ``--script`` for a ``.json`` animation document:
    python -m posecascade --scene examples/assets/herta/herta.glb \
                           --script examples/scripts/idle.json
 
-   # Quadruped "dog crawl" — settle into hands-and-knees, then crawl forward
+   # Quadruped "dog crawl" starting pose — kneeling, torso pitched
+   # forward, arms extended. The exact joint angles are tuned for the
+   # bundled Herta rig; refine via the Inspector dock for other rigs.
    python -m posecascade --scene examples/assets/herta/herta.glb \
                           --script examples/scripts/dog_crawl.json
 

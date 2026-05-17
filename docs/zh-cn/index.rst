@@ -88,7 +88,9 @@ virtualenv，这样 editable install 编译 Cython 布料 kernel 时能对到同
    python -m posecascade --scene examples/assets/herta/herta.glb \
                           --script examples/scripts/idle.json
 
-   # 四足"狗爬式"——先摆到双手双膝着地，再向前爬行
+   # 四足"狗爬式"起始姿势——跪姿、躯干前倾、双臂前伸。
+   # 关节角度为随附的 Herta 模型调过，换到其他模型时请用属性面板
+   # dock 微调。
    python -m posecascade --scene examples/assets/herta/herta.glb \
                           --script examples/scripts/dog_crawl.json
 
