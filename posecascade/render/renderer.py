@@ -271,11 +271,14 @@ class Renderer:
     _toon_skin_program: Program | None = field(default=None, init=False)
     # Dual-quaternion skinning variant of the toon-skinned program. Compiled
     # alongside the LBS one; selected at draw time when ``_dqs_enabled``
-    # is true. Defaults off — LBS handles every existing motion correctly
-    # and DQS is opt-in for users who want the volume-preserving fix at
-    # joint twists.
+    # is true. Defaults ON — LBS visibly pinches wrists / elbows / shoulders
+    # under the deep joint bends common in pose-driven content (e.g. the
+    # dog_crawl example: 90°+ elbow + wrist twist made fingers collapse to
+    # a spike). DQS keeps joint volume there. The CPU cost is the
+    # matrix→dual-quaternion conversion in :meth:`_upload_skin_uniforms`,
+    # ~tens of µs per skin per frame; well under our budget.
     _toon_skin_dqs_program: Program | None = field(default=None, init=False)
-    _dqs_enabled: bool = field(default=False, init=False)
+    _dqs_enabled: bool = field(default=True, init=False)
     # Force-toon-shading: when on, meshes without an ``MMDMaterial`` (glTF,
     # OBJ, FBX, …) get routed through the toon pipeline using
     # :func:`default_toon_material` + a procedural 2-band ramp. Off by
@@ -778,13 +781,12 @@ class Renderer:
         """Toggle dual-quaternion skinning on the toon-skinned path.
 
         DQS preserves joint volume — twisted shoulders / elbows / wrists
-        no longer collapse to a sharp pinch the way LBS does. Off by
-        default for two reasons: (1) the volume-preserving difference
-        is only obvious at extreme joint angles most dance motions
-        avoid, and (2) the bone-matrix-to-dual-quaternion conversion
-        adds a per-frame CPU pass we'd rather skip when it doesn't earn
-        its keep. Opt in for character setups that twist hard
-        (taiko drummers, slapstick comedy bones).
+        no longer collapse to a sharp pinch the way LBS does. ON by
+        default since pose-driven content (dog crawl, sitting, etc.)
+        routinely produces 90°+ joint angles where LBS visibly fails.
+        Disable when running pure dance-style motions that stay within
+        gentle angles and you want to skip the per-frame bone-matrix-
+        to-dual-quaternion conversion in :meth:`_upload_skin_uniforms`.
         """
         self._dqs_enabled = bool(enabled)
 

@@ -68,12 +68,12 @@ def test_renderer_sky_toggle_default_on() -> None:
     assert renderer._sky_enabled is False              # noqa: SLF001
 
 
-def test_renderer_dqs_toggle_default_off() -> None:
-    """DQS is opt-in — fresh renderer is LBS for backwards compatibility."""
+def test_renderer_dqs_toggle_default_on() -> None:
+    """DQS is the default — pose-driven content needs joint volume."""
     renderer = Renderer(shaders_root=_SHADERS_ROOT)
-    assert renderer._dqs_enabled is False              # noqa: SLF001
-    renderer.set_dqs_enabled(True)
     assert renderer._dqs_enabled is True               # noqa: SLF001
+    renderer.set_dqs_enabled(False)
+    assert renderer._dqs_enabled is False              # noqa: SLF001
 
 
 def test_renderer_force_toon_shading_toggle_default_off() -> None:
