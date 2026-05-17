@@ -32,56 +32,106 @@ Microsoft Build Tools on Windows, `build-essential` on Debian-based
 Linux, Xcode command-line tools on macOS. Nuitka prints a one-line
 fix-up command if it can't find one.
 
-## Minimum command
+## Minimum command (matches the shipping CI build)
 
 ```bash
 python -m nuitka \
   --standalone \
-  --onefile \
+  --assume-yes-for-downloads \
   --enable-plugin=pyside6 \
   --enable-plugin=numpy \
+  --include-package=posecascade \
   --include-package=importers \
   --include-data-dir=shaders=shaders \
   --include-data-dir=schemas=schemas \
   --include-data-dir=importers=importers \
   --output-dir=dist \
-  --output-filename=PoseCascade \
+  --output-filename=PoseCascade.exe \
   posecascade/__main__.py
 ```
+
+Note: this produces a **folder** (`dist/__main__.dist/`) containing
+`PoseCascade.exe` plus all its runtime dependencies. The folder is what
+ships to end users — the *Why standalone, not onefile* section below
+explains why we don't compress it into a single self-extracting binary.
+The Windows CI workflow renames the folder to `dist/PoseCascade/` and
+zips it to `dist/PoseCascade-windows-x86_64.zip` for the GitHub Release.
 
 On Windows, additionally pass:
 
 ```bat
   --windows-disable-console
-  --windows-icon-from-ico=path\to\PoseCascade.ico
+  --windows-icon-from-ico=assets\PoseCascade.ico
 ```
+
+`--windows-disable-console` suppresses the black command-prompt window;
+drop it during development so the logger output stays visible — without
+it, a startup crash gives the user nothing to look at.
+
+`assets/PoseCascade.ico` is checked in and used by the CI build — the
+shipping exe carries it as its file icon and as the window icon Qt
+falls back to when a window hasn't set one explicitly. The icon is a
+multi-resolution ICO (16 / 24 / 32 / 48 / 64 / 128 / 256 px) generated
+from `assets/generate_icon.py`. To tweak the design, edit the script
+and re-run it (`py assets/generate_icon.py`) rather than editing the
+binary — the script is the source of truth so visual changes show up
+in code review.
 
 On macOS, additionally pass:
 
 ```bash
   --macos-create-app-bundle
-  --macos-app-icon=path/to/PoseCascade.icns
+  --macos-app-icon=assets/PoseCascade.png
   --macos-app-name=PoseCascade
 ```
+
+Nuitka converts the PNG to `.icns` on its own; `assets/PoseCascade.png`
+is the 256×256 source that `generate_icon.py` writes alongside the ICO.
+For a pixel-tuned `.icns` (separate artwork per size), build one with
+`iconutil` from a pre-rendered `.iconset/` directory and pass the
+resulting `.icns` directly instead.
 
 The first build takes 3–10 minutes depending on hardware (Nuitka
 re-emits C for every imported module). Subsequent builds reuse the
 build cache and run in ~30 s.
+
+## Why standalone, not onefile
+
+The `--onefile` mode wraps the standalone directory in a single
+self-extracting executable. It's tempting for end-user distribution
+(one file to download, one icon to double-click) but in our setup it
+fails to launch on a clean machine: when the exe self-extracts to its
+temp directory, the bundled `posecascade/` package ends up on Python's
+module path under the wrong name and the very first
+`from posecascade.app.bootstrap import …` raises `ModuleNotFoundError`.
+
+`--standalone` ships the folder directly. The launch path is
+`<extracted>/PoseCascade.exe` and the package is visible at the
+expected import name. The trade-off is multi-file distribution — which
+we paper over by zipping the folder for the GitHub Release.
+
+The `--include-package=posecascade` flag is **mandatory** when the
+entry script is `posecascade/__main__.py`: without it, Nuitka adds
+`posecascade/` (the directory) to `sys.path`, but the runtime
+`from posecascade.app.bootstrap import …` then fails because the
+package name isn't on the path. Including the package explicitly puts
+it on the bundled path under its real name.
 
 ## What each flag does
 
 | Flag                              | Why it's needed                                              |
 |-----------------------------------|--------------------------------------------------------------|
 | `--standalone`                    | Bundles the Python interpreter + every dependency into a self-contained directory. Without this, the output binary needs the host's Python install. |
-| `--onefile`                       | Compresses the standalone dir into a single executable that self-extracts to a temp dir on launch. Drops `--onefile` if you'd rather ship the directory layout (smaller binary, faster cold start, but multi-file distribution). |
+| `--assume-yes-for-downloads`      | Auto-accepts the optional ccache / dependency-walker downloads Nuitka offers on first build. Required for CI; harmless for interactive builds. |
 | `--enable-plugin=pyside6`         | Nuitka's PySide6 plugin handles the Qt6 shared libs, the Qt platform / image plugins, and the `Q_OBJECT` metatype registration that pure source compilation breaks. **Without this, the app crashes at `QApplication()` startup.** |
 | `--enable-plugin=numpy`           | Nuitka's NumPy plugin sets up the C-side numpy ABI for the Cython kernel + per-vert math hot paths. Forgetting this often surfaces as a cryptic "could not find numpy.core.multiarray" at import time. |
+| `--include-package=posecascade`   | **Mandatory** when the entry script is `posecascade/__main__.py`. Without it Nuitka puts the package's directory on `sys.path` but not the package name, so the very first `from posecascade.app.bootstrap import …` fails with `ModuleNotFoundError`. |
 | `--include-package=importers`     | The per-format importer plugins (`importers/gltf/`, `importers/pmx/`, …) live outside the `posecascade` package; tell Nuitka to compile them anyway and ship their sources alongside the executable. |
 | `--include-data-dir=shaders=shaders` | Ship the GLSL pass tree. `LHS=RHS` form: LHS is the on-disk source dir; RHS is the relative path inside the produced bundle. |
 | `--include-data-dir=schemas=schemas` | Ship the declarative-animation JSON Schema. |
 | `--include-data-dir=importers=importers` | Mirror the importer dirs at runtime — Nuitka's compiled bytecode doesn't carry the per-importer `__init__.py` discovery files in some configurations, and shipping them as data files is the most robust path. |
 | `--output-dir=dist`               | Keep build artefacts off the project root. |
-| `--output-filename=PoseCascade`   | Sets the final binary's name. |
+| `--output-filename=PoseCascade.exe` | Sets the final binary's name (`PoseCascade.exe` lives inside `dist/__main__.dist/`). |
 
 If your bundle ships example assets, mirror them too:
 
@@ -151,22 +201,46 @@ posecascade.animation._cloth_kernels  module compiled (extension)
 * The Qt platform plugin needs `libxcb-cursor0` on Qt 6.5+ runtimes;
   document that as a runtime dep for end users.
 
+## Packaging the folder for distribution
+
+The CI workflow renames `dist/__main__.dist/` → `dist/PoseCascade/`
+and zips it for the GitHub Release attachment:
+
+```pwsh
+# PowerShell, run from the repo root after the Nuitka build above.
+Move-Item dist/__main__.dist dist/PoseCascade
+Compress-Archive -Path dist/PoseCascade -DestinationPath dist/PoseCascade-windows-x86_64.zip
+```
+
+The zip is what end users download. They extract it anywhere and run
+`PoseCascade.exe` from the extracted folder; the exe needs every sibling
+file in the folder, so moving the exe out by itself breaks it.
+
 ## Smoke testing the bundle
 
 ```bash
 # Cold-start: should open the empty editor in well under a second.
-dist/PoseCascade --log-level INFO
+dist/PoseCascade/PoseCascade.exe --log-level INFO
 
 # Load a bundled scene + animation.
-dist/PoseCascade \
+dist/PoseCascade/PoseCascade.exe \
   --scene examples/assets/herta/herta.glb \
   --script examples/scripts/showcase.json
 ```
 
-On the same hardware, a Nuitka `--onefile` build typically cold-starts
-in 2× the time of the equivalent `--standalone` directory build —
-the `.zst` payload extraction is the bottleneck. Drop `--onefile`
-if cold-start latency matters more than single-file distribution.
+If the exe fails to launch silently, **temporarily drop
+`--windows-disable-console`** from the Nuitka command and re-build —
+the console window will surface the traceback so you can see whether
+it's a missing `--include-package`, a missing `--include-data-dir`,
+or a runtime issue.
+
+On the same hardware, a Nuitka `--standalone` build cold-starts in
+roughly half the time of the equivalent `--onefile` build — the
+former runs the exe directly, the latter has to self-extract the
+`.zst` payload to a temp directory first. The folder layout is also
+easier to debug when something goes wrong (you can `dir` the bundle
+and check that `shaders/`, `schemas/`, and `posecascade/i18n/locales/`
+are all where you expect).
 
 ## Common failures
 
@@ -182,17 +256,44 @@ if cold-start latency matters more than single-file distribution.
 
 ## Build-time vs run-time trade-offs (vs PyInstaller)
 
-| Dimension                       | PyInstaller          | Nuitka                  |
-|---------------------------------|----------------------|-------------------------|
-| First-build wall time           | ~30 s                | 3–10 minutes            |
-| Re-build wall time (cache hit)  | ~10 s                | ~30 s                   |
-| Output size (`--onefile`)       | ~120 MB              | ~80 MB                  |
-| Cold-start latency              | medium (`--onefile`) | low (`--standalone`), medium (`--onefile`) |
-| Runtime speed in pure-Python    | interpreted          | compiled — ~10-30% faster on hot Python sections |
-| Debugging when bundle breaks    | clearer tracebacks   | C-level errors first     |
-| Cross-compilation               | not really           | not really               |
+| Dimension                       | PyInstaller          | Nuitka                                                       |
+|---------------------------------|----------------------|--------------------------------------------------------------|
+| First-build wall time           | ~30 s                | 3–10 minutes                                                 |
+| Re-build wall time (cache hit)  | ~10 s                | ~30 s                                                        |
+| Output size (`--standalone`)    | ~120 MB              | ~80 MB                                                       |
+| Cold-start latency              | medium               | **low** (`--standalone` runs the exe directly)               |
+| Runtime speed in pure-Python    | interpreted          | compiled — ~10-30 % faster on hot Python sections            |
+| Debugging when bundle breaks    | clearer tracebacks   | C-level errors first                                         |
+| Cross-compilation               | not really           | not really                                                   |
 
 Renderer + cloth hot paths run identically — both bundlers pick up
 the same compiled extension modules, so the Cython kernel and the
 GPU compute shader perform the same regardless of which bundler
 produced the executable.
+
+## What ships with the bundle (folder contents)
+
+After the build + rename, `dist/PoseCascade/` contains:
+
+```text
+dist/PoseCascade/
+├── PoseCascade.exe                  ← entry point
+├── python3.dll                      ← embedded Python runtime
+├── PySide6/                         ← Qt shared libs + platform plugins
+├── numpy/                           ← NumPy compiled extensions
+├── posecascade/                     ← compiled engine package
+│   └── i18n/locales/                ← every shipped locale catalog
+├── importers/                       ← per-format importer plugins
+├── shaders/                         ← GLSL pass tree
+├── schemas/                         ← declarative-animation JSON Schema
+└── …                                ← supporting DLLs the plugins pull in
+```
+
+The locale catalogs in `posecascade/i18n/locales/` ride along
+automatically because `--include-package=posecascade` recursively
+includes the package's data files. End users get every shipped
+language out of the box. To add a community-contributed locale
+without re-building, they can drop a new `<code>.json` next to
+the existing catalogs — the loader auto-discovers it on next launch.
+See [Internationalisation & responsive UI](internationalization.md)
+for the catalog format.

@@ -593,6 +593,35 @@ iGPU 上，Qt 可能 fall back 到 OpenGL 1.4 然后在 shader compile 时 crash
 
 ----
 
+GUI 界面 + 多语言
+-----------------
+
+编辑器用户可见的所有界面——每个菜单、每个 dock、工具栏、状态栏、
+导出对话框、3D 视窗的鼠标操作——有独立的完整说明在 :doc:`/gui`。
+那里涵盖而本文未重复的主题：
+
+* 每个 dock 的行为（Outliner、Slots、Inspector、Effects、Timeline、
+  Tracks、Animation JSON、Phase blocks）。
+* 每帧循环、暂停标志、出错脚本如何被隔离以避免冻住 timeline。
+* DPI 感知尺寸与用 ``QFontMetrics`` 推导出的组件最小宽高
+  （取代旧版的像素硬编值）。
+
+GUI 默认搭载三个语种（英文、繁体中文、简体中文），可在运行中从
+``设置 → 语言`` 切换。完整 i18n 参考——目录文件格式、语种解析顺序、
+如何以单一文件新增语言、翻译者必须保留的 placeholder 规则、
+搭配的响应式尺寸策略——在 :doc:`/internationalization`。
+
+要强制单次启动使用特定语种：
+
+.. code-block:: bash
+
+   POSECASCADE_LANG=zh-CN python -m posecascade
+
+``POSECASCADE_LANG`` 同时覆盖 ``设置 → 语言`` 持久化的选择
+与操作系统报告的语种。
+
+----
+
 许可 + 致谢
 -----------
 

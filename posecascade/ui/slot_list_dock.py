@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from posecascade.i18n import t
 from posecascade.scene.model_slot import ModelSlot, SceneSlots
 from posecascade.utils.math3d import vec3
 
@@ -57,7 +58,7 @@ class SlotListDock(QDockWidget):
         slots: SceneSlots,
         parent: QWidget | None = None,
     ) -> None:
-        super().__init__("Slots", parent)
+        super().__init__(t("slot.title"), parent)
         self._slots = slots
         self._rows: list[_SlotRow] = []
         self._list = QListWidget()
@@ -91,10 +92,7 @@ class SlotListDock(QDockWidget):
 
         visibility = QCheckBox()
         visibility.setChecked(slot.visible)
-        visibility.setToolTip(
-            f"Show / hide '{slot.name}' in the viewport. Hidden slots "
-            "still tick their physics + animation; only the draw is skipped.",
-        )
+        visibility.setToolTip(t("slot.visibility.tooltip", name=slot.name))
         visibility.toggled.connect(
             lambda checked, name=slot.name: self._on_visibility_toggled(name, checked),
         )
@@ -106,8 +104,7 @@ class SlotListDock(QDockWidget):
         axis_labels = ("X", "Y", "Z")
         for axis_label, spin in zip(axis_labels, translation_spins, strict=True):
             spin.setToolTip(
-                f"'{slot.name}' world {axis_label} translation. "
-                "Positions the slot's root before its own animation runs.",
+                t("slot.translation.tooltip", name=slot.name, axis=axis_label),
             )
             row_layout.addWidget(spin)
 

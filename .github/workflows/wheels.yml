@@ -270,29 +270,58 @@ jobs:
         env:
           SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.compute_version.outputs.version }}
         run: python setup.py build_ext --inplace
-      - name: Build with Nuitka
+      - name: Build with Nuitka (standalone folder, not --onefile)
         env:
           SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.compute_version.outputs.version }}
         shell: bash
         run: |
+          # ``--standalone`` (no ``--onefile``) produces a folder
+          # ``dist/<script>.dist/`` containing PoseCascade.exe + all
+          # its dependencies. The ``--onefile`` variant wrapped that
+          # folder in a single self-extracting binary, but the
+          # resulting exe couldn't launch on a clean machine
+          # (extracted layout couldn't resolve the package), so we
+          # ship the folder directly and let the user run the exe
+          # in place.
+          #
+          # ``--include-package=posecascade`` is mandatory here: when
+          # Nuitka is given ``posecascade/__main__.py`` as the entry
+          # script, it adds ``posecascade/`` (the directory) to
+          # sys.path. The runtime ``from posecascade.app.bootstrap
+          # import …`` then fails because the dir is on the path but
+          # the ``posecascade`` package name isn't. Including the
+          # package explicitly puts it on the bundled path under its
+          # real name.
           python -m nuitka \
             --standalone \
-            --onefile \
             --assume-yes-for-downloads \
             --enable-plugin=pyside6 \
             --enable-plugin=numpy \
+            --include-package=posecascade \
             --include-package=importers \
             --include-data-dir=shaders=shaders \
             --include-data-dir=schemas=schemas \
             --include-data-dir=importers=importers \
+            --include-data-dir=assets=assets \
             --windows-disable-console \
+            --windows-icon-from-ico=assets/PoseCascade.ico \
             --output-dir=dist \
-            --output-filename=PoseCascade \
+            --output-filename=PoseCascade.exe \
             posecascade/__main__.py
+      - name: Rename .dist folder + zip it for distribution
+        shell: pwsh
+        run: |
+          # Nuitka names the standalone dir after the input script,
+          # so we get ``dist/__main__.dist``. Rename to PoseCascade
+          # for a clean download experience, then Compress-Archive
+          # into ``PoseCascade-windows-x86_64.zip`` for the GitHub
+          # Release attachment.
+          Move-Item dist/__main__.dist dist/PoseCascade
+          Compress-Archive -Path dist/PoseCascade -DestinationPath dist/PoseCascade-windows-x86_64.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: PoseCascade-exe
-          path: dist/PoseCascade.exe
+          name: PoseCascade-zip
+          path: dist/PoseCascade-windows-x86_64.zip
           if-no-files-found: error
 
   # ---------------------------------------------------------------------
@@ -355,7 +384,7 @@ jobs:
           git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "$TAG"
       - uses: actions/download-artifact@v4
         with:
-          name: PoseCascade-exe
+          name: PoseCascade-zip
           path: release-assets
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
         with:
@@ -375,8 +404,10 @@ jobs:
             Wheels for cp312 / cp313 / cp314 × Win / macOS / Linux
             are on [PyPI](https://pypi.org/p/posecascade).
 
-            **Standalone Windows executable** (no Python install
-            required): `PoseCascade.exe` attached below. Built with
-            Nuitka `--onefile`; the binary self-extracts to a temp
-            directory on first launch.
-          files: release-assets/PoseCascade.exe
+            **Standalone Windows build** (no Python install required):
+            download `PoseCascade-windows-x86_64.zip` below, extract
+            it, and run `PoseCascade.exe` from the extracted folder.
+            Built with Nuitka `--standalone` against
+            `posecascade/__main__.py`; the folder contains the exe
+            and all its runtime dependencies — keep them together.
+          files: release-assets/PoseCascade-windows-x86_64.zip

@@ -23,6 +23,7 @@ shortest invocation is:
 pyinstaller \
   --name PoseCascade \
   --windowed \
+  --icon assets/PoseCascade.ico \
   --collect-all PySide6 \
   --collect-all OpenGL \
   --collect-all Pillow \
@@ -37,12 +38,19 @@ pyinstaller \
 `--add-data` uses `:` on macOS / Linux and `;` on Windows — pass the
 appropriate separator for your build host.
 
+`--icon assets/PoseCascade.ico` sets the file icon on Windows and
+the dock icon on macOS. The same multi-resolution ICO drives the
+Nuitka build — see [Packaging with Nuitka](packaging_nuitka.md). Edit
+`assets/generate_icon.py` (not the binary) to tweak the design and
+re-run it.
+
 On Windows the equivalent is:
 
 ```bat
 pyinstaller ^
   --name PoseCascade ^
   --windowed ^
+  --icon assets\PoseCascade.ico ^
   --collect-all PySide6 ^
   --collect-all OpenGL ^
   --collect-all Pillow ^
@@ -66,6 +74,7 @@ directory into a single binary at the cost of a slower cold start
 |-------------------------------|-----------------------------------------------------------------|
 | `--name PoseCascade`          | Sets the output binary's name; default is the script's stem.    |
 | `--windowed`                  | Suppresses the console window on Windows / macOS. Use `--console` if you want stdout for the engine's logger. |
+| `--icon assets/PoseCascade.ico` | Sets the Windows file icon + macOS dock icon. The same ICO drives both PyInstaller and Nuitka builds; regenerate via `py assets/generate_icon.py`. |
 | `--collect-all PySide6`       | Bundles the Qt6 shared libraries plus the platform / image plugins (`platforms/qwindows.dll`, `imageformats/qjpeg.dll`, …). Without this, the app fails on `QApplication()` with "could not find or load the Qt platform plugin". |
 | `--collect-all OpenGL`        | Bundles PyOpenGL's `accelerate` + per-GL-function dispatch modules. PyInstaller's static analysis misses some of these because PyOpenGL uses dynamic imports. |
 | `--collect-all Pillow`        | Pulls in the format plugins (`PIL.JpegImagePlugin`, `PIL.WebPImagePlugin`, …) that the importer cache discovers by name at runtime. |

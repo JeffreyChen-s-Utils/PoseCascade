@@ -26,6 +26,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from posecascade.i18n import t
+
 DEFAULT_FPS = 30
 DEFAULT_PADDING = 4
 DEFAULT_END_FRAME = 900
@@ -63,7 +65,7 @@ class ExportDialog(QDialog):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Export")
+        self.setWindowTitle(t("export.title"))
         self._spec: ExportSpec | None = None
         self._tabs = QTabWidget()
         self._build_ui()
@@ -81,16 +83,12 @@ class ExportDialog(QDialog):
         self._build_image_sequence_tab()
         self._build_video_tab()
         button_row = QHBoxLayout()
-        self._cancel_button = QPushButton("Cancel")
+        self._cancel_button = QPushButton(t("export.button.cancel"))
         self._cancel_button.clicked.connect(self.reject)
-        self._cancel_button.setToolTip("Close the dialog without exporting.")
-        self._ok_button = QPushButton("Export")
+        self._cancel_button.setToolTip(t("export.tooltip.cancel"))
+        self._ok_button = QPushButton(t("export.button.export"))
         self._ok_button.clicked.connect(self._on_ok)
-        self._ok_button.setToolTip(
-            "Run the export described by the active tab. Validates the "
-            "output path before starting; nothing is written if validation "
-            "fails.",
-        )
+        self._ok_button.setToolTip(t("export.tooltip.export"))
         button_row.addStretch(1)
         button_row.addWidget(self._cancel_button)
         button_row.addWidget(self._ok_button)
@@ -100,98 +98,70 @@ class ExportDialog(QDialog):
         widget = QWidget()
         form = QFormLayout(widget)
         self._vmd_path = QLineEdit()
-        self._vmd_path.setPlaceholderText("/path/to/output.vmd")
-        self._vmd_path.setToolTip(
-            "Destination .vmd path. The exporter writes a binary MMD motion "
-            "file containing every visible track's keyframes.",
-        )
-        form.addRow("Output", self._vmd_path)
-        self._tabs.addTab(widget, "VMD")
+        self._vmd_path.setPlaceholderText(t("export.placeholder.vmd"))
+        self._vmd_path.setToolTip(t("export.tooltip.vmd_output"))
+        form.addRow(t("export.field.output"), self._vmd_path)
+        self._tabs.addTab(widget, t("export.tab.vmd"))
 
     def _build_image_sequence_tab(self) -> None:
         widget = QWidget()
         form = QFormLayout(widget)
         self._sequence_dir = QLineEdit()
-        self._sequence_dir.setPlaceholderText("/path/to/output_dir")
-        self._sequence_dir.setToolTip(
-            "Directory the per-frame PNGs are written to. Created if it "
-            "doesn't exist; existing files in the range are overwritten.",
-        )
-        form.addRow("Output dir", self._sequence_dir)
+        self._sequence_dir.setPlaceholderText(t("export.placeholder.image_seq"))
+        self._sequence_dir.setToolTip(t("export.tooltip.sequence_dir"))
+        form.addRow(t("export.field.output_dir"), self._sequence_dir)
         self._sequence_start = QSpinBox()
         self._sequence_start.setRange(0, _MAX_FRAME)
         self._sequence_start.setValue(0)
-        self._sequence_start.setToolTip(
-            "First frame to render (inclusive). Use the timeline to scrub "
-            "and find the right frame numbers.",
-        )
-        form.addRow("Start frame", self._sequence_start)
+        self._sequence_start.setToolTip(t("export.tooltip.sequence_start"))
+        form.addRow(t("export.field.start_frame"), self._sequence_start)
         self._sequence_end = QSpinBox()
         self._sequence_end.setRange(0, _MAX_FRAME)
         self._sequence_end.setValue(DEFAULT_END_FRAME)
-        self._sequence_end.setToolTip(
-            "Last frame to render (inclusive).",
-        )
-        form.addRow("End frame", self._sequence_end)
+        self._sequence_end.setToolTip(t("export.tooltip.sequence_end"))
+        form.addRow(t("export.field.end_frame"), self._sequence_end)
         self._sequence_padding = QSpinBox()
         self._sequence_padding.setRange(1, 8)
         self._sequence_padding.setValue(DEFAULT_PADDING)
-        self._sequence_padding.setToolTip(
-            "Zero-pad width for filenames. 4 → frame_0001.png, 6 → frame_000001.png.",
-        )
-        form.addRow("Filename padding", self._sequence_padding)
-        self._sequence_post_effects = QCheckBox("Include post-effect chain")
+        self._sequence_padding.setToolTip(t("export.tooltip.padding"))
+        form.addRow(t("export.field.filename_padding"), self._sequence_padding)
+        self._sequence_post_effects = QCheckBox(t("export.field.include_post_effects"))
         self._sequence_post_effects.setChecked(True)
-        self._sequence_post_effects.setToolTip(
-            "Apply the viewport's post-effect chain (bloom, tonemap, etc.) "
-            "to each rendered frame. Uncheck to export the raw scene render.",
-        )
+        self._sequence_post_effects.setToolTip(t("export.tooltip.sequence_post"))
         form.addRow(self._sequence_post_effects)
-        self._tabs.addTab(widget, "Image sequence")
+        self._tabs.addTab(widget, t("export.tab.image_sequence"))
 
     def _build_video_tab(self) -> None:
         widget = QWidget()
         form = QFormLayout(widget)
         self._video_path = QLineEdit()
-        self._video_path.setPlaceholderText("/path/to/output.mp4")
-        self._video_path.setToolTip(
-            "Destination video file path. Container is inferred from the "
-            "extension (.mp4, .mov, .webm) and must match the codec.",
-        )
-        form.addRow("Output", self._video_path)
+        self._video_path.setPlaceholderText(t("export.placeholder.video"))
+        self._video_path.setToolTip(t("export.tooltip.video_output"))
+        form.addRow(t("export.field.output"), self._video_path)
         self._video_start = QSpinBox()
         self._video_start.setRange(0, _MAX_FRAME)
-        self._video_start.setToolTip("First frame to encode (inclusive).")
-        form.addRow("Start frame", self._video_start)
+        self._video_start.setToolTip(t("export.tooltip.video_start"))
+        form.addRow(t("export.field.start_frame"), self._video_start)
         self._video_end = QSpinBox()
         self._video_end.setRange(0, _MAX_FRAME)
         self._video_end.setValue(DEFAULT_END_FRAME)
-        self._video_end.setToolTip("Last frame to encode (inclusive).")
-        form.addRow("End frame", self._video_end)
+        self._video_end.setToolTip(t("export.tooltip.video_end"))
+        form.addRow(t("export.field.end_frame"), self._video_end)
         self._video_fps = QSpinBox()
         self._video_fps.setRange(1, 120)
         self._video_fps.setValue(DEFAULT_FPS)
-        self._video_fps.setToolTip(
-            "Output video framerate. Must match the timeline's playback "
-            "rate to keep audio sync; 30 / 60 are the common choices.",
-        )
-        form.addRow("FPS", self._video_fps)
+        self._video_fps.setToolTip(t("export.tooltip.video_fps"))
+        form.addRow(t("export.field.fps"), self._video_fps)
         self._video_codec = QComboBox()
         for codec in _DEFAULT_VIDEO_CODECS:
             self._video_codec.addItem(codec)
-        self._video_codec.setToolTip(
-            "Video codec. h264 = wide compatibility, prores = lossless / "
-            "editing-friendly but huge files, vp9 = good for web.",
-        )
-        form.addRow("Codec", self._video_codec)
-        self._video_post_effects = QCheckBox("Include post-effect chain")
+        self._video_codec.setToolTip(t("export.tooltip.video_codec"))
+        form.addRow(t("export.field.codec"), self._video_codec)
+        self._video_post_effects = QCheckBox(t("export.field.include_post_effects"))
         self._video_post_effects.setChecked(True)
-        self._video_post_effects.setToolTip(
-            "Apply the viewport's post-effect chain to each encoded frame. "
-            "Uncheck for a raw scene capture.",
-        )
+        self._video_post_effects.setToolTip(t("export.tooltip.video_post"))
         form.addRow(self._video_post_effects)
-        self._tabs.addTab(widget, "Video")
+        self._tabs.addTab(widget, t("export.tab.video"))
 
     def _on_ok(self) -> None:
         spec = self._build_spec()

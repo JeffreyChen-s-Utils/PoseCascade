@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from posecascade.i18n import t
 from posecascade.scene.component import (
     ClothComponent,
     SpringChainComponent,
@@ -46,6 +47,9 @@ _SCALE_MAX = 1.0e4
 _ROTATION_RANGE_DEG = 720.0  # display in degrees with sign; 720° lets users wrap past one turn
 _DEFAULT_SPIN_DECIMALS = 4
 _PARAM_DECIMALS = 3
+# Components list cap — five rows of the current font. Replaces the old
+# hardcoded ``setMaximumHeight(120)`` so the list scales with DPI.
+_COMPONENTS_LIST_MAX_ROWS = 5
 
 
 class InspectorDock(QDockWidget):
@@ -59,7 +63,7 @@ class InspectorDock(QDockWidget):
     """
 
     def __init__(self, services: object | None = None, parent: object = None) -> None:
-        super().__init__("Inspector", parent)  # type: ignore[arg-type]
+        super().__init__(t("inspector.title"), parent)  # type: ignore[arg-type]
         self.setObjectName("InspectorDock")
         self._services = services
         self._node: Node | None = None
@@ -71,31 +75,28 @@ class InspectorDock(QDockWidget):
         self._layout = QVBoxLayout(container)
         self._layout.setSpacing(6)
 
-        self._name_label = QLabel("(no selection)")
+        self._name_label = QLabel(t("inspector.no_selection"))
         self._name_label.setStyleSheet("font-weight: bold; padding: 2px;")
         self._layout.addWidget(self._name_label)
 
         self._t_x, self._t_y, self._t_z = self._add_vec3_row(
-            "Translation", -_TRANSLATION_RANGE, _TRANSLATION_RANGE,
+            t("inspector.row.translation"), -_TRANSLATION_RANGE, _TRANSLATION_RANGE,
         )
         self._r_x, self._r_y, self._r_z = self._add_vec3_row(
-            "Rotation (°)", -_ROTATION_RANGE_DEG, _ROTATION_RANGE_DEG,
+            t("inspector.row.rotation"), -_ROTATION_RANGE_DEG, _ROTATION_RANGE_DEG,
         )
         self._s_x, self._s_y, self._s_z = self._add_vec3_row(
-            "Scale", _SCALE_MIN, _SCALE_MAX,
+            t("inspector.row.scale"), _SCALE_MIN, _SCALE_MAX,
         )
 
-        components_label = QLabel("Components:")
-        components_label.setToolTip(
-            "Components attached to this node — physics chains, cloth pieces, "
-            "skin references etc. Tuners for each component appear below.",
-        )
+        components_label = QLabel(t("inspector.components_label"))
+        components_label.setToolTip(t("inspector.components.tooltip"))
         self._layout.addWidget(components_label)
         self._components_list = QListWidget()
-        self._components_list.setMaximumHeight(120)
-        self._components_list.setToolTip(
-            "Read-only list of component types on this node.",
+        self._components_list.setMaximumHeight(
+            self._components_list.fontMetrics().height() * _COMPONENTS_LIST_MAX_ROWS,
         )
+        self._components_list.setToolTip(t("inspector.components.list_tooltip"))
         self._layout.addWidget(self._components_list)
 
         # Container for component-specific tuners. Re-created each time selection
@@ -129,7 +130,9 @@ class InspectorDock(QDockWidget):
         # label only appears at the start, easily off-screen on
         # narrow docks.
         axis_hints = (
-            f"{label} — X axis", f"{label} — Y axis", f"{label} — Z axis",
+            t("inspector.row.axis_x", label=label),
+            t("inspector.row.axis_y", label=label),
+            t("inspector.row.axis_z", label=label),
         )
         for sb, hint in zip(spinboxes, axis_hints, strict=True):
             sb.setToolTip(hint)
@@ -161,7 +164,7 @@ class InspectorDock(QDockWidget):
             self._suppress_signals = False
 
     def _populate_empty(self) -> None:
-        self._name_label.setText("(no selection)")
+        self._name_label.setText(t("inspector.no_selection"))
         for sb in self._all_spinboxes():
             sb.setEnabled(False)
             sb.setValue(0.0)
@@ -169,13 +172,13 @@ class InspectorDock(QDockWidget):
         self._clear_params_container()
 
     def _populate_from_node(self, node: Node) -> None:
-        self._name_label.setText(node.name or "<unnamed>")
+        self._name_label.setText(node.name or t("inspector.unnamed"))
         for sb in self._all_spinboxes():
             sb.setEnabled(True)
-        t = node.transform.translation
-        self._t_x.setValue(float(t[0]))
-        self._t_y.setValue(float(t[1]))
-        self._t_z.setValue(float(t[2]))
+        translation = node.transform.translation
+        self._t_x.setValue(float(translation[0]))
+        self._t_y.setValue(float(translation[1]))
+        self._t_z.setValue(float(translation[2]))
         yaw, pitch, roll = quat_to_euler(node.transform.rotation)
         self._r_x.setValue(math.degrees(roll))
         self._r_y.setValue(math.degrees(pitch))
@@ -254,9 +257,9 @@ def _spring_chain_editor(
     """Inline form to tune a SpringChain's stiffness/damping/inertia. Edits the live chain
     if registered (so changes take effect immediately); falls back to mutating the
     component for offline scenes."""
-    box = QGroupBox(f"SpringChain: {component.chain_name}")
+    box = QGroupBox(t("inspector.spring.title", name=component.chain_name))
     form = QFormLayout(box)
-    form.addRow("Joints", QLabel(str(len(component.joints))))
+    form.addRow(t("inspector.spring.joints"), QLabel(str(len(component.joints))))
 
     def stiffness_setter(value: float) -> None:
         component.stiffness = float(value)
@@ -275,25 +278,19 @@ def _spring_chain_editor(
                 joint.inertia = float(value)
 
     _add_param_row(
-        form, "Stiffness", component.stiffness, 0.0, 200.0, stiffness_setter,
-        tooltip=(
-            "Spring constant pulling each joint back to its rest pose. "
-            "Higher = stiffer hair / cloth, less sway. Typical 8–20."
-        ),
+        form, t("inspector.spring.stiffness"), component.stiffness, 0.0, 200.0,
+        stiffness_setter,
+        tooltip=t("inspector.spring.tooltip.stiffness"),
     )
     _add_param_row(
-        form, "Damping", component.damping, 0.0, 50.0, damping_setter,
-        tooltip=(
-            "Velocity damping each frame. Higher = less ringing after an "
-            "impulse. Typical 0.3–0.8."
-        ),
+        form, t("inspector.spring.damping"), component.damping, 0.0, 50.0,
+        damping_setter,
+        tooltip=t("inspector.spring.tooltip.damping"),
     )
     _add_param_row(
-        form, "Inertia", component.inertia, 1.0e-4, 10.0, inertia_setter,
-        tooltip=(
-            "Per-joint mass — heavier joints respond more slowly to wind / "
-            "head motion. Typical 0.01–0.05 for hair."
-        ),
+        form, t("inspector.spring.inertia"), component.inertia, 1.0e-4, 10.0,
+        inertia_setter,
+        tooltip=t("inspector.spring.tooltip.inertia"),
     )
     return box
 
@@ -303,9 +300,9 @@ def _cloth_editor(
     live_piece: object | None,
 ) -> QGroupBox:
     """Inline form to tune cloth PBD params. Mutates the live piece directly when present."""
-    box = QGroupBox(f"Cloth: {component.cloth_name}")
+    box = QGroupBox(t("inspector.cloth.title", name=component.cloth_name))
     form = QFormLayout(box)
-    form.addRow("Mesh index", QLabel(str(component.mesh_index)))
+    form.addRow(t("inspector.cloth.mesh_index"), QLabel(str(component.mesh_index)))
 
     def make_setter(attr: str) -> Callable[[float], None]:
         def setter(value: float) -> None:
@@ -315,36 +312,24 @@ def _cloth_editor(
         return setter
 
     _add_param_row(
-        form, "Stiffness", component.structural_stiffness, 0.0, 1.0,
+        form, t("inspector.cloth.stiffness"), component.structural_stiffness, 0.0, 1.0,
         make_setter("structural_stiffness"),
-        tooltip=(
-            "How rigidly the cloth resists stretching along its weave (PBD "
-            "structural constraint). 0 = rubbery, 1 = rigid. Typical 0.6–0.9."
-        ),
+        tooltip=t("inspector.cloth.tooltip.stiffness"),
     )
     _add_param_row(
-        form, "Bend", component.bend_stiffness, 0.0, 1.0,
+        form, t("inspector.cloth.bend"), component.bend_stiffness, 0.0, 1.0,
         make_setter("bend_stiffness"),
-        tooltip=(
-            "Resistance to folding / wrinkling. 0 = limp, 1 = card-stiff. "
-            "Typical 0.1–0.3 for cloth, higher for leather."
-        ),
+        tooltip=t("inspector.cloth.tooltip.bend"),
     )
     _add_param_row(
-        form, "Damping", component.linear_damping, 0.5, 1.0,
+        form, t("inspector.cloth.damping"), component.linear_damping, 0.5, 1.0,
         make_setter("linear_damping"),
-        tooltip=(
-            "Per-frame velocity multiplier (1 = no damping, 0.5 = aggressive "
-            "damp). Lower = faster settle after an impulse."
-        ),
+        tooltip=t("inspector.cloth.tooltip.damping"),
     )
     _add_param_row(
-        form, "Rest pull", component.rest_pull, 0.0, 200.0,
+        form, t("inspector.cloth.rest_pull"), component.rest_pull, 0.0, 200.0,
         make_setter("rest_pull"),
-        tooltip=(
-            "Force pulling vertices back toward their rest position each "
-            "frame. Prevents drift / sag accumulation. Typical 5–40."
-        ),
+        tooltip=t("inspector.cloth.tooltip.rest_pull"),
     )
     return box
 

@@ -29,6 +29,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from posecascade.i18n import t
+
 if TYPE_CHECKING:
     from posecascade.audio.player import AudioPlayer
 
@@ -48,7 +50,7 @@ class TimelineDock(QDockWidget):
     playback_state_changed = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__("Timeline", parent)
+        super().__init__(t("timeline.title"), parent)
         self._fps = _DEFAULT_FPS
         self._is_playing = False
         self._loop = True
@@ -95,7 +97,7 @@ class TimelineDock(QDockWidget):
             self._audio.seek(self.current_frame() / float(self._fps))
             self._audio.play()
         self._timer.start()
-        self._play_button.setText("Pause")
+        self._play_button.setText(t("timeline.pause"))
         self.playback_state_changed.emit(True)
 
     def pause(self) -> None:
@@ -105,7 +107,7 @@ class TimelineDock(QDockWidget):
         self._timer.stop()
         if self._audio is not None:
             self._audio.pause()
-        self._play_button.setText("Play")
+        self._play_button.setText(t("timeline.play"))
         self.playback_state_changed.emit(False)
 
     def attach_audio(self, player: AudioPlayer) -> None:
@@ -136,59 +138,44 @@ class TimelineDock(QDockWidget):
         self._slider.setRange(0, _DEFAULT_FRAME_RANGE)
         self._slider.setSingleStep(1)
         self._slider.valueChanged.connect(self._on_slider_changed)
-        self._slider.setToolTip(
-            "Scrub the playhead. Drag to preview a frame; release to settle.",
-        )
+        self._slider.setToolTip(t("timeline.tooltip.slider"))
         slider_row.addWidget(self._slider, 1)
 
         self._frame_spin = QSpinBox()
         self._frame_spin.setRange(0, _DEFAULT_FRAME_RANGE)
         self._frame_spin.valueChanged.connect(self._on_frame_spin_changed)
-        self._frame_spin.setToolTip(
-            "Current frame number. Type a number to jump straight there.",
-        )
+        self._frame_spin.setToolTip(t("timeline.tooltip.frame_spin"))
         slider_row.addWidget(self._frame_spin)
         layout.addLayout(slider_row)
 
         controls = QHBoxLayout()
-        self._play_button = QPushButton("Play")
+        self._play_button = QPushButton(t("timeline.play"))
         self._play_button.clicked.connect(self.toggle_play)
         self._play_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self._play_button.setToolTip(
-            "Toggle playback. When playing, the playhead advances at the "
-            "scene's FPS (or in sync with attached audio).",
-        )
+        self._play_button.setToolTip(t("timeline.tooltip.play"))
         controls.addWidget(self._play_button)
 
-        controls.addWidget(QLabel("Range:"))
+        controls.addWidget(QLabel(t("timeline.range_label")))
         self._range_start = QSpinBox()
         self._range_start.setRange(0, _MAX_FRAME_RANGE)
         self._range_start.valueChanged.connect(self._on_range_start_changed)
-        self._range_start.setToolTip(
-            "Playback range start frame. Playback wraps to here when looping.",
-        )
+        self._range_start.setToolTip(t("timeline.tooltip.range_start"))
         controls.addWidget(self._range_start)
 
-        controls.addWidget(QLabel("→"))
+        controls.addWidget(QLabel(t("timeline.range_separator")))
         self._range_end = QSpinBox()
         self._range_end.setRange(0, _MAX_FRAME_RANGE)
         self._range_end.setValue(_DEFAULT_FRAME_RANGE)
         self._range_end.valueChanged.connect(self._on_range_end_changed)
-        self._range_end.setToolTip(
-            "Playback range end frame. Playback stops (or wraps) at this "
-            "frame.",
-        )
+        self._range_end.setToolTip(t("timeline.tooltip.range_end"))
         controls.addWidget(self._range_end)
 
         controls.addStretch(1)
 
-        self._loop_checkbox = QCheckBox("Loop")
+        self._loop_checkbox = QCheckBox(t("timeline.loop"))
         self._loop_checkbox.setChecked(self._loop)
         self._loop_checkbox.toggled.connect(self._on_loop_toggled)
-        self._loop_checkbox.setToolTip(
-            "When checked, playback wraps from end → start instead of "
-            "stopping at the range end.",
-        )
+        self._loop_checkbox.setToolTip(t("timeline.tooltip.loop"))
         controls.addWidget(self._loop_checkbox)
 
         layout.addLayout(controls)
