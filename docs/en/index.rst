@@ -93,6 +93,10 @@ the model and ``--script`` for a ``.json`` animation document:
    python -m posecascade --scene examples/assets/herta/herta.glb \
                           --script examples/scripts/idle.json
 
+   # Quadruped "dog crawl" — settle into hands-and-knees, then crawl forward
+   python -m posecascade --scene examples/assets/herta/herta.glb \
+                          --script examples/scripts/dog_crawl.json
+
 Interactive viewport (sandboxed Python)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

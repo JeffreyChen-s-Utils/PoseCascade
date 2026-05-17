@@ -88,6 +88,10 @@ virtualenv，这样 editable install 编译 Cython 布料 kernel 时能对到同
    python -m posecascade --scene examples/assets/herta/herta.glb \
                           --script examples/scripts/idle.json
 
+   # 四足"狗爬式"——先摆到双手双膝着地，再向前爬行
+   python -m posecascade --scene examples/assets/herta/herta.glb \
+                          --script examples/scripts/dog_crawl.json
+
 交互式 viewport（沙箱 Python）
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
