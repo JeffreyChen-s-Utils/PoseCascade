@@ -1013,6 +1013,73 @@ def test_camera_untouched_when_no_keyframes() -> None:
     assert camera.position == "untouched_sentinel"
 
 
+def test_bones_local_applies_basis_rotation_directly() -> None:
+    """``bones_local`` writes ``rotation = basis_quat * rest_rotation``
+    without world-frame conjugation — the value is interpreted as
+    Blender's ``pose_bone.matrix_basis`` / intrinsic XYZ Euler.
+
+    Concretely: writing ``head: {x_rad: 1.0}`` should produce a node
+    rotation whose X component equals ``sin(0.5)`` (the head's rest
+    rotation in the minimal scene is identity, so basis * rest = basis).
+    The world-frame ``bones`` path would conjugate by the parent's
+    posed rotation, producing the same result HERE only because the
+    parent is also at rest — a deliberate choice for the minimal
+    scene so the test pins the bypass-conjugation contract without
+    needing to construct a rotated parent chain."""
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["phases"][0]["bones_local"] = {"head": {"x_rad": 1.0}}
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(animation=parsed, scene=scene, time=lambda: 0.0)
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    head_rot = scene.find("head").transform.rotation
+    # Intrinsic XYZ with only x_rad set = pure X-axis rotation = quat (sin(x/2), 0, 0, cos(x/2))
+    np.testing.assert_allclose(head_rot[0], math.sin(0.5), atol=1e-4)
+    np.testing.assert_allclose(head_rot[1], 0.0, atol=1e-4)
+    np.testing.assert_allclose(head_rot[2], 0.0, atol=1e-4)
+
+
+def test_bones_local_intrinsic_xyz_matches_blender_convention() -> None:
+    """``bones_local`` uses intrinsic XYZ Euler order (Rx · Ry · Rz),
+    matching Blender's ``rotation_mode='XYZ'``. Distinct from the
+    ``bones`` path which uses extrinsic XYZ (Rz · Ry · Rx).
+
+    Test by setting all three axes and checking the resulting quaternion
+    against the analytical intrinsic-XYZ formula: a 30°-each rotation
+    in intrinsic XYZ produces a different quaternion than the same
+    angles in extrinsic XYZ, so this catches a swap between the two
+    helpers."""
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    doc["phases"][0]["bones_local"] = {
+        "head": {"x_rad": 0.5, "y_rad": 0.3, "z_rad": 0.2},
+    }
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(animation=parsed, scene=scene, time=lambda: 0.0)
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+    actual = scene.find("head").transform.rotation
+    # Intrinsic XYZ: Rx @ Ry @ Rz composed via quaternion multiplication
+    qx = np.array([math.sin(0.25), 0, 0, math.cos(0.25)], dtype=np.float32)
+    qy = np.array([0, math.sin(0.15), 0, math.cos(0.15)], dtype=np.float32)
+    qz = np.array([0, 0, math.sin(0.10), math.cos(0.10)], dtype=np.float32)
+
+    def qmul(a, b):
+        x1, y1, z1, w1 = a
+        x2, y2, z2, w2 = b
+        return np.array([
+            w1*x2 + x1*w2 + y1*z2 - z1*y2,
+            w1*y2 - x1*z2 + y1*w2 + z1*x2,
+            w1*z2 + x1*y2 - y1*x2 + z1*w2,
+            w1*w2 - x1*x2 - y1*y2 - z1*z2,
+        ], dtype=np.float32)
+    expected = qmul(qx, qmul(qy, qz))
+    np.testing.assert_allclose(np.abs(actual), np.abs(expected), atol=1e-4)
+
+
 def test_pose_preset_applies_builtin_bones() -> None:
     """Setting ``pose: 'v_arms_up'`` writes the built-in preset's bone
     rotations through the runtime — verified by sampling the head's

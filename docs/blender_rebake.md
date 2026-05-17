@@ -100,40 +100,90 @@ animation channel.
 
 ## Step 5 — reference the pose from JSON
 
-In the animation document, add a `pose_library` block that points the
-canonical name at the action you saved:
+There are two ways to plug the Blender-authored bone rotations into
+PoseCascade:
+
+### 5a — `bones_local` (Blender-native)
+
+Use this when you've finished posing in Blender and want to drop the
+raw bone rotations straight into a phase. The runtime treats
+`bones_local` values as **bone-local basis rotations** (matching
+Blender's `pose_bone.rotation_euler` with `rotation_mode='XYZ'`) and
+writes `node.transform.rotation = basis_quat × rest_rotation`
+without the world-frame conjugation that the regular `bones:` path
+applies.
+
+Extract values from your Blender pose:
+
+```python
+import math
+arm = bpy.data.objects["Armature"]   # your rig's armature name
+for bone_name in ("Spine", "Chest", "Left arm", "Right arm", ...):
+    pb = arm.pose.bones[bone_name]
+    eul = pb.matrix_basis.to_euler('XYZ')   # critical: 'XYZ' = intrinsic XYZ
+    print(f'  "{bone_name}": {{"x_rad": {eul.x:.3f}, '
+          f'"y_rad": {eul.y:.3f}, "z_rad": {eul.z:.3f}}},')
+```
+
+Paste into the JSON under `bones_local`:
 
 ```json
 {
   "schema_version": 1,
   "extends": "_herta_profile.json",
-  "name": "dog_crawl_demo",
-  "loop_sec": 6.0,
-  "pose_library": {
-    "dog_crawl": {
-      "from_action": "dog_crawl"
+  "phases": [{
+    "name": "hold",
+    "duration_sec": 4.0,
+    "body": {"translation": [0, -0.45, 0]},
+    "bones_local": {
+      "chest": {"x_rad": -0.916},
+      "upper_arm_L": {"x_rad": 0.653, "y_rad": -0.463, "z_rad": 0.878}
     }
-  },
-  "phases": [
-    {
-      "name": "hold",
-      "duration_sec": 6.0,
-      "pose": "dog_crawl"
-    }
-  ]
+  }]
 }
 ```
 
-> `from_action` is a placeholder for the loader hook this PR doesn't
-> ship — the current pose-library schema only accepts per-bone
-> rotation dicts. Loading actions from the GLB into the pose library
-> is tracked for a near-term follow-up. Until then, the workflow is:
-> export your pose, read the per-bone rotations out of Blender's
-> Pose Mode rotation panel, and write them straight into the
-> `pose_library` block as `bone: {x_rad, y_rad, z_rad}` entries.
-> That's what `posecascade/scripting/pose_library.py` does for the
-> built-in presets and gives identical results — the Blender step
-> just lets you author the values visually instead of guessing.
+Notes:
+
+- `bones_local` uses **intrinsic XYZ** Euler order (`Rx · Ry · Rz`),
+  matching Blender's default. The regular `bones:` field uses
+  extrinsic XYZ — they produce different rotations for the same
+  three angle values. Don't mix the two paths on the same bone.
+- The runtime resolves bone keys through the rig's `body_bones`
+  alias map, so you can use canonical names like `"chest"` even
+  when the GLB names the bone `"Chest_0179"`.
+- Don't combine `bones_local` with the gait system — gait writes
+  world-frame deltas through `_set_bone` and they don't compose
+  cleanly with local-frame writes.
+
+### 5b — `pose_library` preset (per-bone shorthand)
+
+Use this when the same pose should be reused across multiple phases
+(e.g. an "idle stance" referenced from several animations). Define
+the pose once in a `pose_library` block, then phases reference it
+with `pose: "<name>"`. The runtime composes it through the
+gait-aware slerp path (different from `bones_local`'s hard write).
+
+```json
+{
+  "schema_version": 1,
+  "extends": "_herta_profile.json",
+  "pose_library": {
+    "my_pose": {
+      "chest": {"x_rad": -0.10},
+      "upper_arm_L": {"x_rad": -1.30, "z_rad": 0.55}
+    }
+  },
+  "phases": [{
+    "name": "hold", "duration_sec": 2.0, "pose": "my_pose"
+  }]
+}
+```
+
+> Loading actions from the GLB into the pose library is tracked for
+> a future PR; until then, both paths above require copying values
+> out of Blender's rotation panel by hand or by the script snippet
+> above.
 
 ## Driving Blender from PoseCascade's MCP server
 

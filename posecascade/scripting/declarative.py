@@ -412,6 +412,20 @@ class Phase:
     # a custom curve (e.g. hold the arm overhead during a finale phase
     # while the walking gait would otherwise swing it).
     bones: dict[str, dict[str, Any]]
+    # Same shape as ``bones`` but interpreted as bone-LOCAL basis
+    # rotations rather than world-frame deltas: x_rad/y_rad/z_rad are
+    # Blender-style intrinsic XYZ Euler angles in the bone's own basis
+    # frame (matching ``pose_bone.rotation_euler`` with rotation_mode
+    # 'XYZ'). The runtime writes ``rotation = basis_quat @ rest_rotation``
+    # directly without the world-frame conjugation ``bones:`` does,
+    # because Blender's ``matrix_basis`` is already in the correct
+    # frame for direct concatenation.
+    #
+    # Use this when importing a pose authored in Blender (or any DCC
+    # that exports bone rotations in the bone's local frame). Don't use
+    # it with the gait system — gait writes world deltas and they don't
+    # compose with local basis rotations cleanly.
+    bones_local: dict[str, dict[str, Any]]
     # Cross-fade windows in seconds. When > 0 AND the next phase's
     # ``blend_in_sec`` is also > 0, the runtime evaluates BOTH phases'
     # body / bones / morphs outputs in the overlap window (using the
@@ -637,6 +651,10 @@ class PhaseOutput:
     lean: float
     translation: tuple[float, float, float]
     bones: dict[str, np.ndarray] = field(default_factory=dict)
+    # Bone-LOCAL basis quaternions (Blender-style). Applied without the
+    # world-frame conjugation that ``bones`` goes through — the runtime
+    # writes ``node.transform.rotation = q @ rest_rotation`` directly.
+    bones_local: dict[str, np.ndarray] = field(default_factory=dict)
     morphs: dict[str, float] = field(default_factory=dict)
     pose_blends: dict[str, tuple[np.ndarray, float]] = field(default_factory=dict)
 
@@ -803,6 +821,7 @@ def _parse_phase(raw: dict[str, Any], bpm: float) -> Phase:
     if not isinstance(morphs, dict):
         raise DeclarativeAnimationError("phase 'morphs' must be an object")
     bones = _parse_bones(raw.get("bones", {}))
+    bones_local = _parse_bones(raw.get("bones_local", {}))
     blend_in = float(raw.get("blend_in_sec", 0.0))
     blend_out = float(raw.get("blend_out_sec", 0.0))
     if blend_in < 0.0 or blend_out < 0.0:
@@ -822,6 +841,7 @@ def _parse_phase(raw: dict[str, Any], bpm: float) -> Phase:
         gait=raw.get("gait"),
         morphs=morphs,
         bones=bones,
+        bones_local=bones_local,
         blend_in_sec=blend_in,
         blend_out_sec=blend_out,
         pose=pose,
@@ -2306,6 +2326,14 @@ class DeclarativeRuntime:
             if _is_identity_quat(body_delta):
                 continue
             self._set_bone(bone_key, _yaw_to_world(body_delta, output.yaw))
+        # Blender-style local basis bones. Applied AFTER ``bones`` so a
+        # phase that mixes both forms gets the local-frame write last —
+        # consistent with the "Blender output is the source of truth"
+        # workflow these values come from.
+        for bone_key, basis_quat in output.bones_local.items():
+            if _is_identity_quat(basis_quat):
+                continue
+            self._set_bone_local(bone_key, basis_quat)
         # Pose blends slerp from gait's CURRENT bone rotation toward
         # the pose target by per-frame weight — produces a real "slow
         # rise from hanging to posed" because at low weight the arm is
@@ -2522,7 +2550,12 @@ class DeclarativeRuntime:
         scope: dict[str, float],
         phase_t: float,
     ) -> None:
-        """Evaluate ``phase.bones`` per-axis curves into ``output.bones``."""
+        """Evaluate ``phase.bones`` per-axis curves into ``output.bones``.
+
+        Also evaluates ``phase.bones_local`` into ``output.bones_local``
+        using intrinsic XYZ Euler (Blender convention) so the per-axis
+        ``rotation_euler`` values exported from Blender drop straight in.
+        """
         for bone_key, axes_spec in phase.bones.items():
             try:
                 x = _resolve_value_curve(axes_spec.get("x_rad", 0.0), phase_t, scope)
@@ -2534,6 +2567,17 @@ class DeclarativeRuntime:
                 )
                 continue
             output.bones[bone_key] = _euler_zyx_quat(x, y, z)
+        for bone_key, axes_spec in phase.bones_local.items():
+            try:
+                x = _resolve_value_curve(axes_spec.get("x_rad", 0.0), phase_t, scope)
+                y = _resolve_value_curve(axes_spec.get("y_rad", 0.0), phase_t, scope)
+                z = _resolve_value_curve(axes_spec.get("z_rad", 0.0), phase_t, scope)
+            except DeclarativeAnimationError as err:
+                _log.warning(
+                    "declarative: bones_local[%r] failed to evaluate: %s", bone_key, err,
+                )
+                continue
+            output.bones_local[bone_key] = _euler_xyz_intrinsic_quat(x, y, z)
 
 
     def _maybe_refresh_lock_targets(
@@ -2915,6 +2959,31 @@ class DeclarativeRuntime:
         )
         self._invalidate_parent_world_for(drive.node)
 
+    def _set_bone_local(self, bone_key: str, basis_quat: np.ndarray) -> None:
+        """Apply a Blender-style local basis rotation directly.
+
+        Where :meth:`_set_bone` interprets its input as a WORLD-frame
+        delta and conjugates through the parent chain, this method takes
+        a rotation already expressed in the bone's local basis frame —
+        the same value Blender stores in ``pose_bone.matrix_basis`` /
+        ``rotation_quaternion``. Composition is just
+        ``rotation = basis_quat * rest_rotation``, no conjugation; the
+        parent's posed rotation is handled by the scene graph's normal
+        matrix composition at evaluation time.
+
+        Use this for poses authored in Blender (or any DCC where the
+        natural per-bone rotation is local-frame). For programmatically
+        composed world-frame deltas (gait, IK solvers), use ``_set_bone``.
+        """
+        bone_name = self.animation.rig.body_bones.get(bone_key, bone_key)
+        drive = self._bone_drives.get(bone_name)
+        if drive is None:
+            return
+        drive.node.transform.set_rotation(
+            quat_mul(basis_quat, drive.rest_rotation).astype(np.float32, copy=False),
+        )
+        self._invalidate_parent_world_for(drive.node)
+
     # ----- on_event ---------------------------------------------------------
     def _on_event(self, name: str, _payload: object) -> None:
         if name != "reset":
@@ -2964,6 +3033,8 @@ def _phase_target_bones(
     if phase.gait is not None:
         names.update(_gait_target_bones(phase.gait, rig))
     for bone_key in phase.bones:
+        names.add(rig.body_bones.get(bone_key, bone_key))
+    for bone_key in phase.bones_local:
         names.add(rig.body_bones.get(bone_key, bone_key))
     if phase.pose and pose_library is not None:
         preset = pose_library.get(phase.pose)
@@ -3027,6 +3098,22 @@ def _euler_zyx_quat(x: float, y: float, z: float) -> np.ndarray:
     qy = quat_axis_angle(vec3(0.0, 1.0, 0.0), y)
     qz = quat_axis_angle(vec3(0.0, 0.0, 1.0), z)
     return quat_mul(qz, quat_mul(qy, qx))
+
+
+def _euler_xyz_intrinsic_quat(x: float, y: float, z: float) -> np.ndarray:
+    """Compose ``Rx · Ry · Rz`` as a single quaternion.
+
+    Intrinsic XYZ Euler (== extrinsic ZYX). Matches Blender's default
+    ``rotation_mode='XYZ'`` so values pulled from
+    ``pose_bone.rotation_euler`` or ``Matrix.to_euler('XYZ')`` can be
+    written straight into the ``bones_local`` block and reproduce the
+    same rotation in PoseCascade's runtime. Used only by
+    :meth:`DeclarativeRuntime._set_bone_local`.
+    """
+    qx = quat_axis_angle(vec3(1.0, 0.0, 0.0), x)
+    qy = quat_axis_angle(vec3(0.0, 1.0, 0.0), y)
+    qz = quat_axis_angle(vec3(0.0, 0.0, 1.0), z)
+    return quat_mul(qx, quat_mul(qy, qz))
 
 
 def _bell(t: float, start: float, end: float) -> float:
