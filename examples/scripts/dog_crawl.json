@@ -11,19 +11,17 @@
       "body": {
         "translation": [0.0, -0.45, "0.008 * sin(phase_t * tau)"]
       },
-      "bones": {
-        "spine":       {"x_rad":  0.50},
-        "chest":       {"x_rad":  0.70},
-        "neck":        {"x_rad": -0.40},
-        "head":        {"x_rad": "-0.60 + 0.04 * sin(phase_t * tau)"},
-        "upper_arm_L": {"x_rad":  0.20, "y_rad":  0.50, "z_rad": -0.30},
-        "upper_arm_R": {"x_rad":  0.20, "y_rad": -0.50, "z_rad":  0.30},
-        "upper_leg_L": {"x_rad":  1.571},
-        "upper_leg_R": {"x_rad":  1.571},
-        "lower_leg_L": {"x_rad": -1.571},
-        "lower_leg_R": {"x_rad": -1.571},
-        "foot_L":      {"x_rad":  1.047},
-        "foot_R":      {"x_rad":  1.047}
+      "bones_local": {
+        "spine":       {"x_rad": -0.50},
+        "chest":       {"x_rad": -0.55},
+        "neck":        {"x_rad":  0.10},
+        "head":        {"x_rad": "0.20 + 0.04 * sin(phase_t * tau)"},
+        "upper_arm_L": {"x_rad":  0.653, "y_rad": -0.463, "z_rad":  0.878},
+        "upper_arm_R": {"x_rad":  0.653, "y_rad":  0.463, "z_rad": -0.878},
+        "upper_leg_L": {"x_rad": -1.30, "y_rad": -0.05, "z_rad": -0.10},
+        "upper_leg_R": {"x_rad": -1.30, "y_rad":  0.05, "z_rad":  0.10},
+        "lower_leg_L": {"x_rad":  1.20},
+        "lower_leg_R": {"x_rad":  1.20}
       }
     }
   ]
