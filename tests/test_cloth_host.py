@@ -113,6 +113,27 @@ def test_floor_clamp_holds_cloth_above_floor() -> None:
     assert float(np.min(piece.positions[:, 1])) >= -1.0e-5
 
 
+def test_reclamp_after_collider_push_keeps_passive_verts_above_floor() -> None:
+    """The collider push runs AFTER the solver substep, so it can shove a
+    passive-skin vert below the floor (e.g. a foot-capsule below ground
+    pushes a shoe vert with it). ``tick`` must re-clamp after that pass."""
+    scene, _node, mesh = _scene_with_cloth_node()
+    imported = _make_imported(scene, mesh)
+    host = ClothHost()
+    host.floor_y = 0.0
+    host.register_imported_scene(imported)
+    piece = host.find_piece("cape")
+    piece.params.passive_skin_deform = True
+    # Force every vert below the floor — simulating the worst case after
+    # a collider push (the solver clamp ran earlier, then the collider
+    # pushed everything underground).
+    piece.positions[:, 1] = -0.5
+    host.tick(1.0 / 60.0)
+    assert float(np.min(piece.positions[:, 1])) >= -1.0e-5, (
+        f"reclamp pass left {(piece.positions[:, 1] < -1e-5).sum()} verts below floor"
+    )
+
+
 def test_floor_y_property_forwards_to_solver_ground_y() -> None:
     """``ClothHost.floor_y`` is the public name; ``ClothSolver.ground_y`` is
     the storage. The refactor that moved the clamp inside the solver substep

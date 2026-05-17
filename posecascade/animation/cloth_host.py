@@ -402,12 +402,15 @@ class ClothHost:
         self._update_skin_targets()
         self._solver.step(dt)
         self._project_passive_pieces()
-        # Ground clamp now happens inside the solver's substep loop via
-        # ``ClothSolver.ground_y`` (set from :attr:`floor_y`), so no post-tick
-        # pass is needed. The previous ``_apply_floor_clamp`` snapped verts
-        # only at end-of-frame, leaving them visibly clipped through the
-        # floor during the frame — the solver-side clamp fires every
-        # substep and every constraint iteration.
+        # The solver clamps to ground inside its substep loop, but
+        # ``_project_passive_pieces`` runs AFTER and can push body-skin
+        # verts out of leg/foot capsules straight into the floor —
+        # the dog_crawl pose surfaced this when the foot capsule (still
+        # below ground because the ankle bone sits there) pushed shoe
+        # mesh verts down to negative Y. Re-clamp every passive piece
+        # to ground here so the post-collider state still satisfies
+        # the floor constraint.
+        self._reclamp_passive_pieces_to_ground()
 
     def register_anchor_follower(self, piece: ClothPiece, bone_node: Node) -> bool:
         """Track ``piece``'s full cloth frame to ``bone_node`` each tick.
@@ -594,6 +597,34 @@ class ClothHost:
                 if eligible_idx.size == 0:
                     continue
                 _push_out_collider(piece.positions, eligible_idx, collider)
+
+    def _reclamp_passive_pieces_to_ground(self) -> None:
+        """Snap every passive-skin-deform vert below ``floor_y`` back up to it.
+
+        Mirrors :func:`_project_ground_plane` but runs unconditionally
+        on every vertex (the solver-side version honours per-vert
+        ``inverse_mass == 0`` anchors; here we don't care — anchored
+        verts that landed below ground are just as wrong as movable
+        ones). The cost is one ``y < floor_y`` mask per piece, well
+        under 100 µs on a 30k-vert mesh.
+        """
+        if self._solver.ground_y is None:
+            return
+        floor = float(self._solver.ground_y)
+        for piece in self._solver.pieces:
+            if not piece.enabled or not piece.params.passive_skin_deform:
+                continue
+            if id(piece) in self._gpu_managed_pieces:
+                continue
+            y = piece.positions[:, 1]
+            below_mask = y < floor
+            if not np.any(below_mask):
+                continue
+            lift = floor - y[below_mask]
+            piece.positions[below_mask, 1] = floor
+            piece.prev_positions[below_mask, 1] = (
+                piece.prev_positions[below_mask, 1] + lift
+            )
 
     def _update_skin_targets(self) -> None:
         """Refresh each piece's ``rest_positions`` from current bone matrices.
