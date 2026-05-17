@@ -93,16 +93,29 @@ the model and ``--script`` for a ``.json`` animation document:
    python -m posecascade --scene examples/assets/herta/herta.glb \
                           --script examples/scripts/idle.json
 
-   # Low forward-lean "dog crawl" stance. The bundled Herta GLB ships
-   # a HoYoverse rig whose leg bones don't accept large explicit
-   # rotations cleanly via JSON (the gait system knows the right
-   # rotations, but only for walking / running / stride). The shipped
-   # pose is therefore a kneeling-forward approximation rather than
-   # a true hands-and-knees silhouette; refine via the Inspector dock
-   # or re-bake the rig in Blender if you need a perfect quadruped
-   # pose. The ``cloth`` block below ensures the dress mesh stops at
-   # the floor (engine ground clamp — applies whenever the animation
-   # declares ``ground: {kind: flat}``).
+   # Forward-lean "dog crawl ready" stance.
+   #
+   # Honest scope: the bundled Herta GLB uses a HoYoverse rig whose
+   # leg bones produce visibly deformed output when driven via
+   # explicit ``bones`` rotations from JSON (regardless of the sign
+   # picked) — the gait system knows the right per-rig leg rotations,
+   # but only ships ``walking`` / ``running`` / ``stride`` kinds, none
+   # of which model a stationary kneel. The shipped pose therefore
+   # leaves the legs at rest and just leans the torso forward with
+   # arms extended. For a true hands-and-knees silhouette you can:
+   #
+   # * Open the file in the Inspector dock and tune the leg bones
+   #   live — the rig's true working axes become obvious in seconds.
+   # * Re-bake a "dog_crawl" rest pose in Blender and re-export the
+   #   GLB; the JSON then just needs ``pose: "dog_crawl"`` against
+   #   the saved bone action.
+   # * Author per-rig hand-IK targets (not yet on the schema; tracked
+   #   for a future PR).
+   #
+   # ``collision_deform_meshes`` lists every Object_NNN mesh so the
+   # engine ground clamp (set by ``ground: {kind: flat}`` in the
+   # extends profile) applies to the dress / cape / accessories, not
+   # just the single mesh the herta profile originally registered.
    python -m posecascade --scene examples/assets/herta/herta.glb \
                           --script examples/scripts/dog_crawl.json
 

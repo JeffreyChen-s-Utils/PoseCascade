@@ -88,13 +88,25 @@ virtualenv，这样 editable install 编译 Cython 布料 kernel 时能对到同
    python -m posecascade --scene examples/assets/herta/herta.glb \
                           --script examples/scripts/idle.json
 
-   # 低姿前倾"狗爬式"。随附的 Herta GLB 采用 HoYoverse rig，腿部
-   # 骨骼在 JSON 直接写死的旋转值下不够干净（gait 系统会知道正确
-   # 的旋转，但仅支持 walking / running / stride 三种）。所以随附
-   # 的姿势是"跪姿前倾"的近似，并非真正手脚着地的四足；如需完整
-   # 四足姿势，可用属性面板 dock 微调，或在 Blender 重新烘焙骨架。
-   # 下方的 ``cloth`` 区块确保连衣裙顶点停留在地面（引擎的 ground
-   # clamp——只要动画声明 ``ground: {kind: flat}`` 就自动套用）。
+   # 前倾"狗爬式准备姿势"。
+   #
+   # 诚实说明：随附的 Herta GLB 采用 HoYoverse rig，腿部骨骼通过
+   # JSON 的 ``bones`` 区块直接写旋转时——不论正负——都会跑出明显
+   # 变形的结果。gait 系统知道每个 rig 上的正确腿部旋转，但只支持
+   # ``walking`` / ``running`` / ``stride`` 三种，没有静态跪姿。
+   # 所以随附姿势索性不动腿部、只把躯干前倾并让双臂前伸。如需
+   # 真正手脚着地的四足姿势，建议：
+   #
+   # * 打开属性面板 dock 直接微调腿部骨骼——rig 的真正可用旋转轴
+   #   几秒钟就能调出来。
+   # * 在 Blender 烘焙一个"dog_crawl"静止姿势并重新导出 GLB，
+   #   JSON 那边只要 ``pose: "dog_crawl"`` 引用即可。
+   # * 自制手部 IK 目标（schema 尚未支持；列入未来 PR 规划）。
+   #
+   # ``collision_deform_meshes`` 列出全部 Object_NNN 网格，让引擎的
+   # ground clamp（由 extends 的 profile 中 ``ground: {kind: flat}``
+   # 启用）应用到连衣裙、披风、配件，而不只 herta profile 原本注册
+   # 的单一网格。
    python -m posecascade --scene examples/assets/herta/herta.glb \
                           --script examples/scripts/dog_crawl.json
 
