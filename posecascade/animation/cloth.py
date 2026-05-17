@@ -484,13 +484,23 @@ def anchor_by_island_top(
 
 @dataclass
 class ClothSolver:
-    """Owns multiple :class:`ClothPiece`\\s + colliders + global forces + clock."""
+    """Owns multiple :class:`ClothPiece`\\s + colliders + global forces + clock.
+
+    ``ground_y`` (when set) clamps every movable vertex's Y coordinate to
+    stay at or above the plane after each substep. The declarative runtime
+    reads ``ground: {kind: flat, y: N}`` and forwards N here, so cloth
+    pieces stop sinking through the same floor the foot planter uses for
+    IK — no per-pose tuning required. ``None`` disables the clamp
+    (matches the default behaviour from before the engine added this
+    feature, so scenes without an explicit ground keep working).
+    """
 
     pieces: list[ClothPiece] = field(default_factory=list)
     colliders: list[object] = field(default_factory=list)  # SphereCollider | CapsuleCollider
     forces: list[ClothForce] = field(default_factory=list)
     fixed_dt: float = _DEFAULT_FIXED_DT
     time: float = 0.0
+    ground_y: float | None = None
 
     def add_piece(self, piece: ClothPiece) -> None:
         self.pieces.append(piece)
@@ -507,6 +517,10 @@ class ClothSolver:
                 return piece
         return None
 
+    def set_ground_y(self, ground_y: float | None) -> None:
+        """Set or clear the ground-plane Y clamp. ``None`` disables it."""
+        self.ground_y = None if ground_y is None else float(ground_y)
+
     def step(self, dt: float) -> None:
         """Advance every cloth piece by ``dt`` seconds."""
         if dt <= 0.0:
@@ -521,7 +535,10 @@ class ClothSolver:
     def _step_once(self, dt: float) -> None:
         for piece in self.pieces:
             if piece.enabled:
-                _integrate_piece(piece, dt, self.time, self.forces, self.colliders)
+                _integrate_piece(
+                    piece, dt, self.time, self.forces, self.colliders,
+                    ground_y=self.ground_y,
+                )
         self.time += dt
 
 
@@ -531,6 +548,7 @@ def _integrate_piece(
     time: float,
     forces: Sequence[ClothForce],
     colliders: Sequence[object],
+    ground_y: float | None = None,
 ) -> None:
     """One Verlet step + N constraint iterations + collider projection."""
     if piece.params.passive_skin_deform:
@@ -542,6 +560,10 @@ def _integrate_piece(
         # the hand's own skin verts out of itself).
         np.copyto(piece.prev_positions, piece.positions)
         np.copyto(piece.positions, piece.rest_positions)
+        if ground_y is not None:
+            _project_ground_plane(
+                piece.positions, piece.prev_positions, piece.inverse_masses, ground_y,
+            )
         return
     inv_mass = piece.inverse_masses[:, None]
     external_accel = _accumulate_force(piece, forces, time) * inv_mass
@@ -614,6 +636,10 @@ def _integrate_piece(
             bin_aabbs=bin_aabbs,
             collider_aabbs=collider_aabbs,
         )
+        if ground_y is not None:
+            _project_ground_plane(
+                piece.positions, piece.prev_positions, piece.inverse_masses, ground_y,
+            )
 
 
 def _accumulate_force(
@@ -871,6 +897,35 @@ def _collider_aabb_tuple(collider: object) -> _AABBTuple | None:
             mxz = max(mxz, paz, pbz)
         return (mnx - r, mny - r, mnz - r, mxx + r, mxy + r, mxz + r)
     return None
+
+
+def _project_ground_plane(
+    positions: NDArray[np.float32],
+    prev_positions: NDArray[np.float32],
+    inverse_masses: NDArray[np.float32],
+    ground_y: float,
+) -> None:
+    """Clamp movable vertex Y to stay at or above ``ground_y``.
+
+    Mirrors the projection into ``prev_positions`` so the next Verlet step
+    doesn't read the lift as downward velocity — same pattern as the
+    sphere / capsule projection. Anchored verts (inverse_mass == 0) are
+    left alone; they're typically waistband / collar verts pinned to the
+    rig and the rig is what should be moved if the anchors are below the
+    floor, not the cloth's own correction pass.
+    """
+    movable = inverse_masses > 0.0
+    if not np.any(movable):
+        return
+    y = positions[:, 1]
+    below = movable & (y < ground_y)
+    if not np.any(below):
+        return
+    lift = ground_y - y[below]
+    positions[below, 1] = ground_y
+    # Carry the lift into prev_positions so velocity = pos - prev keeps the
+    # tangential component but zeroes the normal (vertical) component.
+    prev_positions[below, 1] = prev_positions[below, 1] + lift
 
 
 def _project_colliders(

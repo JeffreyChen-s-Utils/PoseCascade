@@ -207,19 +207,29 @@ class ClothHost:
     # register cloth pieces by node reference without the script needing direct
     # access to the importer's flat mesh tuple.
     _last_imported: ImportedScene | None = None
-    # World-Y plane below which cloth verts get clamped each tick. When set,
-    # verts below ``floor_y`` are snapped onto it and stay there until the
-    # solver lifts them — but a cloth whose equilibrium sits below the floor
-    # ends up with its TOP verts near the rest position and its BOTTOM verts
-    # pinned to the plane, visually a stretched mesh smear on the floor.
-    # Default ``None`` (no clamp); callers who need it set it explicitly,
-    # and only when ``rest_pull`` is tuned strongly enough that the cloth
-    # won't simply collapse onto the plane.
-    floor_y: float | None = None
-
     @property
     def solver(self) -> ClothSolver:
         return self._solver
+
+    @property
+    def floor_y(self) -> float | None:
+        """World-Y plane below which cloth verts get clamped each substep.
+
+        Backed by :attr:`ClothSolver.ground_y` so the clamp fires inside
+        the integration loop (catches drift before it accumulates) rather
+        than as a post-tick snap. The declarative runtime forwards the
+        animation's ``ground: {kind: flat, y: N}`` here, so the same plane
+        that drives foot-IK also stops the skirt sinking through it —
+        no per-pose tuning required.
+
+        ``None`` disables the clamp (the default — scenes without an
+        explicit ground keep their pre-feature behaviour).
+        """
+        return self._solver.ground_y
+
+    @floor_y.setter
+    def floor_y(self, value: float | None) -> None:
+        self._solver.set_ground_y(value)
 
     def install_default_forces(self) -> None:
         """Install default world-space gravity (idempotent)."""
@@ -392,26 +402,12 @@ class ClothHost:
         self._update_skin_targets()
         self._solver.step(dt)
         self._project_passive_pieces()
-        self._apply_floor_clamp()
-
-    def _apply_floor_clamp(self) -> None:
-        """Snap any cloth verts that fell below :attr:`floor_y` back onto it.
-
-        Updates ``prev_positions`` in lockstep so the next Verlet step
-        doesn't read a teleport-sized velocity spike off the snap. No-op
-        when ``floor_y`` is None or no piece has any vert below the plane.
-        """
-        if self.floor_y is None:
-            return
-        floor = float(self.floor_y)
-        for piece in self._solver.pieces:
-            if not piece.enabled:
-                continue
-            below = piece.positions[:, 1] < floor
-            if not np.any(below):
-                continue
-            piece.positions[below, 1] = floor
-            piece.prev_positions[below, 1] = floor
+        # Ground clamp now happens inside the solver's substep loop via
+        # ``ClothSolver.ground_y`` (set from :attr:`floor_y`), so no post-tick
+        # pass is needed. The previous ``_apply_floor_clamp`` snapped verts
+        # only at end-of-frame, leaving them visibly clipped through the
+        # floor during the frame — the solver-side clamp fires every
+        # substep and every constraint iteration.
 
     def register_anchor_follower(self, piece: ClothPiece, bone_node: Node) -> bool:
         """Track ``piece``'s full cloth frame to ``bone_node`` each tick.

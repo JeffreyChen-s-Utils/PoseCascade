@@ -1698,6 +1698,15 @@ class DeclarativeRuntime:
         """
         if self.cloth_host is None:
             return
+        # Engage the cloth ground clamp from the animation's ``ground``
+        # block — the same plane the foot planter uses for IK. Means a
+        # crouched / kneeling pose doesn't leave the skirt sinking into
+        # the floor without per-pose tuning. Only flat ground is mapped;
+        # stairs intentionally aren't (the cloth has no notion of which
+        # step it should rest on without colliders for each stair).
+        ground = self.animation.ground
+        if ground is not None and ground.kind == "flat" and hasattr(self.cloth_host, "floor_y"):
+            self.cloth_host.floor_y = _resolve_scalar(ground.params.get("y", 0.0))
         wants_auto = (
             (self.animation.cloth_pieces or self.animation.collision_deform_meshes)
             and self.animation.auto_body_colliders

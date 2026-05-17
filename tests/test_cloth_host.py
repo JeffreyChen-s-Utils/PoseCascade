@@ -113,6 +113,23 @@ def test_floor_clamp_holds_cloth_above_floor() -> None:
     assert float(np.min(piece.positions[:, 1])) >= -1.0e-5
 
 
+def test_floor_y_property_forwards_to_solver_ground_y() -> None:
+    """``ClothHost.floor_y`` is the public name; ``ClothSolver.ground_y`` is
+    the storage. The refactor that moved the clamp inside the solver substep
+    keeps them synced via a property — verify both halves of the round-trip
+    so a future regression that removes the property doesn't silently lose
+    the ground clamp for every animation that relies on it."""
+    host = ClothHost()
+    assert host.floor_y is None
+    assert host.solver.ground_y is None
+    host.floor_y = 1.5
+    assert host.floor_y == 1.5
+    assert host.solver.ground_y == 1.5
+    host.floor_y = None
+    assert host.floor_y is None
+    assert host.solver.ground_y is None
+
+
 def test_iter_local_state_yields_positions_and_normals() -> None:
     scene, _node, mesh = _scene_with_cloth_node()
     imported = _make_imported(scene, mesh)

@@ -1121,12 +1121,68 @@ class _StubClothHost:
     def __init__(self) -> None:
         self.cloth_calls: list[dict] = []
         self.colliders: list = []
+        # Mirrors the real ClothHost surface — the declarative runtime
+        # writes ``floor_y`` from the animation's ``ground`` block so the
+        # cloth solver clamps verts to the same plane the foot planter
+        # uses for IK. ``None`` is the no-clamp default.
+        self.floor_y: float | None = None
 
     def add_cloth_for_node(self, node, **kwargs) -> None:  # noqa: ANN001
         self.cloth_calls.append({"node": node.name, **kwargs})
 
     def add_collider(self, collider) -> None:  # noqa: ANN001
         self.colliders.append(collider)
+
+
+def test_flat_ground_sets_cloth_host_floor_y() -> None:
+    """Declaring ``ground: {kind: flat, y: N}`` should propagate N into
+    ``cloth_host.floor_y`` so cloth verts stop at the same plane the
+    foot planter uses for IK.
+
+    Regression guard: before the cloth solver gained ``ground_y``, the
+    skirt clipped through the floor in any pose that lowered the hips
+    (squat, kneel, crawl). The fix is engine-wide — every animation
+    with a flat ground gets the clamp for free; this test pins that
+    contract so a future refactor can't silently disable it."""
+    scene = _build_minimal_scene()
+    cloth_host = _StubClothHost()
+    doc = _minimal_doc()
+    doc["ground"] = {"kind": "flat", "y": -0.05}
+    # A cloth piece is required because the wiring lives in
+    # ``_setup_cloth_and_colliders`` — without one, that hook short-
+    # circuits before reaching the ground-clamp wiring.
+    doc["cloth"] = [{"mesh_node": "chest"}]
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+        cloth_host=cloth_host,
+    )
+    runtime.hooks()["start"]()
+    assert cloth_host.floor_y == pytest.approx(-0.05)
+
+
+def test_stairs_ground_leaves_cloth_floor_unset() -> None:
+    """Only ``ground.kind == 'flat'`` maps to ``cloth_host.floor_y``.
+
+    Stairs intentionally don't, because the cloth has no notion of
+    which step a vert should rest on without per-step colliders, and
+    clamping to a single plane would either let cloth sink through
+    the upper step or hover above the lower one. Better to leave the
+    clamp off so each scene's authoring decides what to do."""
+    scene = _build_minimal_scene()
+    cloth_host = _StubClothHost()
+    doc = _minimal_doc()
+    doc["ground"] = {
+        "kind": "stairs", "base_z": 0.0, "step_depth": 0.3, "step_rise": 0.15, "count": 4,
+    }
+    doc["cloth"] = [{"mesh_node": "chest"}]
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+        cloth_host=cloth_host,
+    )
+    runtime.hooks()["start"]()
+    assert cloth_host.floor_y is None
 
 
 def test_cloth_pieces_register_with_cloth_host_on_start() -> None:
