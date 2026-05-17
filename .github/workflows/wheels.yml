@@ -302,7 +302,9 @@ jobs:
             --include-data-dir=shaders=shaders \
             --include-data-dir=schemas=schemas \
             --include-data-dir=importers=importers \
+            --include-data-dir=assets=assets \
             --windows-disable-console \
+            --windows-icon-from-ico=assets/PoseCascade.ico \
             --output-dir=dist \
             --output-filename=PoseCascade.exe \
             posecascade/__main__.py

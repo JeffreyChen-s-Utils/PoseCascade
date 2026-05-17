@@ -61,20 +61,35 @@ On Windows, additionally pass:
 
 ```bat
   --windows-disable-console
-  --windows-icon-from-ico=path\to\PoseCascade.ico
+  --windows-icon-from-ico=assets\PoseCascade.ico
 ```
 
 `--windows-disable-console` suppresses the black command-prompt window;
 drop it during development so the logger output stays visible — without
 it, a startup crash gives the user nothing to look at.
 
+`assets/PoseCascade.ico` is checked in and used by the CI build — the
+shipping exe carries it as its file icon and as the window icon Qt
+falls back to when a window hasn't set one explicitly. The icon is a
+multi-resolution ICO (16 / 24 / 32 / 48 / 64 / 128 / 256 px) generated
+from `assets/generate_icon.py`. To tweak the design, edit the script
+and re-run it (`py assets/generate_icon.py`) rather than editing the
+binary — the script is the source of truth so visual changes show up
+in code review.
+
 On macOS, additionally pass:
 
 ```bash
   --macos-create-app-bundle
-  --macos-app-icon=path/to/PoseCascade.icns
+  --macos-app-icon=assets/PoseCascade.png
   --macos-app-name=PoseCascade
 ```
+
+Nuitka converts the PNG to `.icns` on its own; `assets/PoseCascade.png`
+is the 256×256 source that `generate_icon.py` writes alongside the ICO.
+For a pixel-tuned `.icns` (separate artwork per size), build one with
+`iconutil` from a pre-rendered `.iconset/` directory and pass the
+resulting `.icns` directly instead.
 
 The first build takes 3–10 minutes depending on hardware (Nuitka
 re-emits C for every imported module). Subsequent builds reuse the
