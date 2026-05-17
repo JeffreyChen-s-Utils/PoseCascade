@@ -42,19 +42,52 @@ class Transform:
     matrix_override: Mat4 | None = field(default=None, repr=False, compare=False)
 
     def set_translation(self, value: Vec3) -> None:
+        self._hydrate_trs_from_override()
         self.translation = value.astype(np.float32)
         self.matrix_override = None
         self.version += 1
 
     def set_rotation(self, value: Quat) -> None:
+        self._hydrate_trs_from_override()
         self.rotation = value.astype(np.float32)
         self.matrix_override = None
         self.version += 1
 
     def set_scale(self, value: Vec3) -> None:
+        self._hydrate_trs_from_override()
         self.scale = value.astype(np.float32)
         self.matrix_override = None
         self.version += 1
+
+    def _hydrate_trs_from_override(self) -> None:
+        """If ``matrix_override`` is set, decompose it into T/R/S BEFORE the
+        caller mutates one of the three fields and the setter clears the
+        override.
+
+        glTF nodes with a ``matrix`` field land in ``from_raw_matrix`` and
+        keep the bind transform exclusively in ``matrix_override``; the
+        per-field translation / rotation / scale stay at constructor
+        defaults. Without this hydration, a script (or the declarative
+        runtime) that calls ``set_rotation(q)`` would clear the override,
+        then ``to_matrix()`` falls back to ``compose_trs((0,0,0), q,
+        (1,1,1))`` — losing the bone's bind translation entirely and
+        teleporting it to its parent's origin.
+
+        Hydrating reads the override's T/R/S once, copies them onto the
+        TRS fields, then leaves it to the caller's setter to overwrite the
+        specific one being changed. The remaining two preserve the bind.
+
+        Skew in the override (rare in glTF, common in some FBX paths)
+        round-trips lossily through TRS — same caveat as ``from_matrix``,
+        documented there. The vast majority of glTF bones don't carry
+        skew, so this is a clean fix for the typical case.
+        """
+        if self.matrix_override is None:
+            return
+        translation, rotation, scale = decompose_trs(self.matrix_override)
+        self.translation = translation
+        self.rotation = rotation
+        self.scale = scale
 
     def to_matrix(self) -> Mat4:
         """Return the local transform matrix.

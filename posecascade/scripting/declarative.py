@@ -1616,6 +1616,13 @@ class DeclarativeRuntime:
         if root_name:
             root_node = self.scene.find(root_name)
             if root_node is not None:
+                # Force the node's TRS fields to reflect the actual bind
+                # transform — glTF nodes with a ``matrix`` field land in
+                # ``matrix_override`` with TRS defaulted to identity. If we
+                # cache that default identity as ``rest_rotation``, the
+                # runtime's ``basis_quat * rest_rotation`` math composes
+                # against the wrong base.
+                root_node.transform._hydrate_trs_from_override()  # noqa: SLF001
                 self._root_drive = _BoneDrive(
                     node=root_node,
                     rest_rotation=np.asarray(
@@ -1637,6 +1644,11 @@ class DeclarativeRuntime:
                 node = self.scene.find(bone_name)
                 if node is None:
                     continue
+                # Same hydration as the root cache above — ensures the
+                # captured ``rest_rotation`` is the bind rotation rather
+                # than the identity placeholder that glTF
+                # ``matrix_override`` nodes carry by default.
+                node.transform._hydrate_trs_from_override()  # noqa: SLF001
                 self._bone_drives[bone_name] = _BoneDrive(
                     node=node,
                     rest_rotation=np.asarray(
