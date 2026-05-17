@@ -990,6 +990,7 @@ class Renderer:
                 world_to_local=world_to_local,
                 colliders=colliders,
                 exclude_bits=exclude_bits,
+                ground_y=getattr(cloth_host, "floor_y", None),
             )
 
     def set_selected_holder(self, holder: Node | None) -> None:

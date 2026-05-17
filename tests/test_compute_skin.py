@@ -199,6 +199,81 @@ def test_dispatcher_compiles_and_runs(gl_compute_context: object) -> None:
     dispatcher.shutdown()
 
 
+def test_dispatcher_ground_clamp_lifts_below_floor_verts(gl_compute_context: object) -> None:
+    """With ``ground_y=0``, dispatch must clamp every world-Y < 0 vert up to 0."""
+    from OpenGL.GL import (  # noqa: PLC0415
+        GL_ARRAY_BUFFER,
+        GL_DYNAMIC_DRAW,
+        glBindBuffer,
+        glBufferData,
+        glGenBuffers,
+        glGetBufferSubData,
+    )
+
+    shader_path = _REPO_ROOT / "shaders" / "passive_skin" / "passive_skin_push.comp"
+    dispatcher = PassiveSkinDispatcher.try_create(shader_path)
+    if dispatcher is None:
+        pytest.skip("driver compiled out compute support")
+
+    n = 4
+    bind_positions = np.array(
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.5, 0.0], [1.0, 0.5, 0.0]],
+        dtype=np.float32,
+    )
+    bind_normals = np.tile(np.array([0.0, 1.0, 0.0], dtype=np.float32), (n, 1))
+    joints = np.zeros((n, 4), dtype=np.int32)
+    weights = np.zeros((n, 4), dtype=np.float32)
+    weights[:, 0] = 1.0
+    dominant = np.zeros(n, dtype=np.int32)
+
+    pos_vbo = int(glGenBuffers(1))
+    glBindBuffer(GL_ARRAY_BUFFER, pos_vbo)
+    glBufferData(GL_ARRAY_BUFFER, n * 3 * 4, np.zeros(n * 3, dtype=np.float32), GL_DYNAMIC_DRAW)
+    norm_vbo = int(glGenBuffers(1))
+    glBindBuffer(GL_ARRAY_BUFFER, norm_vbo)
+    glBufferData(GL_ARRAY_BUFFER, n * 3 * 4, np.zeros(n * 3, dtype=np.float32), GL_DYNAMIC_DRAW)
+
+    dispatcher.register_piece(
+        piece_id=1, output_position_vbo=pos_vbo, output_normal_vbo=norm_vbo,
+        bind_positions=bind_positions, bind_normals=bind_normals,
+        joints_per_vert=joints, weights_per_vert=weights, dominant_joint=dominant,
+    )
+    # Bone 0 translates -1.0 in Y, dragging all verts to negative Y.
+    bone_matrices = np.zeros((1, 4, 4), dtype=np.float32)
+    bone_matrices[0] = np.eye(4, dtype=np.float32)
+    bone_matrices[0, 1, 3] = -1.0
+    exclude_bits = build_exclude_bits([], collider_count=0)
+    world_to_local = np.eye(4, dtype=np.float32)
+
+    # Dispatch WITHOUT ground clamp first — verts should be negative.
+    dispatcher.dispatch(
+        piece_id=1, bone_matrices=bone_matrices, world_to_local=world_to_local,
+        colliders=[], exclude_bits=exclude_bits, ground_y=None,
+    )
+    glBindBuffer(GL_ARRAY_BUFFER, pos_vbo)
+    raw = glGetBufferSubData(GL_ARRAY_BUFFER, 0, n * 3 * 4)
+    out_unclamped = np.frombuffer(
+        bytes(raw) if not isinstance(raw, bytes) else raw, dtype=np.float32,
+    ).reshape(n, 3)
+    assert float(out_unclamped[:, 1].min()) < -0.4, "expected negative Y without clamp"
+
+    # Now dispatch WITH ground_y=0 — every Y must be >= 0.
+    dispatcher.dispatch(
+        piece_id=1, bone_matrices=bone_matrices, world_to_local=world_to_local,
+        colliders=[], exclude_bits=exclude_bits, ground_y=0.0,
+    )
+    glBindBuffer(GL_ARRAY_BUFFER, pos_vbo)
+    raw = glGetBufferSubData(GL_ARRAY_BUFFER, 0, n * 3 * 4)
+    out_clamped = np.frombuffer(
+        bytes(raw) if not isinstance(raw, bytes) else raw, dtype=np.float32,
+    ).reshape(n, 3)
+    assert float(out_clamped[:, 1].min()) >= -1.0e-5, (
+        f"ground clamp leaked: min Y = {float(out_clamped[:, 1].min())}"
+    )
+
+    dispatcher.shutdown()
+
+
 def test_dispatcher_returns_none_on_missing_shader(qapp: object) -> None:
     """Missing shader file logs a warning and returns ``None`` (no GL needed)."""
     # No GL context required for this branch — it bails on the file read.

@@ -73,6 +73,7 @@ from OpenGL.GL import (
     glLinkProgram,
     glMemoryBarrier,
     glShaderSource,
+    glUniform1f,
     glUniform1ui,
     glUniformMatrix4fv,
     glUseProgram,
@@ -135,12 +136,16 @@ class PassiveSkinDispatcher:
         program: int,
         loc_vert_count: int,
         loc_world_to_local: int,
+        loc_ground_enabled: int,
+        loc_ground_y: int,
         bone_matrices_ssbo: int,
         colliders_ubo: int,
     ) -> None:
         self._program = program
         self._loc_vert_count = loc_vert_count
         self._loc_world_to_local = loc_world_to_local
+        self._loc_ground_enabled = loc_ground_enabled
+        self._loc_ground_y = loc_ground_y
         self._bone_matrices_ssbo = bone_matrices_ssbo
         self._colliders_ubo = colliders_ubo
         self._slots: dict[int, PassiveSkinSlot] = {}
@@ -191,10 +196,14 @@ class PassiveSkinDispatcher:
         )
         loc_vert_count = int(glGetUniformLocation(program, "u_vertCount"))
         loc_world_to_local = int(glGetUniformLocation(program, "u_worldToLocal"))
+        loc_ground_enabled = int(glGetUniformLocation(program, "u_groundEnabled"))
+        loc_ground_y = int(glGetUniformLocation(program, "u_groundY"))
         return cls(
             program=program,
             loc_vert_count=loc_vert_count,
             loc_world_to_local=loc_world_to_local,
+            loc_ground_enabled=loc_ground_enabled,
+            loc_ground_y=loc_ground_y,
             bone_matrices_ssbo=bone_ssbo,
             colliders_ubo=ubo,
         )
@@ -280,6 +289,7 @@ class PassiveSkinDispatcher:
         world_to_local: NDArray[np.float32],
         colliders: list[object],
         exclude_bits: NDArray[np.uint32],
+        ground_y: float | None = None,
     ) -> bool:
         """Run the compute shader for one piece. Returns ``True`` if dispatched.
 
@@ -321,6 +331,14 @@ class PassiveSkinDispatcher:
         # GLSL is column-major; numpy mat4 is row-major. Pass transpose=GL_TRUE.
         contig = np.ascontiguousarray(world_to_local, dtype=np.float32)
         glUniformMatrix4fv(self._loc_world_to_local, 1, GL_TRUE, contig)
+        # Ground clamp gate. Both uniforms always written so a previous
+        # frame's enabled state can't leak in when the host turns ground off.
+        if ground_y is None or self._loc_ground_enabled < 0 or self._loc_ground_y < 0:
+            glUniform1ui(self._loc_ground_enabled, 0)
+            glUniform1f(self._loc_ground_y, 0.0)
+        else:
+            glUniform1ui(self._loc_ground_enabled, 1)
+            glUniform1f(self._loc_ground_y, float(ground_y))
 
         # SSBO bindings. Outputs (bindings 4, 8) reuse the mesh's existing
         # position + normal VBOs; the compute shader writes to them in

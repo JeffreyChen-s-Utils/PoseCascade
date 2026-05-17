@@ -88,6 +88,14 @@ layout(std140, binding = 0) uniform CollidersUBO {
 
 uniform uint u_vertCount;
 uniform mat4 u_worldToLocal;
+// Ground-clamp gate. When ``u_groundEnabled != 0`` every world-space vertex
+// that ends up below ``u_groundY`` is lifted back to ``u_groundY``. Mirrors
+// the CPU passive-skin path's _reclamp_passive_pieces_to_ground so the
+// GPU-managed pieces don't visibly clip through the floor in poses where
+// the skinning pushes verts underground (dog-crawl knees, feet on stairs,
+// any prone pose).
+uniform uint u_groundEnabled;
+uniform float u_groundY;
 
 
 void main() {
@@ -152,6 +160,13 @@ void main() {
                 }
             }
         }
+    }
+
+    // Ground clamp — applied in world space, AFTER collider push so the
+    // collider that would have shoved a vert below ground (foot capsule
+    // sitting underground in a deep knee fold, etc.) doesn't leak through.
+    if (u_groundEnabled != 0u && world_p.y < u_groundY) {
+        world_p.y = u_groundY;
     }
 
     // World → mesh-local so the renderer's existing model-matrix uniform
