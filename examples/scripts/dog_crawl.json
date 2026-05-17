@@ -9,21 +9,21 @@
       "name": "settle_into_crawl",
       "duration_sec": 6.0,
       "body": {
-        "translation": [0.0, -0.55, "0.008 * sin(phase_t * tau)"]
+        "translation": [0.0, -0.42, "0.008 * sin(phase_t * tau)"]
       },
       "bones": {
         "spine":       {"x_rad":  0.611},
         "chest":       {"x_rad":  0.611},
         "neck":        {"x_rad": -0.349},
         "head":        {"x_rad": "-0.436 + 0.04 * sin(phase_t * tau)"},
-        "upper_arm_L": {"x_rad":  0.134, "y_rad":  0.597, "z_rad":  1.373},
-        "upper_arm_R": {"x_rad":  0.134, "y_rad": -0.597, "z_rad": -1.373},
-        "lower_arm_L": {"x_rad":  0.044, "z_rad": -0.028},
-        "lower_arm_R": {"x_rad":  0.044, "z_rad":  0.028},
-        "lower_leg_L": {"x_rad": -2.109, "y_rad":  0.531, "z_rad": -0.942},
-        "lower_leg_R": {"x_rad": -2.109, "y_rad": -0.531, "z_rad":  0.942},
-        "foot_L":      {"x_rad": -0.319, "y_rad":  1.698, "z_rad":  1.014},
-        "foot_R":      {"x_rad": -0.319, "y_rad": -1.698, "z_rad": -1.014}
+        "upper_arm_L": {"x_rad": -1.094, "y_rad": -0.945, "z_rad":  1.290},
+        "upper_arm_R": {"x_rad": -1.094, "y_rad":  0.945, "z_rad": -1.290},
+        "lower_arm_L": {"x_rad":  0.044, "y_rad":  0.028, "z_rad":  0.013},
+        "lower_arm_R": {"x_rad":  0.044, "y_rad": -0.028, "z_rad": -0.013},
+        "lower_leg_L": {"x_rad": -1.501, "y_rad":  0.772, "z_rad":  0.784},
+        "lower_leg_R": {"x_rad": -1.501, "y_rad": -0.772, "z_rad": -0.784},
+        "foot_L":      {"x_rad": -1.329, "y_rad":  0.108, "z_rad":  1.638},
+        "foot_R":      {"x_rad": -1.329, "y_rad": -0.108, "z_rad": -1.638}
       }
     }
   ]
