@@ -4,26 +4,13 @@
   "name": "dog_crawl_demo",
   "loop_sec": 6.0,
 
-  "collision_deform_meshes": [
-    "Object_360", "Object_361", "Object_362",
-    "Object_363", "Object_364", "Object_365"
-  ],
-
-  "cloth": [
-    {
-      "mesh_node": "Skirt",
-      "track_bone": "hip",
-      "structural_stiffness": 0.85,
-      "bend_stiffness": 0.20,
-      "linear_damping": 0.96,
-      "anchor_axis": 1,
-      "anchor_fraction": 0.18,
-      "anchor_mode": "top_axis",
-      "iterations": 10,
-      "substeps": 3,
-      "rest_pull": 30.0
-    }
-  ],
+  "rig": {
+    "character_root": "Object_4",
+    "leg_chain_l": ["upper_leg_L", "lower_leg_L", "foot_L"],
+    "leg_chain_r": ["upper_leg_R", "lower_leg_R", "foot_R"],
+    "arm_chain_l": ["upper_arm_L", "lower_arm_L", "hand_L"],
+    "arm_chain_r": ["upper_arm_R", "lower_arm_R", "hand_R"]
+  },
 
   "phases": [
     {
@@ -33,13 +20,13 @@
         "translation": [0.0, -0.18, "0.010 * sin(phase_t * tau)"]
       },
       "bones": {
-        "chest":       {"x_rad":  0.75},
-        "hip":         {"x_rad":  0.25},
-        "head":        {"x_rad": "-0.55 + 0.05 * sin(phase_t * tau)"},
-        "upper_arm_L": {"x_rad": -1.55, "z_rad": -0.18},
-        "upper_arm_R": {"x_rad": -1.55, "z_rad":  0.18},
-        "lower_arm_L": {"x_rad":  0.20},
-        "lower_arm_R": {"x_rad":  0.20}
+        "chest": {"x_rad":  0.75},
+        "hip":   {"x_rad":  0.25},
+        "head":  {"x_rad": "-0.55 + 0.05 * sin(phase_t * tau)"}
+      },
+      "ik": {
+        "hand_l_target": [-0.20, 0.05, 0.40],
+        "hand_r_target": [ 0.20, 0.05, 0.40]
       }
     }
   ]

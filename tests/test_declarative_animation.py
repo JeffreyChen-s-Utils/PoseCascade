@@ -1134,6 +1134,166 @@ class _StubClothHost:
         self.colliders.append(collider)
 
 
+def test_hand_ik_drives_wrist_toward_target() -> None:
+    """Declaring ``rig.arm_chain_l`` + ``ik.hand_l_target`` should make
+    the runtime drive the wrist node to the world target each frame.
+
+    Builds a vertical 3-bone arm chain (shoulder at Y=2 → elbow at
+    Y=1.5 → wrist at Y=1), declares a target at (1, 1.2, 0), and
+    asserts the wrist ends up within a small tolerance of the target
+    after one update tick. Loose tolerance — CCD converges in 8
+    iterations to within centimetres, not microns, and a future
+    swap to the analytic solver would still satisfy 0.05 m."""
+    from posecascade.utils.math3d import vec3  # noqa: PLC0415
+
+    scene = Scene(name="test")
+    char_root = _node("char")
+    # Hierarchical arm chain: shoulder owns elbow owns wrist. The
+    # IK solver walks the parent chain to find world-space orientation,
+    # so the bones need to be nested, not flat siblings.
+    shoulder = _node("upper_arm_L")
+    shoulder.transform.set_translation(vec3(0.0, 2.0, 0.0))
+    elbow = _node("lower_arm_L")
+    elbow.transform.set_translation(vec3(0.0, -0.5, 0.0))
+    wrist = _node("hand_L")
+    wrist.transform.set_translation(vec3(0.0, -0.5, 0.0))
+    elbow.add_child(wrist)
+    shoulder.add_child(elbow)
+    char_root.add_child(shoulder)
+    scene.root.add_child(char_root)
+
+    doc = _minimal_doc()
+    doc["rig"]["character_root"] = "char"
+    doc["rig"]["arm_chain_l"] = ["upper_arm_L", "lower_arm_L", "hand_L"]
+    # Target within reach (~0.6 m from shoulder; arm length is 1.0 m).
+    doc["phases"][0]["ik"] = {"hand_l_target": [0.4, 1.6, 0.0]}
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+    )
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)
+
+    from posecascade.animation.ik import _world_position  # noqa: PLC0415
+    wrist_world = np.asarray(_world_position(wrist), dtype=np.float32)
+    target = np.array([0.4, 1.6, 0.0], dtype=np.float32)
+    distance = float(np.linalg.norm(wrist_world - target))
+    # Within 10 cm is a comfortable bar for 8 iterations of CCD on a
+    # 2-link chain. The point isn't sub-mm precision — it's "the IK
+    # actually drove the bone toward the target", which 10 cm proves.
+    assert distance < 0.10, f"wrist landed at {wrist_world}, target {target}, distance {distance}"
+
+
+def test_hand_ik_disabled_without_arm_chain_or_target() -> None:
+    """Hand IK should no-op cleanly when either the rig has no
+    ``arm_chain_*`` OR the phase has no ``ik.hand_*_target``.
+
+    Regression guard: a typo in the rig block shouldn't crash the
+    runtime — it should just leave the arms at rest (matching
+    pre-IK behaviour) so existing animations keep working when
+    only one side of the wiring is present."""
+    scene = _build_minimal_scene()
+    doc = _minimal_doc()
+    # Arm chain declared but no target — should no-op.
+    doc["rig"]["arm_chain_l"] = ["upper_arm_L", "lower_arm_L", "hand_L"]
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(animation=parsed, scene=scene, time=lambda: 0.0)
+    hooks = runtime.hooks()
+    hooks["start"]()
+    hooks["update"](0.0)  # must not raise
+
+
+def test_auto_clamp_discovers_skinned_meshes_under_flat_ground() -> None:
+    """With ``ground.kind == 'flat'`` and the default
+    ``auto_clamp_skinned_to_ground = True``, the runtime walks the scene
+    at start and registers every SkinRefComponent node as a passive
+    collision_deform piece — so the engine's cloth-floor clamp covers
+    every clothing / hair / accessory mesh without per-document
+    enumeration.
+
+    The minimal test scene has three skinned nodes (chest / upper_arm_L /
+    upper_leg_L per ``_build_minimal_scene``); the test asserts every
+    one of them ends up as a cloth piece named ``auto_clamp_<node>``."""
+    from posecascade.scene.component import SkinRefComponent  # noqa: PLC0415
+    scene = _build_minimal_scene()
+    # Tag the three skinned nodes with SkinRefComponent so the discovery
+    # walk sees them. The minimal scene's bones don't carry a skin ref
+    # by default — this stamps the marker the cloth host looks for.
+    for name in ("chest", "upper_arm_L", "upper_leg_L"):
+        node = scene.find(name)
+        node.components = list(node.components) + [SkinRefComponent()]
+    cloth_host = _StubClothHost()
+    doc = _minimal_doc()
+    doc["ground"] = {"kind": "flat", "y": 0.0}
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+        cloth_host=cloth_host,
+    )
+    runtime.hooks()["start"]()
+    auto_names = {c["cloth_name"] for c in cloth_host.cloth_calls}
+    assert "auto_clamp_chest" in auto_names
+    assert "auto_clamp_upper_arm_L" in auto_names
+    assert "auto_clamp_upper_leg_L" in auto_names
+
+
+def test_auto_clamp_skips_explicit_collision_deform_entries() -> None:
+    """Names already in ``collision_deform_meshes`` aren't re-discovered.
+
+    Otherwise the auto path would register a duplicate piece for every
+    explicit entry — the cloth host would happily build two solver
+    pieces for the same mesh and the renderer would draw whichever's
+    state was synced last. Pin the dedupe behaviour so a future
+    refactor can't silently regress it."""
+    from posecascade.scene.component import SkinRefComponent  # noqa: PLC0415
+    scene = _build_minimal_scene()
+    chest = scene.find("chest")
+    chest.components = list(chest.components) + [SkinRefComponent()]
+    cloth_host = _StubClothHost()
+    doc = _minimal_doc()
+    doc["ground"] = {"kind": "flat", "y": 0.0}
+    doc["collision_deform_meshes"] = ["chest"]  # explicit entry
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+        cloth_host=cloth_host,
+    )
+    runtime.hooks()["start"]()
+    cloth_names = [c["cloth_name"] for c in cloth_host.cloth_calls]
+    # Exactly one registration — the explicit one — for chest.
+    assert cloth_names.count("collision_deform_chest") == 1
+    assert "auto_clamp_chest" not in cloth_names
+
+
+def test_auto_clamp_opt_out_via_flag() -> None:
+    """Setting ``auto_clamp_skinned_to_ground = false`` disables discovery.
+
+    Useful for abstract / underground sequences where the cloth should
+    be free to drape below the floor plane (or for non-humanoid rigs
+    where the auto-discovered passive-skin overhead isn't worth it)."""
+    from posecascade.scene.component import SkinRefComponent  # noqa: PLC0415
+    scene = _build_minimal_scene()
+    scene.find("chest").components = list(scene.find("chest").components) + [
+        SkinRefComponent(),
+    ]
+    cloth_host = _StubClothHost()
+    doc = _minimal_doc()
+    doc["ground"] = {"kind": "flat", "y": 0.0}
+    doc["auto_clamp_skinned_to_ground"] = False
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+        cloth_host=cloth_host,
+    )
+    runtime.hooks()["start"]()
+    # No cloth pieces registered — the opt-out switched off the whole
+    # auto path even though ground.kind == flat.
+    assert not any(
+        c["cloth_name"].startswith("auto_clamp_") for c in cloth_host.cloth_calls
+    )
+
+
 def test_flat_ground_sets_cloth_host_floor_y() -> None:
     """Declaring ``ground: {kind: flat, y: N}`` should propagate N into
     ``cloth_host.floor_y`` so cloth verts stop at the same plane the

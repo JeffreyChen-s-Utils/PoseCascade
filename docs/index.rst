@@ -20,6 +20,7 @@ Welcome to the PoseCascade documentation. Please select your language:
    rendering_pipeline
    declarative_animation
    animation_editor
+   blender_rebake
    mcp
    packaging_pyinstaller
    packaging_nuitka

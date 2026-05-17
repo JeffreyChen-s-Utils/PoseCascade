@@ -378,6 +378,18 @@ class RigBindings:
     knee_limit_min: tuple[float, float, float] | None
     knee_limit_max: tuple[float, float, float] | None
     body_bones: dict[str, str]
+    # Three-bone chains for hand IK: shoulder → elbow → wrist. When set
+    # AND a phase declares ``ik.hand_l_target`` / ``ik.hand_r_target``,
+    # the runtime drives the arm to put the wrist at the target world
+    # position each frame. ``None`` (the default) disables hand IK.
+    # Mirrors ``leg_chain_l/r``; bone names go through the alias map.
+    arm_chain_l: tuple[str, str, str] | None = None
+    arm_chain_r: tuple[str, str, str] | None = None
+    # Optional XYZ-Euler clamps on the elbow's local rotation so the
+    # IK solver doesn't bend the arm sideways. Same shape +
+    # interpretation as ``knee_limit_min/max``. ``None`` = no clamp.
+    elbow_limit_min: tuple[float, float, float] | None = None
+    elbow_limit_max: tuple[float, float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -422,6 +434,17 @@ class Phase:
     # collide with body silhouette presets.
     hand_l: str | None
     hand_r: str | None
+    # Optional world-space target positions for IK-driving the wrist
+    # bones. When both ``hand_l_target`` and ``rig.arm_chain_l`` (or
+    # the right-side equivalents) are non-None, the runtime runs
+    # two-bone IK on the arm chain each frame to land the wrist at
+    # the target. Each target is a 3-tuple of value curves (so the
+    # target can move per frame); ``None`` per side leaves that arm
+    # alone. Used to pin hands to a fixed point on the floor for
+    # quadruped poses, or to track a moving prop. Parsed from a phase
+    # ``ik`` block: ``{ik: {hand_l_target: [x, y, z], ...}}``.
+    hand_l_target: tuple[Any, Any, Any] | None
+    hand_r_target: tuple[Any, Any, Any] | None
 
 
 @dataclass(frozen=True)
@@ -579,6 +602,16 @@ class DeclarativeAnimation:
     # names; the mesh primitive index can be supplied as a (name,
     # mesh_index) tuple if a node carries multiple primitives.
     collision_deform_meshes: tuple[Any, ...] = ()
+    # When ``ground.kind == "flat"`` and this is ``True`` (default), the
+    # runtime walks the scene at start, finds every SkinRefComponent
+    # node, and registers each one as a passive collision_deform piece
+    # so the engine's cloth-floor clamp covers every clothing / hair /
+    # accessory mesh — not just the ones the document enumerated by
+    # hand. Existing explicit entries are kept; auto-discovered names
+    # are added only if not already listed. Set to ``False`` to opt out
+    # for rigs whose meshes should be free to drape below the floor
+    # plane (e.g. underground sequences, abstract scenes).
+    auto_clamp_skinned_to_ground: bool = True
 
 
 @dataclass
@@ -691,6 +724,8 @@ def _parse_rig(raw: dict[str, Any]) -> RigBindings:
         raise DeclarativeAnimationError("'rig' must be an object")
     leg_l = raw.get("leg_chain_l")
     leg_r = raw.get("leg_chain_r")
+    arm_l = raw.get("arm_chain_l")
+    arm_r = raw.get("arm_chain_r")
     return RigBindings(
         character_root=str(raw.get("character_root", "")),
         leg_chain_l=tuple(leg_l) if leg_l else None,
@@ -704,6 +739,16 @@ def _parse_rig(raw: dict[str, Any]) -> RigBindings:
             if "knee_limit_max" in raw else None
         ),
         body_bones=dict(raw.get("body_bones", {})),
+        arm_chain_l=tuple(arm_l) if arm_l else None,
+        arm_chain_r=tuple(arm_r) if arm_r else None,
+        elbow_limit_min=(
+            tuple(_resolve_scalar(v) for v in raw["elbow_limit_min"])
+            if "elbow_limit_min" in raw else None
+        ),
+        elbow_limit_max=(
+            tuple(_resolve_scalar(v) for v in raw["elbow_limit_max"])
+            if "elbow_limit_max" in raw else None
+        ),
     )
 
 
@@ -767,6 +812,7 @@ def _parse_phase(raw: dict[str, Any], bpm: float) -> Phase:
     pose, pose_weight = _parse_pose(raw.get("pose"))
     hand_l = _parse_hand_field(raw.get("hand_L"), "hand_L")
     hand_r = _parse_hand_field(raw.get("hand_R"), "hand_R")
+    hand_l_target, hand_r_target = _parse_ik_block(raw.get("ik"))
     return Phase(
         name=str(raw.get("name", "")),
         duration_sec=_resolve_phase_duration(raw, bpm),
@@ -782,7 +828,44 @@ def _parse_phase(raw: dict[str, Any], bpm: float) -> Phase:
         pose_weight=pose_weight,
         hand_l=hand_l,
         hand_r=hand_r,
+        hand_l_target=hand_l_target,
+        hand_r_target=hand_r_target,
     )
+
+
+def _parse_ik_block(raw: Any) -> tuple[
+    tuple[Any, Any, Any] | None, tuple[Any, Any, Any] | None,
+]:
+    """Parse the optional per-phase ``ik`` block.
+
+    Returns ``(hand_l_target, hand_r_target)`` where each is a 3-tuple
+    of value-curve specs (numeric or expression string) or ``None`` if
+    the side wasn't authored. Missing block = both ``None``.
+    """
+    if raw is None:
+        return None, None
+    if not isinstance(raw, dict):
+        raise DeclarativeAnimationError(
+            f"phase 'ik' must be an object, got {type(raw).__name__}",
+        )
+    return (
+        _parse_hand_target(raw.get("hand_l_target"), "hand_l_target"),
+        _parse_hand_target(raw.get("hand_r_target"), "hand_r_target"),
+    )
+
+
+_HAND_TARGET_AXIS_COUNT = 3
+
+
+def _parse_hand_target(raw: Any, field_name: str) -> tuple[Any, Any, Any] | None:
+    """Validate a single hand-IK target — a 3-element list of value curves."""
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or len(raw) != _HAND_TARGET_AXIS_COUNT:
+        raise DeclarativeAnimationError(
+            f"ik.{field_name} must be a 3-element [x, y, z] list",
+        )
+    return (raw[0], raw[1], raw[2])
 
 
 def _parse_hand_field(raw: Any, field_name: str) -> str | None:
@@ -1043,6 +1126,9 @@ def parse_animation(document: dict[str, Any]) -> DeclarativeAnimation:
         cloth_pieces=_parse_cloth(document.get("cloth")),
         colliders=_parse_colliders(document.get("colliders")),
         auto_body_colliders=bool(document.get("auto_body_colliders", True)),
+        auto_clamp_skinned_to_ground=bool(
+            document.get("auto_clamp_skinned_to_ground", True),
+        ),
         collision_deform_meshes=_parse_collision_deform_meshes(
             document.get("collision_deform_meshes"),
         ),
@@ -1474,6 +1560,12 @@ class DeclarativeRuntime:
     # translated body.
     _foot_release: dict[str, tuple[np.ndarray, int]] = field(default_factory=dict)
     _leg_chain_nodes: dict[str, tuple[Any, Any, Any]] = field(default_factory=dict)
+    # Arm chain cache for hand-IK. Same shape as ``_leg_chain_nodes``:
+    # ``{"L": (shoulder, elbow, wrist), "R": (...)}``. Populated at
+    # ``_start`` from ``rig.arm_chain_l/r`` (resolved through the
+    # body_bones alias). Empty when the rig didn't declare arm chains;
+    # the runtime then skips hand IK entirely.
+    _arm_chain_nodes: dict[str, tuple[Any, Any, Any]] = field(default_factory=dict)
     # Per-frame parent-world rotation cache. Both ``_set_bone`` and
     # ``_world_delta_to_local`` walk the bone's parent chain to compose
     # parent-world rotation. Adjacent bones (left arm, right arm, fingers)
@@ -1555,7 +1647,15 @@ class DeclarativeRuntime:
         # colliders that track named bones each frame so cloth keeps
         # clear of arms / hands as the dance moves them.
         self._setup_cloth_and_colliders()
-        # Cache leg-chain nodes for stride lock-target IK.
+        self._cache_ik_chains()
+
+    def _cache_ik_chains(self) -> None:
+        """Resolve leg + arm chains from the rig into scene-node tuples.
+
+        Split out of :meth:`_start` to keep that method below the cyclomatic
+        branch limit — the four (leg L, leg R, arm L, arm R) chain lookups
+        each add a branch and tipped ``_start`` over the line.
+        """
         for side, chain_names in (
             ("L", self.animation.rig.leg_chain_l),
             ("R", self.animation.rig.leg_chain_r),
@@ -1565,6 +1665,24 @@ class DeclarativeRuntime:
             nodes = tuple(self.scene.find(n) for n in chain_names)
             if all(n is not None for n in nodes):
                 self._leg_chain_nodes[side] = nodes
+        aliases = self.animation.rig.body_bones
+        for side, chain_names in (
+            ("L", self.animation.rig.arm_chain_l),
+            ("R", self.animation.rig.arm_chain_r),
+        ):
+            if chain_names is None:
+                continue
+            resolved_names = tuple(aliases.get(n, n) for n in chain_names)
+            nodes = tuple(self.scene.find(n) for n in resolved_names)
+            if all(n is not None for n in nodes):
+                self._arm_chain_nodes[side] = nodes
+            else:
+                _log.warning(
+                    "declarative: arm chain %s missing bone — IK disabled "
+                    "(expected: %s, found: %s)",
+                    side, resolved_names,
+                    tuple(n.name if n is not None else None for n in nodes),
+                )
 
     def _apply_pose_blends(
         self,
@@ -1698,15 +1816,7 @@ class DeclarativeRuntime:
         """
         if self.cloth_host is None:
             return
-        # Engage the cloth ground clamp from the animation's ``ground``
-        # block — the same plane the foot planter uses for IK. Means a
-        # crouched / kneeling pose doesn't leave the skirt sinking into
-        # the floor without per-pose tuning. Only flat ground is mapped;
-        # stairs intentionally aren't (the cloth has no notion of which
-        # step it should rest on without colliders for each stair).
-        ground = self.animation.ground
-        if ground is not None and ground.kind == "flat" and hasattr(self.cloth_host, "floor_y"):
-            self.cloth_host.floor_y = _resolve_scalar(ground.params.get("y", 0.0))
+        auto_meshes = self._setup_ground_and_discover_auto_meshes()
         wants_auto = (
             (self.animation.cloth_pieces or self.animation.collision_deform_meshes)
             and self.animation.auto_body_colliders
@@ -1715,6 +1825,7 @@ class DeclarativeRuntime:
             not self.animation.cloth_pieces
             and not self.animation.colliders
             and not self.animation.collision_deform_meshes
+            and not auto_meshes
             and not wants_auto
         ):
             return
@@ -1727,6 +1838,8 @@ class DeclarativeRuntime:
             _log.warning("declarative: cloth module unavailable: %s", err)
             return
         self._register_collision_deform_meshes()
+        if auto_meshes:
+            self._register_auto_skinned_meshes(auto_meshes)
         for piece in self.animation.cloth_pieces:
             node = self.scene.find(piece.mesh_node)
             if node is None:
@@ -1805,6 +1918,94 @@ class DeclarativeRuntime:
         self.cloth_host.register_collider_bone_filter(collider, head_node)
         if tail_node is not None and tail_node is not head_node:
             self.cloth_host.register_collider_bone_filter(collider, tail_node)
+
+    def _setup_ground_and_discover_auto_meshes(self) -> list[str]:
+        """Wire ``cloth_host.floor_y`` from the animation's ground block
+        + return the list of auto-discovered skinned meshes to register.
+
+        Pulled out of :meth:`_setup_cloth_and_colliders` to keep that
+        method below the cyclomatic branch limit (the ground + auto
+        discovery were two of three branches the linter flagged).
+        """
+        ground = self.animation.ground
+        flat_ground = ground is not None and ground.kind == "flat"
+        if flat_ground and hasattr(self.cloth_host, "floor_y"):
+            self.cloth_host.floor_y = _resolve_scalar(ground.params.get("y", 0.0))
+        if flat_ground and self.animation.auto_clamp_skinned_to_ground:
+            return self._discover_skinned_collision_deform_meshes()
+        return []
+
+    def _discover_skinned_collision_deform_meshes(self) -> list[str]:
+        """Return scene-node names of every skinned mesh not already explicit.
+
+        Walks the scene tree looking for nodes whose components include a
+        :class:`SkinRefComponent`. Drops names already in
+        ``animation.collision_deform_meshes`` so the registration pass
+        doesn't process them twice. Result is the set that the
+        auto-clamp path should register as ``passive_skin_deform``.
+
+        Returns ``[]`` when the scripting / cloth dependency tree is
+        unavailable (lets the runtime degrade cleanly in tests that stub
+        the import surface).
+        """
+        try:
+            from posecascade.scene.component import (  # noqa: PLC0415
+                SkinRefComponent,
+            )
+        except ImportError:
+            return []
+        explicit: set[str] = set()
+        for entry in self.animation.collision_deform_meshes:
+            name = entry[0] if isinstance(entry, tuple) else entry
+            explicit.add(str(name))
+        discovered: list[str] = []
+        seen: set[str] = set()
+        # Iterative walk — recursion through the bundled Herta rig (354
+        # joints + accessory subtrees) easily hits Python's default
+        # recursion limit on smaller stacks, so we drain a stack here
+        # instead.
+        stack = [self.scene.root]
+        while stack:
+            node = stack.pop()
+            stack.extend(node.children)
+            if node.name in explicit or node.name in seen:
+                continue
+            for component in node.components:
+                if isinstance(component, SkinRefComponent):
+                    discovered.append(node.name)
+                    seen.add(node.name)
+                    break
+        return discovered
+
+    def _register_auto_skinned_meshes(self, node_names: list[str]) -> None:
+        """Register each auto-discovered skinned mesh as a passive cloth piece.
+
+        Same shape parameters as :meth:`_register_collision_deform_meshes`
+        but takes the names through a separate code path so an explicit
+        entry that overrides a name (with a custom mesh_index, for
+        example) wins on configuration — the discovery pass de-duped
+        already, so we know these are fresh.
+        """
+        for name in node_names:
+            node = self.scene.find(name)
+            if node is None:
+                continue
+            piece = self.cloth_host.add_cloth_for_node(
+                node,
+                cloth_name=f"auto_clamp_{name}",
+                anchor_axis=1,
+                anchor_fraction=0.0,
+                anchor_mode="top_axis",
+                structural_stiffness=0.0,
+                bend_stiffness=0.0,
+                linear_damping=1.0,
+                iterations=1,
+                rest_pull=0.0,
+            )
+            if piece is None:
+                continue
+            piece.params.passive_skin_deform = True
+            self.cloth_host.register_skin_target_follower(piece, node)
 
     def _register_collision_deform_meshes(self) -> None:
         """Register every ``collision_deform_meshes`` entry with the cloth host.
@@ -2116,6 +2317,11 @@ class DeclarativeRuntime:
         if output.morphs and self.morph_api is not None:
             for name, weight in output.morphs.items():
                 self.morph_api.set(str(name), float(weight))
+        # Hand IK runs AFTER every explicit / pose / gait bone write so
+        # the IK solver sees the final upper-body pose and can plant
+        # the wrist at the target world position regardless of what the
+        # rest of the chain just did. Mirrors the foot-IK ordering.
+        self._apply_hand_ik(phase, scope, phase_t)
         self._post_bone_writes(output, elapsed)
 
     def _post_bone_writes(self, output: PhaseOutput, elapsed: float) -> None:
@@ -2450,6 +2656,53 @@ class DeclarativeRuntime:
         # Fresh hard lock on the new trailing side overrides any
         # in-flight release on the same side.
         self._foot_release.pop(side, None)
+
+    def _apply_hand_ik(
+        self, phase: Phase, scope: dict[str, float], phase_t: float,
+    ) -> None:
+        """Solve two-bone CCD IK on each declared arm chain toward its target.
+
+        No-op when ``rig.arm_chain_l/r`` wasn't declared OR the phase
+        didn't author ``ik.hand_l_target`` / ``hand_r_target``. Both
+        sides resolve independently — a phase can pin just one hand.
+        Target curves are resolved per axis per frame so an animation
+        can move the target across time.
+        """
+        if not self._arm_chain_nodes:
+            return
+        if phase.hand_l_target is None and phase.hand_r_target is None:
+            return
+        try:
+            from posecascade.animation.ik import solve_two_bone  # noqa: PLC0415
+        except ImportError:
+            return
+        elbow_min = self.animation.rig.elbow_limit_min
+        elbow_max = self.animation.rig.elbow_limit_max
+        for side, target_spec in (
+            ("L", phase.hand_l_target), ("R", phase.hand_r_target),
+        ):
+            if target_spec is None:
+                continue
+            chain = self._arm_chain_nodes.get(side)
+            if chain is None:
+                continue
+            try:
+                tx = _resolve_value_curve(target_spec[0], phase_t, scope)
+                ty = _resolve_value_curve(target_spec[1], phase_t, scope)
+                tz = _resolve_value_curve(target_spec[2], phase_t, scope)
+            except DeclarativeAnimationError as err:
+                _log.warning(
+                    "declarative: hand_%s_target failed to evaluate: %s",
+                    side.lower(), err,
+                )
+                continue
+            target = np.array((tx, ty, tz), dtype=np.float32)
+            root, mid, end = chain
+            solve_two_bone(
+                root, mid, end, target,
+                iterations=8, step_radian=0.6,
+                mid_limit_min=elbow_min, mid_limit_max=elbow_max,
+            )
 
     def _apply_lock_targets(self) -> None:
         """Run CCD 2-bone IK on each foot with an active lock or release.
