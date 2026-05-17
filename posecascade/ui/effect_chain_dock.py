@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from posecascade.i18n import t
 from posecascade.render.effects.chain import EffectChain
 from posecascade.render.effects.descriptor import (
     EffectUniform,
@@ -53,7 +54,7 @@ class EffectChainDock(QDockWidget):
     chain_changed = Signal()
 
     def __init__(self, chain: EffectChain, parent: QWidget | None = None) -> None:
-        super().__init__("Effects", parent)
+        super().__init__(t("effects.title"), parent)
         self._chain = chain
         self._chain_list = QListWidget()
         self._uniforms_container = QWidget()
@@ -120,27 +121,19 @@ class EffectChainDock(QDockWidget):
         list_row.addWidget(self._chain_list, 1)
 
         controls = QVBoxLayout()
-        self._up_button = QPushButton("↑")
+        self._up_button = QPushButton(t("effects.action.up"))
         self._up_button.clicked.connect(self.move_selected_up)
-        self._up_button.setToolTip(
-            "Move the selected effect one slot earlier in the chain. "
-            "Earlier = applied first to the source image.",
-        )
+        self._up_button.setToolTip(t("effects.tooltip.up"))
         controls.addWidget(self._up_button)
 
-        self._down_button = QPushButton("↓")
+        self._down_button = QPushButton(t("effects.action.down"))
         self._down_button.clicked.connect(self.move_selected_down)
-        self._down_button.setToolTip(
-            "Move the selected effect one slot later in the chain.",
-        )
+        self._down_button.setToolTip(t("effects.tooltip.down"))
         controls.addWidget(self._down_button)
 
-        self._remove_button = QPushButton("Remove")
+        self._remove_button = QPushButton(t("effects.action.remove"))
         self._remove_button.clicked.connect(self.remove_selected)
-        self._remove_button.setToolTip(
-            "Remove the selected effect from the chain. Use the Effects "
-            "menu to add new ones.",
-        )
+        self._remove_button.setToolTip(t("effects.tooltip.remove"))
         controls.addWidget(self._remove_button)
 
         controls.addStretch(1)
@@ -160,10 +153,7 @@ class EffectChainDock(QDockWidget):
         row_layout.setContentsMargins(4, 2, 4, 2)
         enabled = QCheckBox()
         enabled.setChecked(entry.enabled)
-        enabled.setToolTip(
-            "Enable / disable this effect. Disabled effects keep their "
-            "uniform values but are skipped during rendering.",
-        )
+        enabled.setToolTip(t("effects.tooltip.enabled"))
         enabled.toggled.connect(
             lambda checked, idx=index: self._on_enable_toggled(idx, checked),
         )

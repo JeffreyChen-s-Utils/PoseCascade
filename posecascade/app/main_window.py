@@ -32,6 +32,13 @@ from PySide6.QtWidgets import (
 from posecascade.animation.document import AnimationDocument
 from posecascade.app.controller import AppController
 from posecascade.app.registry import Services
+from posecascade.i18n import (
+    available_languages,
+    current_language,
+    language_display_name,
+    set_language,
+    t,
+)
 from posecascade.render.effects.chain import EffectChain
 from posecascade.scene.model_slot import SceneSlots
 from posecascade.scene.node import Node
@@ -54,10 +61,13 @@ from posecascade.utils.logging import get_logger
 _log = get_logger(__name__)
 _TARGET_FRAME_INTERVAL_MS = 16  # ~60Hz; the timer is best-effort, the clamp does the rest
 _FPS_SMOOTHING_WINDOW = 30      # average FPS over this many frames so the readout doesn't flicker
-_SCENE_FILTER = "3D scenes (*.glb *.gltf *.obj *.stl *.ply *.fbx *.pmx *.pmd);;All files (*)"
-_SCRIPT_FILTER = "Python scripts (*.py);;All files (*)"
-_PROJECT_FILTER = "PoseCascade project (*.posecascade *.json);;All files (*)"
-_DEFAULT_SCENE_LABEL = "Untitled"
+
+# Font-metric multipliers for widget sizing — replace the old pixel literals so
+# the layout scales with the user's font size / DPI. ``QFontMetrics.height()``
+# is roughly one text row, so ``height * N`` reads as "N rows tall".
+_VIEWPORT_MIN_ROWS_W = 30   # ≈ 640 px at default 21 px row height
+_VIEWPORT_MIN_ROWS_H = 22   # ≈ 480 px at default 21 px row height
+_FPS_LABEL_MIN_WIDTH_CHARS = 8
 
 
 def make_default_scene() -> Scene:
@@ -75,7 +85,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, services: Services) -> None:
         super().__init__()
-        self.setWindowTitle("PoseCascade")
+        self.setWindowTitle(t("app.window_title"))
         self._services = services
         self._paused = False
         self._dt_history: deque[float] = deque(maxlen=_FPS_SMOOTHING_WINDOW)
@@ -84,7 +94,10 @@ class MainWindow(QMainWindow):
 
         self._viewport = Viewport(self)
         self.setCentralWidget(self._viewport)
-        self._viewport.setMinimumSize(640, 480)
+        row_h = self.fontMetrics().height()
+        self._viewport.setMinimumSize(
+            row_h * _VIEWPORT_MIN_ROWS_W, row_h * _VIEWPORT_MIN_ROWS_H,
+        )
 
         self._outliner = OutlinerDock(self)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._outliner)
@@ -241,39 +254,39 @@ class MainWindow(QMainWindow):
 
     def _build_menu_bar(self) -> None:
         menu_bar = self.menuBar()
-        file_menu = menu_bar.addMenu("&File")
+        file_menu = menu_bar.addMenu(t("menu.file"))
 
-        open_scene = QAction("&Open Scene…", self)
+        open_scene = QAction(t("menu.file.open_scene"), self)
         open_scene.setShortcut(QKeySequence.StandardKey.Open)
         open_scene.triggered.connect(self._on_open_scene)
         file_menu.addAction(open_scene)
 
-        open_script = QAction("Open &Script…", self)
+        open_script = QAction(t("menu.file.open_script"), self)
         open_script.triggered.connect(self._on_open_script)
         file_menu.addAction(open_script)
 
         file_menu.addSeparator()
-        open_project = QAction("Open &Project…", self)
+        open_project = QAction(t("menu.file.open_project"), self)
         open_project.triggered.connect(self._on_open_project)
         file_menu.addAction(open_project)
-        save_project = QAction("Save Project &As…", self)
+        save_project = QAction(t("menu.file.save_project_as"), self)
         save_project.setShortcut(QKeySequence.StandardKey.SaveAs)
         save_project.triggered.connect(self._on_save_project_as)
         file_menu.addAction(save_project)
         file_menu.addSeparator()
-        export_action = QAction("&Export…", self)
+        export_action = QAction(t("menu.file.export"), self)
         export_action.setShortcut(QKeySequence("Ctrl+E"))
         export_action.triggered.connect(self._on_export)
         file_menu.addAction(export_action)
 
         file_menu.addSeparator()
-        quit_action = QAction("&Quit", self)
+        quit_action = QAction(t("menu.file.quit"), self)
         quit_action.setShortcut(QKeySequence.StandardKey.Quit)
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
-        view_menu = menu_bar.addMenu("&View")
-        reset_camera = QAction("&Reset Camera", self)
+        view_menu = menu_bar.addMenu(t("menu.view"))
+        reset_camera = QAction(t("menu.view.reset_camera"), self)
         reset_camera.triggered.connect(self._on_reset_camera)
         view_menu.addAction(reset_camera)
         view_menu.addSeparator()
@@ -286,29 +299,59 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self._timeline.toggleViewAction())
         view_menu.addAction(self._multi_track.toggleViewAction())
 
-        help_menu = menu_bar.addMenu("&Help")
-        about_action = QAction("&About PoseCascade", self)
+        self._build_settings_menu(menu_bar)
+
+        help_menu = menu_bar.addMenu(t("menu.help"))
+        about_action = QAction(t("menu.help.about"), self)
         about_action.triggered.connect(self._on_about)
         help_menu.addAction(about_action)
 
+    def _build_settings_menu(self, menu_bar: object) -> None:
+        """Add ``Settings → Language`` with one entry per available locale.
+
+        The currently active locale is marked with a checkable / checked
+        action so the user can see at a glance which language is in use.
+        Switching writes the choice to ``QSettings`` and shows a
+        restart-to-apply message — a full in-place retranslate would need
+        ``changeEvent(QEvent.LanguageChange)`` plumbing on every widget,
+        which is a future PR.
+        """
+        settings_menu = menu_bar.addMenu(t("menu.settings"))  # type: ignore[attr-defined]
+        language_menu = settings_menu.addMenu(t("menu.settings.language"))
+        active = current_language()
+        for code in available_languages():
+            action = QAction(language_display_name(code), self)
+            action.setCheckable(True)
+            action.setChecked(code == active)
+            action.triggered.connect(
+                # Bind ``code`` at definition time — without ``code=code``
+                # every lambda would close over the loop's final value.
+                lambda _checked=False, code=code: self._on_language_chosen(code),
+            )
+            language_menu.addAction(action)
+
     def _build_toolbar(self) -> None:
-        toolbar = QToolBar("Playback", self)
+        toolbar = QToolBar(t("toolbar.playback"), self)
         toolbar.setObjectName("PlaybackToolbar")
         self.addToolBar(toolbar)
 
-        self._play_pause = QAction("⏸ Pause", self)
+        self._play_pause = QAction(t("toolbar.pause"), self)
         self._play_pause.setCheckable(False)
         self._play_pause.triggered.connect(self._on_toggle_pause)
         toolbar.addAction(self._play_pause)
 
-        reset_physics = QAction("↻ Reset Physics", self)
+        reset_physics = QAction(t("toolbar.reset_physics"), self)
         reset_physics.triggered.connect(self._on_reset_physics)
         toolbar.addAction(reset_physics)
 
     def _build_status_bar(self) -> None:
-        self._status_text = QLabel("Ready")
-        self._fps_label = QLabel("FPS: --")
-        self._fps_label.setMinimumWidth(80)
+        self._status_text = QLabel(t("status.ready"))
+        self._fps_label = QLabel(t("status.fps_placeholder"))
+        # Pad the FPS label to a stable width so the readout doesn't
+        # twitch as the digit count changes — derived from the font's
+        # "0" advance so it scales with DPI / user font size.
+        digit_w = self.fontMetrics().horizontalAdvance("0")
+        self._fps_label.setMinimumWidth(digit_w * _FPS_LABEL_MIN_WIDTH_CHARS)
         self.statusBar().addWidget(self._status_text, 1)
         self.statusBar().addPermanentWidget(self._fps_label)
 
@@ -351,12 +394,14 @@ class MainWindow(QMainWindow):
             return
         avg_dt = sum(self._dt_history) / len(self._dt_history)
         if avg_dt > 0.0:
-            self._fps_label.setText(f"FPS: {1.0 / avg_dt:5.1f}")
+            self._fps_label.setText(t("status.fps", value=1.0 / avg_dt))
 
     # --- menu / toolbar handlers ---------------------------------------------
 
     def _on_open_scene(self) -> None:
-        path_str, _ = QFileDialog.getOpenFileName(self, "Open Scene", "", _SCENE_FILTER)
+        path_str, _ = QFileDialog.getOpenFileName(
+            self, t("dialog.open_scene.title"), "", t("dialog.scene_filter"),
+        )
         if not path_str:
             return
         # Lazy import to avoid a top-level cycle (bootstrap ↔ main_window).
@@ -365,7 +410,9 @@ class MainWindow(QMainWindow):
         attach_scene(self, self._services, Path(path_str))
 
     def _on_open_script(self) -> None:
-        path_str, _ = QFileDialog.getOpenFileName(self, "Open Script", "", _SCRIPT_FILTER)
+        path_str, _ = QFileDialog.getOpenFileName(
+            self, t("dialog.open_script.title"), "", t("dialog.script_filter"),
+        )
         if not path_str:
             return
         from posecascade.app.bootstrap import attach_script  # noqa: PLC0415
@@ -379,7 +426,7 @@ class MainWindow(QMainWindow):
     # ----- project / export -------------------------------------------
     def _on_open_project(self) -> None:
         path_str, _ = QFileDialog.getOpenFileName(
-            self, "Open Project", "", _PROJECT_FILTER,
+            self, t("dialog.open_project.title"), "", t("dialog.project_filter"),
         )
         if not path_str:
             return
@@ -389,11 +436,15 @@ class MainWindow(QMainWindow):
             self._controller.open_project(path)
         except Exception as err:                  # noqa: BLE001 — boundary
             _log.error("open project failed: %s", err)
-            QMessageBox.warning(self, "Open Project", f"Failed to open project:\n{err}")
+            QMessageBox.warning(
+                self,
+                t("dialog.open_project.error_title"),
+                t("dialog.open_project.error_body", error=err),
+            )
 
     def _on_save_project_as(self) -> None:
         path_str, _ = QFileDialog.getSaveFileName(
-            self, "Save Project As", "", _PROJECT_FILTER,
+            self, t("dialog.save_project.title"), "", t("dialog.project_filter"),
         )
         if not path_str:
             return
@@ -403,7 +454,11 @@ class MainWindow(QMainWindow):
             self._controller.save_project_to(path, name=path.stem)
         except Exception as err:                  # noqa: BLE001 — boundary
             _log.error("save project failed: %s", err)
-            QMessageBox.warning(self, "Save Project", f"Failed to save project:\n{err}")
+            QMessageBox.warning(
+                self,
+                t("dialog.save_project.error_title"),
+                t("dialog.save_project.error_body", error=err),
+            )
 
     def _on_export(self) -> None:
         dialog = ExportDialog(self)
@@ -419,7 +474,11 @@ class MainWindow(QMainWindow):
             )
         except Exception as err:                  # noqa: BLE001 — boundary
             _log.error("export failed: %s", err)
-            QMessageBox.warning(self, "Export", f"Export failed:\n{err}")
+            QMessageBox.warning(
+                self,
+                t("dialog.export.error_title"),
+                t("dialog.export.error_body", error=err),
+            )
 
     def _render_frame_for_export(self, frame: int) -> object:
         """Hook for offline rendering — Phase 15 wires this through the
@@ -460,16 +519,38 @@ class MainWindow(QMainWindow):
         )
 
     def _on_about(self) -> None:
-        QMessageBox.about(
+        QMessageBox.about(self, t("dialog.about.title"), t("dialog.about.body"))
+
+    def _on_language_chosen(self, code: str) -> None:
+        """Persist the language choice and tell the user to restart.
+
+        Errors bubble up from :func:`set_language` only when the menu
+        was built from a directory listing that has since changed under
+        us (locale JSON deleted mid-session). In that case log + warn —
+        leaving the previous language active is the least surprising
+        recovery.
+        """
+        try:
+            set_language(code)
+        except Exception as err:                  # noqa: BLE001 — boundary
+            _log.error("failed to switch language to %s: %s", code, err)
+            QMessageBox.warning(
+                self,
+                t("dialog.language.restart_title"),
+                str(err),
+            )
+            return
+        QMessageBox.information(
             self,
-            "About PoseCascade",
-            "PoseCascade — PySide6 + OpenGL engine for importing 3D scenes\n"
-            "and driving them with sandboxed scripts, spring chains, and PBD cloth.",
+            t("dialog.language.restart_title"),
+            t("dialog.language.restart_body", language=language_display_name(code)),
         )
 
     def _on_toggle_pause(self) -> None:
         self._paused = not self._paused
-        self._play_pause.setText("⏵ Play" if self._paused else "⏸ Pause")
+        self._play_pause.setText(
+            t("toolbar.play") if self._paused else t("toolbar.pause"),
+        )
 
     def _on_reset_physics(self) -> None:
         for chain in self._services.physics_host.chains():
@@ -509,11 +590,13 @@ class MainWindow(QMainWindow):
     def _update_status_text(self, selected_name: str | None = None) -> None:
         parts = []
         if self._scene_path is not None:
-            parts.append(f"scene: {self._scene_path.name}")
+            parts.append(t("status.scene_prefix", name=self._scene_path.name))
         else:
-            parts.append(f"scene: {_DEFAULT_SCENE_LABEL}")
+            parts.append(
+                t("status.scene_prefix", name=t("app.scene_label_untitled")),
+            )
         if self._script_path is not None:
-            parts.append(f"script: {self._script_path.name}")
+            parts.append(t("status.script_prefix", name=self._script_path.name))
         if selected_name:
-            parts.append(f"selected: {selected_name}")
+            parts.append(t("status.selected_prefix", name=selected_name))
         self._status_text.setText(" · ".join(parts))

@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from posecascade.i18n import t
 from posecascade.scripting.declarative import (
     DeclarativeAnimationError,
     parse_animation,
@@ -88,7 +89,7 @@ class AnimationJsonDock(QDockWidget):
         command_stack: AnimationCommandStack | None = None,
         parent: QWidget | None = None,
     ) -> None:
-        super().__init__("Animation JSON", parent)
+        super().__init__(t("animation_json.title"), parent)
         # When no document is supplied the dock owns its own — keeps
         # MVP-1 callers working unchanged. MVP-3 wires the same
         # ``AnimationJsonDocument`` instance into both this dock and
@@ -102,10 +103,7 @@ class AnimationJsonDock(QDockWidget):
         # first user keystroke; reset on save / reload.
         self._snapshot_taken_this_session = False
         self._editor = CodeEditor()
-        self._editor.setPlaceholderText(
-            "Open a .json animation via File → Open Script, "
-            "or paste JSON here.",
-        )
+        self._editor.setPlaceholderText(t("animation_json.placeholder"))
         # Monospace font + tab → 2 spaces matches the bundled examples'
         # indent style; keeps copy-paste between an external editor and
         # this dock looking identical.
@@ -116,12 +114,12 @@ class AnimationJsonDock(QDockWidget):
             self._editor.fontMetrics().horizontalAdvance(" ") * _TAB_WIDTH_SPACES,
         )
         self._highlighter = JsonHighlighter(self._editor.document())
-        self._status = QLabel("No document loaded.")
+        self._status = QLabel(t("animation_json.status.no_document"))
         self._status.setStyleSheet(_STATUS_NEUTRAL_STYLE)
-        self._save_btn = QPushButton("Save")
-        self._format_btn = QPushButton("Format")
-        self._reload_btn = QPushButton("Reload into runtime")
-        self._path_label = QLabel("(no file)")
+        self._save_btn = QPushButton(t("animation_json.action.save"))
+        self._format_btn = QPushButton(t("animation_json.action.format"))
+        self._reload_btn = QPushButton(t("animation_json.action.reload"))
+        self._path_label = QLabel(t("animation_json.no_file"))
         self._validation_timer = QTimer(self)
         self._validation_timer.setSingleShot(True)
         self._validation_timer.setInterval(_VALIDATION_DEBOUNCE_MS)
@@ -167,7 +165,7 @@ class AnimationJsonDock(QDockWidget):
         they type.
         """
         if not self._document.load_file(path):
-            self._set_status(f"failed to read {path}", ok=False)
+            self._set_status(t("animation_json.status.read_failed", path=path), ok=False)
             return False
         # ``changed`` will have synced the editor already; just refresh
         # the path label and run the inline validator for the new text.
@@ -208,7 +206,7 @@ class AnimationJsonDock(QDockWidget):
         # Keyboard shortcut: Ctrl+S triggers save when the dock is
         # focused. We attach via QAction on the dock so the shortcut
         # works whether the user is in the editor or the buttons.
-        save_action = QAction("Save", self)
+        save_action = QAction(t("animation_json.action.save"), self)
         save_action.setShortcut(QKeySequence.StandardKey.Save)
         save_action.triggered.connect(self._on_save_clicked)
         self.addAction(save_action)
@@ -217,11 +215,11 @@ class AnimationJsonDock(QDockWidget):
         # which clashes badly with model-driven syncs — we suppress its
         # action and route through the stack instead.
         self._editor.setUndoRedoEnabled(False)
-        undo_action = QAction("Undo", self)
+        undo_action = QAction(t("animation_json.action.undo"), self)
         undo_action.setShortcut(QKeySequence.StandardKey.Undo)
         undo_action.triggered.connect(self._stack.undo)
         self.addAction(undo_action)
-        redo_action = QAction("Redo", self)
+        redo_action = QAction(t("animation_json.action.redo"), self)
         redo_action.setShortcut(QKeySequence.StandardKey.Redo)
         redo_action.triggered.connect(self._stack.redo)
         self.addAction(redo_action)
@@ -247,7 +245,7 @@ class AnimationJsonDock(QDockWidget):
             finally:
                 self._editor.blockSignals(False)
             self._path_label.setText(
-                str(self._document.path) if self._document.path else "(no file)",
+                str(self._document.path) if self._document.path else t("animation_json.no_file"),
             )
             self._set_dirty(False)
             # Document just synced through us — a new typing session
@@ -292,13 +290,13 @@ class AnimationJsonDock(QDockWidget):
             doc = json.loads(text)
         except json.JSONDecodeError as err:
             self._set_status(
-                f"Format aborted: JSON parse error at line {err.lineno}",
+                t("animation_json.status.format_failed", line=err.lineno),
                 ok=False,
             )
             return
         formatted = json.dumps(doc, indent=_FORMAT_INDENT, ensure_ascii=False) + "\n"
         if formatted == text:
-            self._set_status("Already canonical.", ok=True)
+            self._set_status(t("animation_json.status.format_already"), ok=True)
             return
         cursor = self._editor.textCursor()
         position = cursor.position()
@@ -308,11 +306,11 @@ class AnimationJsonDock(QDockWidget):
         # caret past the end.
         cursor.setPosition(min(position, len(formatted)))
         self._editor.setTextCursor(cursor)
-        self._set_status("Formatted.", ok=True)
+        self._set_status(t("animation_json.status.formatted"), ok=True)
 
     def _on_save_clicked(self) -> None:
         if self._document.path is None:
-            self._set_status("Save: no path bound; load a file first.", ok=False)
+            self._set_status(t("animation_json.status.save_no_path"), ok=False)
             return
         # Push the editor's exact text into the document first so the
         # save reflects what the user sees. If the text is malformed
@@ -323,10 +321,12 @@ class AnimationJsonDock(QDockWidget):
         try:
             self._document.path.write_text(text, encoding="utf-8")
         except OSError as err:
-            self._set_status(f"Save failed: {err}", ok=False)
+            self._set_status(t("animation_json.status.save_failed", error=err), ok=False)
             return
         self._set_dirty(False)
-        self._set_status(f"Saved → {self._document.path}", ok=True)
+        self._set_status(
+            t("animation_json.status.saved", path=self._document.path), ok=True,
+        )
 
     def _on_reload_clicked(self) -> None:
         """Emit ``reload_requested`` with the live text for the host to re-attach.
@@ -337,16 +337,19 @@ class AnimationJsonDock(QDockWidget):
         """
         errors = _validate(self._editor.toPlainText(), self._document.path)
         if errors:
-            self._set_status(f"Reload blocked: {errors[0].message}", ok=False)
+            self._set_status(
+                t("animation_json.status.reload_blocked", message=errors[0].message),
+                ok=False,
+            )
             return
         self.reload_requested.emit(self._editor.toPlainText())
-        self._set_status("Reloaded into runtime.", ok=True)
+        self._set_status(t("animation_json.status.reloaded"), ok=True)
 
     def _validate_now(self) -> None:
         text = self._editor.toPlainText()
         if not text.strip():
             self._editor.set_error_line(None)
-            self._set_status("Empty document.", ok=False)
+            self._set_status(t("animation_json.status.empty"), ok=False)
             return
         errors = _validate(text, self._document.path)
         if errors:
@@ -355,15 +358,16 @@ class AnimationJsonDock(QDockWidget):
             self._set_status(err.message, ok=False)
         else:
             self._editor.set_error_line(None)
-            self._set_status("OK — schema + parser passed.", ok=True)
+            self._set_status(t("animation_json.status.ok"), ok=True)
 
     def _set_dirty(self, dirty: bool) -> None:
         """Mirror the buffer-vs-disk state into the dock title."""
         if self._dirty == dirty:
             return
         self._dirty = dirty
-        base = "Animation JSON"
-        self.setWindowTitle(f"{base} *" if dirty else base)
+        self.setWindowTitle(
+            t("animation_json.title_dirty") if dirty else t("animation_json.title"),
+        )
 
     @property
     def is_dirty(self) -> bool:

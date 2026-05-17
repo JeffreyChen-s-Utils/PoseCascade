@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from posecascade.i18n import t
 from posecascade.ui.animation_command_stack import AnimationCommandStack
 from posecascade.ui.animation_json_document import AnimationJsonDocument
 from posecascade.ui.phase_editors import (
@@ -92,7 +93,7 @@ class PhaseBlocksDock(QDockWidget):
         command_stack: AnimationCommandStack | None = None,
         parent: QWidget | None = None,
     ) -> None:
-        super().__init__("Phase blocks", parent)
+        super().__init__(t("phase_blocks.title"), parent)
         self._document = document if document is not None else AnimationJsonDocument(self)
         # Caller may supply a shared stack (MainWindow does, so undo
         # works across both docks). When omitted we keep a private one
@@ -167,11 +168,11 @@ class PhaseBlocksDock(QDockWidget):
         )
         # Ctrl+Z / Ctrl+Y route through the shared command stack —
         # picks up edits made through either dock.
-        undo_action = QAction("Undo", self)
+        undo_action = QAction(t("phase_blocks.action.undo"), self)
         undo_action.setShortcut(QKeySequence.StandardKey.Undo)
         undo_action.triggered.connect(self._stack.undo)
         self.addAction(undo_action)
-        redo_action = QAction("Redo", self)
+        redo_action = QAction(t("phase_blocks.action.redo"), self)
         redo_action.setShortcut(QKeySequence.StandardKey.Redo)
         redo_action.triggered.connect(self._stack.redo)
         self.addAction(redo_action)

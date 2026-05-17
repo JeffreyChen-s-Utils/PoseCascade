@@ -35,6 +35,7 @@ from posecascade.animation.commands import (
     InsertMorphKeyframe,
 )
 from posecascade.animation.document import AnimationDocument
+from posecascade.i18n import t
 from posecascade.ui.track_list_model import (
     TrackEntry,
     TrackKind,
@@ -61,13 +62,13 @@ class MultiTrackTimelineDock(QDockWidget):
         scene: ImportedScene | None = None,
         parent: QWidget | None = None,
     ) -> None:
-        super().__init__("Tracks", parent)
+        super().__init__(t("tracks.title"), parent)
         self._document = document
         self._scene = scene
         self._stack = CommandStack()
         self._current_frame = 0
         self._tree: QTreeWidget = QTreeWidget()
-        self._frame_label = QLabel("Frame: 0")
+        self._frame_label = QLabel(t("tracks.frame_label", value=0))
         self._build_ui()
         self.refresh_tree()
 
@@ -83,7 +84,7 @@ class MultiTrackTimelineDock(QDockWidget):
     def set_current_frame(self, frame: int) -> None:
         """The bottom transport calls this when the playhead moves."""
         self._current_frame = max(0, int(frame))
-        self._frame_label.setText(f"Frame: {self._current_frame}")
+        self._frame_label.setText(t("tracks.frame_label", value=self._current_frame))
 
     def selected_entry(self) -> TrackEntry | None:
         item = self._tree.currentItem()
@@ -194,40 +195,31 @@ class MultiTrackTimelineDock(QDockWidget):
         layout.setContentsMargins(8, 4, 8, 8)
 
         controls = QHBoxLayout()
-        self._insert_button = QPushButton("Insert")
+        self._insert_button = QPushButton(t("tracks.action.insert"))
         self._insert_button.clicked.connect(self.insert_keyframe_at_current_frame)
-        self._insert_button.setToolTip(
-            "Insert a keyframe at the current playhead frame on the active "
-            "track. Shortcut: I.",
-        )
+        self._insert_button.setToolTip(t("tracks.tooltip.insert"))
         controls.addWidget(self._insert_button)
 
-        self._delete_button = QPushButton("Delete")
+        self._delete_button = QPushButton(t("tracks.action.delete"))
         self._delete_button.clicked.connect(lambda: self.delete_selected_keyframe(None))
-        self._delete_button.setToolTip(
-            "Delete the currently selected keyframe. Shortcut: Delete.",
-        )
+        self._delete_button.setToolTip(t("tracks.tooltip.delete"))
         controls.addWidget(self._delete_button)
 
-        self._undo_button = QPushButton("Undo")
+        self._undo_button = QPushButton(t("tracks.action.undo"))
         self._undo_button.clicked.connect(self.undo)
-        self._undo_button.setToolTip(
-            "Undo the last keyframe insert / delete / move on this timeline.",
-        )
+        self._undo_button.setToolTip(t("tracks.tooltip.undo"))
         controls.addWidget(self._undo_button)
 
-        self._redo_button = QPushButton("Redo")
+        self._redo_button = QPushButton(t("tracks.action.redo"))
         self._redo_button.clicked.connect(self.redo)
-        self._redo_button.setToolTip(
-            "Redo the last undone timeline edit.",
-        )
+        self._redo_button.setToolTip(t("tracks.tooltip.redo"))
         controls.addWidget(self._redo_button)
 
         controls.addStretch(1)
         controls.addWidget(self._frame_label)
         layout.addLayout(controls)
 
-        self._tree.setHeaderLabels(["Track", "Keys"])
+        self._tree.setHeaderLabels([t("tracks.header.track"), t("tracks.header.keys")])
         self._tree.setColumnCount(2)
         layout.addWidget(self._tree, 1)
         self.setWidget(container)

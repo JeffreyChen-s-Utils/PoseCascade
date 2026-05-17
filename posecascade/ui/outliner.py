@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItemIterator,
 )
 
+from posecascade.i18n import t
 from posecascade.scene.node import Node
 from posecascade.scene.scene import Scene
 
@@ -30,24 +31,20 @@ class OutlinerDock(QDockWidget):
     node_deleted = Signal(object)
 
     def __init__(self, parent: object = None) -> None:
-        super().__init__("Outliner", parent)  # type: ignore[arg-type]
+        super().__init__(t("outliner.title"), parent)  # type: ignore[arg-type]
         self.setObjectName("OutlinerDock")
         self._scene: Scene | None = None
         self._tree = QTreeWidget()
         self._tree.setHeaderHidden(True)
         self._tree.setUniformRowHeights(True)
-        self._tree.setToolTip(
-            "Scene hierarchy. Click a node to inspect / edit it on the right. "
-            "Right-click for actions. Press Delete to remove the selected "
-            "node and its descendants.",
-        )
+        self._tree.setToolTip(t("outliner.tooltip"))
         self._tree.itemSelectionChanged.connect(self._on_selection_changed)
         # Right-click menu for delete.
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_context_menu)
         # Delete key as a shortcut on the tree widget. QAction with the tree as
         # parent so the shortcut only fires while the tree has focus.
-        self._delete_action = QAction("Delete Node", self._tree)
+        self._delete_action = QAction(t("outliner.action.delete_node"), self._tree)
         self._delete_action.setShortcut(QKeySequence(Qt.Key.Key_Delete))
         self._delete_action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
         self._delete_action.triggered.connect(self._delete_selected)
@@ -81,7 +78,7 @@ class OutlinerDock(QDockWidget):
                 return
 
     def _add_node(self, node: Node, parent_item: QTreeWidgetItem | None) -> None:
-        label = node.name or "<unnamed>"
+        label = node.name or t("outliner.unnamed")
         if node.components:
             label = f"{label}  ({len(node.components)})"
         item = QTreeWidgetItem([label])
@@ -129,7 +126,7 @@ class OutlinerDock(QDockWidget):
             # clearSelection above is the only action.
             return
         menu = QMenu(self._tree)
-        action = menu.addAction("Delete")
+        action = menu.addAction(t("outliner.menu.delete"))
         action.triggered.connect(
             lambda: self._delete_node(right_clicked_node),
         )

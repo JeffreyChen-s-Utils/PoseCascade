@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from posecascade.i18n import t
 from posecascade.scripting.expressions import looks_like_expression
 
 # Kinds the picker offers. Order matters — most common authoring shapes
@@ -74,7 +75,7 @@ class CurveEditor(QWidget):
         self._from_spin = _scalar_spin()
         self._to_spin = _scalar_spin()
         self._source_edit = QLineEdit()
-        self._source_edit.setPlaceholderText("e.g. 0.5 * sin(elapsed * tau)")
+        self._source_edit.setPlaceholderText(t("curve_editor.placeholder"))
         self._extra_spin = _scalar_spin()   # at / overshoot / center
         self._width_spin = _scalar_spin()
         # Track whether we're loading a value so per-widget signals

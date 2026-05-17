@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from posecascade.i18n import t
 from posecascade.ui.curve_editor import CurveEditor
 
 # Bounds tuned for the phase form spin boxes. Matches the limits in
@@ -66,7 +67,7 @@ class GaitEditor(QGroupBox):
     changed = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__("Gait", parent)
+        super().__init__(t("phase_editor.gait.title"), parent)
         self._kind = QComboBox()
         self._kind.addItems(["(none)", "walking", "stride"])
         # walking shared with stride
@@ -226,7 +227,7 @@ class TranslationEditor(QGroupBox):
     changed = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__("Body translation", parent)
+        super().__init__(t("phase_editor.body.title"), parent)
         self._kind = QComboBox()
         self._kind.addItems(["xyz", "stair"])
         self._x = CurveEditor()
@@ -345,7 +346,7 @@ class BonesEditor(QGroupBox):
     changed = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__("Bones", parent)
+        super().__init__(t("phase_editor.bones.title"), parent)
         self._table = QTableWidget(0, _BONE_TABLE_COLUMNS)
         self._table.setHorizontalHeaderLabels(["Bone", "x", "y", "z"])
         self._table.horizontalHeader().setSectionResizeMode(
@@ -525,7 +526,7 @@ class MorphsEditor(QGroupBox):
     changed = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__("Morphs", parent)
+        super().__init__(t("phase_editor.morphs.title"), parent)
         self._table = QTableWidget(0, _MORPH_TABLE_COLUMNS)
         self._table.setHorizontalHeaderLabels(["Morph", "Curve"])
         self._table.horizontalHeader().setSectionResizeMode(
