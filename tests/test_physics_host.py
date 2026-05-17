@@ -195,3 +195,38 @@ def test_chain_with_empty_joints_is_skipped() -> None:
     host = PhysicsHost()
     host.register_scene(scene)
     assert host.find_chain("empty") is None
+
+
+def test_share_colliders_with_adopts_cloth_host_list_by_reference() -> None:
+    """After ``share_colliders_with``, both hosts see appends on either side."""
+    from posecascade.animation.cloth import SphereCollider  # noqa: PLC0415
+    from posecascade.animation.cloth_host import ClothHost  # noqa: PLC0415
+    physics = PhysicsHost()
+    cloth = ClothHost()
+    physics.share_colliders_with(cloth)
+    sphere = SphereCollider(center=vec3(0.0, 0.0, 0.0), radius=1.0)
+    cloth._solver.colliders.append(sphere)  # noqa: SLF001 — simulating internal add
+    assert physics.simulator.colliders is cloth._solver.colliders  # noqa: SLF001
+    assert len(physics.simulator.colliders) == 1
+
+
+def test_share_colliders_with_is_idempotent() -> None:
+    """Calling share twice with the same host doesn't reset or duplicate."""
+    from posecascade.animation.cloth import SphereCollider  # noqa: PLC0415
+    from posecascade.animation.cloth_host import ClothHost  # noqa: PLC0415
+    physics = PhysicsHost()
+    cloth = ClothHost()
+    physics.share_colliders_with(cloth)
+    cloth._solver.colliders.append(SphereCollider(  # noqa: SLF001
+        center=vec3(0.0, 0.0, 0.0), radius=1.0,
+    ))
+    physics.share_colliders_with(cloth)
+    assert len(physics.simulator.colliders) == 1
+
+
+def test_share_colliders_with_skips_object_without_solver() -> None:
+    """Non-cloth-host object (no ``_solver``) is a no-op, not an error."""
+    physics = PhysicsHost()
+    sentinel = physics.simulator.colliders
+    physics.share_colliders_with(object())
+    assert physics.simulator.colliders is sentinel

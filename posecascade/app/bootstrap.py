@@ -83,6 +83,9 @@ def attach_scene(window: MainWindow, services: Services, scene_path: Path) -> No
     services.physics_host.install_default_forces()
     services.cloth_host.reset()
     services.cloth_host.install_default_forces()
+    # Re-share colliders after both hosts reset (each reset rebuilds the
+    # internal lists, so the references the simulator held are now stale).
+    services.physics_host.share_colliders_with(services.cloth_host)
     # Auto-rig spring-physics chains tagged on bones by the importer (e.g. ``hair_*``).
     services.physics_host.register_imported_scene(imported)
     # Auto-rig cloth pieces tagged with ClothComponent (user marks via script API,

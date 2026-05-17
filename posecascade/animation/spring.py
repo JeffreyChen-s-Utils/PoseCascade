@@ -30,6 +30,7 @@ from typing import Protocol
 
 import numpy as np
 
+from posecascade.animation.cloth import CapsuleCollider, SphereCollider
 from posecascade.scene.node import Node
 from posecascade.utils.math3d import (
     Quat,
@@ -56,6 +57,10 @@ _NUMERIC_EPSILON = 1.0e-6
 # blow the integration up. 8π rad/s ≈ 4 full turns / second — well past anything
 # real hair sees in practice but generous enough not to clamp normal motion.
 _MAX_ANGULAR_SPEED = 8.0 * math.pi
+# Passes of collider push-out per substep. 3 handles a hair tip sandwiched between
+# chest + shoulder capsules (single pass leaves it floating between them); past 3
+# we hit diminishing returns since the swing rotation is exact for one collider.
+_COLLIDER_PROJECTION_PASSES = 3
 
 
 class ExternalForce(Protocol):
@@ -209,6 +214,13 @@ class SpringSimulator:
 
     chains: list[SpringChain] = field(default_factory=list)
     global_forces: list[ExternalForce] = field(default_factory=list)
+    # Body-collider list. After each joint's angular step, the integrator
+    # rotates the bone around its pivot so the tip is pushed to the surface
+    # of any penetrating sphere / capsule. Shared by reference with the
+    # cloth host's collider list, so a single bone-follow driver update
+    # benefits both systems and hair no longer clips through the dress /
+    # body when the character poses deeply.
+    colliders: list[SphereCollider | CapsuleCollider] = field(default_factory=list)
     fixed_dt: float = _DEFAULT_FIXED_DT
     time: float = 0.0
 
@@ -217,6 +229,10 @@ class SpringSimulator:
 
     def add_force(self, force: ExternalForce) -> None:
         self.global_forces.append(force)
+
+    def add_collider(self, collider: SphereCollider | CapsuleCollider) -> None:
+        """Register one body collider for hair-vs-body push-out (see :attr:`colliders`)."""
+        self.colliders.append(collider)
 
     def find_chain(self, name: str) -> SpringChain | None:
         """Return the first chain matching ``name`` (or ``None``)."""
@@ -250,6 +266,7 @@ class SpringSimulator:
                 _integrate_chain(
                     chain, sub, self.time, self.global_forces,
                     anchor_pose=anchor_poses[id(chain)],
+                    colliders=self.colliders,
                 )
             self.time += sub
             remaining -= sub
@@ -300,6 +317,7 @@ def _integrate_chain(
     global_forces: Sequence[ExternalForce],
     *,
     anchor_pose: tuple[Vec3, Quat] | None = None,
+    colliders: Sequence[SphereCollider | CapsuleCollider] = (),
 ) -> None:
     """Step every joint in ``chain`` once. Walks root → tip so each joint sees its parent's
     updated world transform."""
@@ -312,6 +330,8 @@ def _integrate_chain(
         if not joint.initialized:
             _initialize_joint_world(joint, parent)
         _step_joint(joint, parent, chain, time, global_forces, dt)
+        if colliders:
+            _project_joint_against_colliders(joint, parent, colliders)
         parent = _ParentFrame(position=joint.world_position, rotation=joint.world_rotation)
 
 
@@ -356,6 +376,119 @@ def _step_joint(
 
     new_local = quat_normalize(quat_mul(quat_inverse(parent.rotation), joint.world_rotation))
     joint.node.transform.set_rotation(new_local)
+
+
+def _project_joint_against_colliders(
+    joint: SpringJoint,
+    parent: _ParentFrame,
+    colliders: Sequence[SphereCollider | CapsuleCollider],
+) -> None:
+    """Rotate ``joint`` around its pivot so its bone tip exits every penetrating collider.
+
+    Spring physics is angular — joint position is fixed by the parent
+    pivot, so we cannot simply translate the tip out of a sphere. Instead
+    we compute the corrective swing rotation that takes the current bone
+    direction to a direction whose endpoint lies on the collider surface
+    (plus skin offset). Up to ``_COLLIDER_PROJECTION_PASSES`` passes
+    handle multi-collider stacks (e.g. a chest + upper-arm capsule).
+
+    The corrective rotation is reflected back into ``joint.node`` so the
+    rest of the engine sees the projected pose immediately.
+    """
+    pivot = parent.position + quat_rotate_vec(parent.rotation, joint.rest_local_position)
+    bone_world = quat_rotate_vec(joint.world_rotation, joint.bone_vector_local)
+    bone_len = float(np.linalg.norm(bone_world))
+    if bone_len < _NUMERIC_EPSILON:
+        joint.world_position = pivot
+        return
+    bone_dir = bone_world / bone_len
+    for _ in range(_COLLIDER_PROJECTION_PASSES):
+        tip = pivot + bone_dir * bone_len
+        target_tip, hit = _push_tip_out_of_colliders(tip, colliders)
+        if not hit:
+            break
+        target_dir = target_tip - pivot
+        target_len = float(np.linalg.norm(target_dir))
+        if target_len < _NUMERIC_EPSILON:
+            break
+        target_dir = target_dir / target_len
+        swing = _shortest_arc_quat(bone_dir, target_dir)
+        joint.world_rotation = quat_normalize(quat_mul(swing, joint.world_rotation))
+        bone_dir = target_dir
+    joint.world_position = pivot
+    new_local = quat_normalize(quat_mul(quat_inverse(parent.rotation), joint.world_rotation))
+    joint.node.transform.set_rotation(new_local)
+
+
+def _push_tip_out_of_colliders(
+    tip: Vec3,
+    colliders: Sequence[SphereCollider | CapsuleCollider],
+) -> tuple[Vec3, bool]:
+    """Return ``(corrected_tip, any_hit)`` after one pass of collider projection."""
+    out = tip
+    any_hit = False
+    for collider in colliders:
+        if isinstance(collider, SphereCollider):
+            out, hit = _project_sphere(out, collider)
+        elif isinstance(collider, CapsuleCollider):
+            out, hit = _project_capsule(out, collider)
+        else:
+            continue
+        any_hit = any_hit or hit
+    return out, any_hit
+
+
+def _project_sphere(point: Vec3, sphere: SphereCollider) -> tuple[Vec3, bool]:
+    """Push ``point`` to the sphere surface (+ skin offset) when inside; else return unchanged."""
+    delta = point - sphere.center
+    dist = float(np.linalg.norm(delta))
+    threshold = sphere.radius + sphere.skin_offset
+    if dist >= threshold:
+        return point, False
+    if dist < _NUMERIC_EPSILON:
+        # Degenerate: tip exactly at centre — push along +Y to break symmetry.
+        return (sphere.center + vec3(0.0, threshold, 0.0)).astype(np.float32), True
+    return (sphere.center + delta * (threshold / dist)).astype(np.float32), True
+
+
+def _project_capsule(point: Vec3, capsule: CapsuleCollider) -> tuple[Vec3, bool]:
+    """Push ``point`` to the capsule surface when inside; else return unchanged."""
+    segment = capsule.b - capsule.a
+    seg_len_sq = float(np.dot(segment, segment))
+    if seg_len_sq < _NUMERIC_EPSILON:
+        return _project_sphere(point, SphereCollider(
+            center=capsule.a, radius=capsule.radius, skin_offset=capsule.skin_offset,
+        ))
+    t = float(np.dot(point - capsule.a, segment) / seg_len_sq)
+    t_clamped = max(0.0, min(1.0, t))
+    closest = capsule.a + segment * t_clamped
+    delta = point - closest
+    dist = float(np.linalg.norm(delta))
+    threshold = capsule.radius + capsule.skin_offset
+    if dist >= threshold:
+        return point, False
+    if dist < _NUMERIC_EPSILON:
+        # Tip on the axis — push perpendicular to the segment along world up.
+        return (closest + vec3(0.0, threshold, 0.0)).astype(np.float32), True
+    return (closest + delta * (threshold / dist)).astype(np.float32), True
+
+
+def _shortest_arc_quat(from_dir: Vec3, to_dir: Vec3) -> Quat:
+    """Shortest-arc quaternion mapping unit vector ``from_dir`` to unit vector ``to_dir``."""
+    dot = float(np.clip(np.dot(from_dir, to_dir), -1.0, 1.0))
+    if dot > 1.0 - _NUMERIC_EPSILON:
+        return quat_identity()
+    if dot < -1.0 + _NUMERIC_EPSILON:
+        # 180° flip — pick any axis perpendicular to from_dir.
+        axis = np.cross(from_dir, vec3(1.0, 0.0, 0.0))
+        if float(np.linalg.norm(axis)) < _NUMERIC_EPSILON:
+            axis = np.cross(from_dir, vec3(0.0, 1.0, 0.0))
+        axis = axis / float(np.linalg.norm(axis))
+        return np.array([axis[0], axis[1], axis[2], 0.0], dtype=np.float32)
+    axis = np.cross(from_dir, to_dir)
+    w = 1.0 + dot
+    q = np.array([axis[0], axis[1], axis[2], w], dtype=np.float32)
+    return quat_normalize(q)
 
 
 def _clamp_angular_speed(omega: Vec3, max_speed: float) -> Vec3:

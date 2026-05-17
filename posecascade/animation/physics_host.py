@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
+from posecascade.animation.cloth import CapsuleCollider, SphereCollider
 from posecascade.animation.spring import (
     ExternalForce,
     Gravity,
@@ -77,6 +78,38 @@ class PhysicsHost:
     def add_force(self, force: ExternalForce) -> None:
         """Add a global external force (gravity / wind / point force) applied to every chain."""
         self._sim.add_force(force)
+
+    def add_collider(self, collider: SphereCollider | CapsuleCollider) -> None:
+        """Register one body collider so hair / ribbon chains push out of it.
+
+        See :attr:`SpringSimulator.colliders`. Prefer :meth:`share_colliders_with`
+        when the cloth host already manages a collider list — that way a
+        single ``bone-follow`` driver update is observed by both physics
+        systems and the two stay in lock-step automatically.
+        """
+        self._sim.add_collider(collider)
+
+    def share_colliders_with(self, cloth_host: object) -> None:
+        """Adopt ``cloth_host``'s collider list by reference (zero-copy).
+
+        Replaces the simulator's own ``colliders`` field with the same
+        Python list the cloth host mutates each frame. Future ``add_collider``
+        calls on either side end up in the shared list, so hair-vs-body
+        and cloth-vs-body see identical capsules without a synchronization
+        pass. Idempotent — calling twice with the same host is a no-op
+        for the second call.
+        """
+        # The cloth host's public ``colliders`` method returns a tuple snapshot;
+        # we want the live list it mutates. That list lives on the underlying
+        # solver — go through ``_solver.colliders`` so future ``add_collider``
+        # calls on either host land in the same Python list.
+        solver = getattr(cloth_host, "_solver", None)
+        host_colliders = getattr(solver, "colliders", None) if solver else None
+        if host_colliders is None:
+            return
+        if self._sim.colliders is host_colliders:
+            return
+        self._sim.colliders = host_colliders
 
     def find_chain(self, name: str) -> SpringChain | None:
         """Look up a chain by its name (e.g. ``"hair_C"``); ``None`` if not registered."""

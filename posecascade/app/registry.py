@@ -44,4 +44,10 @@ def build_services(project_root: Path) -> Services:
     services = Services(importer_manager=importer_manager)
     services.physics_host.install_default_forces()
     services.cloth_host.install_default_forces()
+    # Share the cloth host's collider list with the spring simulator so
+    # body capsules (chest, upper-arm, leg) registered by the declarative
+    # runtime push hair / ribbon chains out of the body the same way they
+    # push the dress cloth out — without this, hair clips through the
+    # dress when the character poses deeply (dog crawl, sitting, etc.).
+    services.physics_host.share_colliders_with(services.cloth_host)
     return services

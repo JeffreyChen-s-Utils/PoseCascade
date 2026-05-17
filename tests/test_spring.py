@@ -6,6 +6,7 @@ import math
 import numpy as np
 import pytest
 
+from posecascade.animation.cloth import CapsuleCollider, SphereCollider
 from posecascade.animation.spring import (
     DEFAULT_CHAIN_PROFILES,
     Gravity,
@@ -14,6 +15,9 @@ from posecascade.animation.spring import (
     SpringParams,
     SpringSimulator,
     Wind,
+    _project_capsule,
+    _project_sphere,
+    _shortest_arc_quat,
     detect_chains,
     node_world_pose,
     resolve_chain_params,
@@ -359,6 +363,107 @@ def test_disabled_chain_is_skipped() -> None:
     for joint in chain.joints:
         assert joint.initialized is False
         np.testing.assert_allclose(joint.angular_velocity, vec3(0.0, 0.0, 0.0), atol=1.0e-6)
+
+
+def test_sphere_projection_pushes_inside_point_to_surface() -> None:
+    """A point inside the sphere is pushed to radius + skin_offset along its direction."""
+    sphere = SphereCollider(center=vec3(0.0, 0.0, 0.0), radius=1.0, skin_offset=0.05)
+    point = vec3(0.6, 0.0, 0.0)
+    out, hit = _project_sphere(point, sphere)
+    assert hit is True
+    np.testing.assert_allclose(out, vec3(1.05, 0.0, 0.0), atol=1.0e-6)
+
+
+def test_sphere_projection_leaves_outside_point_unchanged() -> None:
+    sphere = SphereCollider(center=vec3(0.0, 0.0, 0.0), radius=1.0, skin_offset=0.05)
+    point = vec3(2.0, 0.0, 0.0)
+    out, hit = _project_sphere(point, sphere)
+    assert hit is False
+    np.testing.assert_allclose(out, point, atol=1.0e-6)
+
+
+def test_sphere_projection_handles_point_at_center() -> None:
+    """Degenerate case: tip exactly at sphere centre — picks +Y to break symmetry."""
+    sphere = SphereCollider(center=vec3(0.0, 0.0, 0.0), radius=1.0, skin_offset=0.0)
+    out, hit = _project_sphere(vec3(0.0, 0.0, 0.0), sphere)
+    assert hit is True
+    np.testing.assert_allclose(out, vec3(0.0, 1.0, 0.0), atol=1.0e-6)
+
+
+def test_capsule_projection_pushes_perpendicular_to_axis() -> None:
+    """Point inside a vertical capsule is pushed radially outward."""
+    capsule = CapsuleCollider(
+        a=vec3(0.0, 0.0, 0.0), b=vec3(0.0, 1.0, 0.0), radius=0.5, skin_offset=0.01,
+    )
+    out, hit = _project_capsule(vec3(0.2, 0.5, 0.0), capsule)
+    assert hit is True
+    # Closest segment point is (0, 0.5, 0); push along +X to radius + offset.
+    np.testing.assert_allclose(out, vec3(0.51, 0.5, 0.0), atol=1.0e-6)
+
+
+def test_capsule_projection_caps_endpoint_like_sphere() -> None:
+    """A point beyond the capsule's b-end is pushed off the spherical cap."""
+    capsule = CapsuleCollider(
+        a=vec3(0.0, 0.0, 0.0), b=vec3(0.0, 1.0, 0.0), radius=0.5, skin_offset=0.0,
+    )
+    # Above b: closest segment point clamps to b = (0, 1, 0).
+    out, hit = _project_capsule(vec3(0.0, 1.3, 0.0), capsule)
+    assert hit is True
+    np.testing.assert_allclose(out, vec3(0.0, 1.5, 0.0), atol=1.0e-6)
+
+
+def test_shortest_arc_quat_aligns_unit_vectors() -> None:
+    """Rotating from one unit vector to another via the shortest arc lands exactly on the target."""
+    q = _shortest_arc_quat(vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0))
+    from posecascade.utils.math3d import quat_rotate_vec  # noqa: PLC0415
+    rotated = quat_rotate_vec(q, vec3(1.0, 0.0, 0.0))
+    np.testing.assert_allclose(rotated, vec3(0.0, 1.0, 0.0), atol=1.0e-6)
+
+
+def test_simulator_can_share_collider_list_by_reference() -> None:
+    """Adding a collider to the shared list shows up in the sim immediately."""
+    sim = SpringSimulator()
+    shared_list: list = []
+    sim.colliders = shared_list  # client uses the shared list directly
+    shared_list.append(SphereCollider(center=vec3(0.0, 0.0, 0.0), radius=1.0))
+    assert len(sim.colliders) == 1
+    assert sim.colliders is shared_list  # ref preserved, not copied
+
+
+def test_collider_push_rotates_joint_tip_out_of_sphere() -> None:
+    """A bone whose tip dips into a sphere swings around the pivot to exit it.
+
+    Chain: 2 joints, each segment 0.4 long, hanging straight down from origin.
+    Sphere at (0.15, -0.7, 0), radius 0.25 — sits beside the second joint's tip
+    (which would normally be at (0, -0.8, 0)). The projection should rotate
+    the second joint so its tip exits the sphere along the radial direction.
+    """
+    from posecascade.utils.math3d import quat_rotate_vec  # noqa: PLC0415
+    anchor, joints = _make_chain(joint_count=2, segment_length=0.4)
+    sphere = SphereCollider(center=vec3(0.15, -0.7, 0.0), radius=0.25, skin_offset=0.01)
+    chain = SpringChain.from_node_chain(
+        "hair", anchor, joints,
+        params=SpringParams(stiffness=2.0, damping=0.5, inertia=0.05),
+    )
+    sim = SpringSimulator(chains=[chain], colliders=[sphere])
+    sim.step(1.0 / 60.0)
+    # Verify EVERY joint's tip is outside the sphere after one step.
+    parent_pos = vec3(0.0, 0.0, 0.0)
+    parent_rot = quat_identity()
+    for joint in chain.joints:
+        pivot = parent_pos + quat_rotate_vec(parent_rot, joint.rest_local_position)
+        bone_world = quat_rotate_vec(joint.world_rotation, joint.bone_vector_local)
+        tip = pivot + bone_world
+        dist = float(np.linalg.norm(tip - sphere.center))
+        threshold = sphere.radius + sphere.skin_offset
+        # 2 mm tolerance: projection lands at threshold but a sub-step's worth
+        # of spring restoring torque can pull the tip a fraction back inward
+        # before the test reads it. Real-world hair gaps are well above this.
+        assert dist >= threshold - 2.0e-3, (
+            f"{joint.node.name} tip inside sphere: dist={dist:.4f} threshold={threshold:.4f}"
+        )
+        parent_pos = pivot
+        parent_rot = joint.world_rotation
 
 
 def test_empty_joint_chain_raises() -> None:
