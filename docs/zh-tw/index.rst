@@ -87,9 +87,13 @@ virtualenv，這樣 editable install 編譯 Cython 布料 kernel 時能對到同
    python -m posecascade --scene examples/assets/herta/herta.glb \
                           --script examples/scripts/idle.json
 
-   # 四足「狗爬式」起始姿勢——跪姿、軀幹前傾、雙臂前伸。
-   # 關節角度為隨附的 Herta 模型調過，換到其他模型時請用屬性檢視
-   # dock 微調。
+   # 低姿前傾「狗爬式」。隨附的 Herta GLB 採用 HoYoverse rig，腿部
+   # 骨骼在 JSON 直接寫死的旋轉值下不夠乾淨（gait 系統會知道正確的
+   # 旋轉，但僅支援 walking / running / stride 三種）。所以隨附的
+   # 姿勢是「跪姿前傾」的近似，並非真正手腳著地的四足；若需要完整
+   # 四足姿勢，可用屬性檢視 dock 微調，或在 Blender 重新烘焙骨架。
+   # 下方的 ``cloth`` 區塊確保連衣裙頂點停留在地面（引擎的 ground
+   # clamp——只要動畫宣告 ``ground: {kind: flat}`` 就自動套用）。
    python -m posecascade --scene examples/assets/herta/herta.glb \
                           --script examples/scripts/dog_crawl.json
 

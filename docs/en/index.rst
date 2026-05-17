@@ -93,9 +93,16 @@ the model and ``--script`` for a ``.json`` animation document:
    python -m posecascade --scene examples/assets/herta/herta.glb \
                           --script examples/scripts/idle.json
 
-   # Quadruped "dog crawl" starting pose — kneeling, torso pitched
-   # forward, arms extended. The exact joint angles are tuned for the
-   # bundled Herta rig; refine via the Inspector dock for other rigs.
+   # Low forward-lean "dog crawl" stance. The bundled Herta GLB ships
+   # a HoYoverse rig whose leg bones don't accept large explicit
+   # rotations cleanly via JSON (the gait system knows the right
+   # rotations, but only for walking / running / stride). The shipped
+   # pose is therefore a kneeling-forward approximation rather than
+   # a true hands-and-knees silhouette; refine via the Inspector dock
+   # or re-bake the rig in Blender if you need a perfect quadruped
+   # pose. The ``cloth`` block below ensures the dress mesh stops at
+   # the floor (engine ground clamp — applies whenever the animation
+   # declares ``ground: {kind: flat}``).
    python -m posecascade --scene examples/assets/herta/herta.glb \
                           --script examples/scripts/dog_crawl.json
 
