@@ -651,6 +651,40 @@ toon textures by relative path.
 
 ----
 
+GUI surface + internationalisation
+----------------------------------
+
+The editor's user-visible surface — every menu, every dock, the
+toolbar, the status bar, the export dialog, and the 3D viewport's
+mouse controls — has a dedicated walkthrough in :doc:`/gui`. Topics
+covered there but not duplicated here:
+
+* Per-dock behaviour (Outliner, Slots, Inspector, Effects, Timeline,
+  Tracks, Animation JSON, Phase blocks).
+* The per-frame loop, the pause flag, and how a misbehaving script
+  is isolated so it can't freeze the timeline.
+* DPI-aware sizing and the ``QFontMetrics``-derived widget minimums
+  that replaced the old pixel literals.
+
+The GUI ships with three locales out of the box (English, Traditional
+Chinese, Simplified Chinese) and switches at runtime from
+``Settings → Language``. The full i18n reference — catalog format,
+the locale resolution order, how to add a new language as a one-file
+drop-in, the placeholder rules translators must preserve, and the
+companion responsive-sizing policy — lives at
+:doc:`/internationalization`.
+
+To force a specific locale for one launch:
+
+.. code-block:: bash
+
+   POSECASCADE_LANG=zh-TW python -m posecascade
+
+``POSECASCADE_LANG`` overrides both the persisted
+``Settings → Language`` choice and the OS-reported locale.
+
+----
+
 License + attribution
 ---------------------
 

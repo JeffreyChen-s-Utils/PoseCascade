@@ -15,6 +15,8 @@ Welcome to the PoseCascade documentation. Please select your language:
    :maxdepth: 1
    :caption: Reference (language-neutral)
 
+   gui
+   internationalization
    rendering_pipeline
    declarative_animation
    animation_editor
