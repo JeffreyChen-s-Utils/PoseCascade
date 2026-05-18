@@ -2982,17 +2982,22 @@ class DeclarativeRuntime:
                 align_bone_axis_to_world(node, tuple(contact_local), (0.0, -1.0, 0.0))
                 continue
             extension = extension / ext_norm
-            # PRIMARY = bone direction must hit horizontal extension EXACTLY
-            # — this is what puts heel-and-toe BOTH on the floor.
-            # SECONDARY = sole/palm normal aims at world -Y as close as the
-            # primary allows (orthogonalised). On rigs whose rest binds
-            # bone direction non-perpendicular to sole normal (Herta's
-            # high-heel-bound foot is 56 deg off), prioritising contact
-            # normal leaves the toe extending DOWN past the floor; the
-            # foot looks heel-up. Prioritising bone direction instead
-            # parks heel-AND-toe at ankle Y so the foot lies flat, with
-            # sole tilted a few degrees off horizontal (visually
-            # indistinguishable, but the heel is grounded).
+            from posecascade.animation.ik import (  # noqa: PLC0415
+                _rotate_vec_by_quat,
+                _world_rotation,
+            )
+            cur_world_rot = _world_rotation(node)
+            cur_bone_dir = _rotate_vec_by_quat(
+                cur_world_rot, np.asarray(bone_dir_local, dtype=np.float64),
+            )
+            cur_norm = float(np.linalg.norm(cur_bone_dir))
+            if cur_norm > 1.0e-6:  # noqa: PLR2004
+                cur_bone_dir = cur_bone_dir / cur_norm
+                if float(np.dot(cur_bone_dir, extension)) < 0.0:
+                    align_bone_axis_to_world(
+                        node, tuple(contact_local), (0.0, -1.0, 0.0),
+                    )
+                    continue
             align_bone_two_axes_to_world(
                 node,
                 tuple(bone_dir_local), tuple(extension),
