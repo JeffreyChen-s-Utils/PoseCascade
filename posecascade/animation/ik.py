@@ -307,6 +307,109 @@ def solve_two_bone_analytic(
     _add_world_delta(mid, delta_mid_world)
 
 
+def align_bone_two_axes_to_world(
+    node: Node,
+    local_primary: Vec3,
+    world_primary: Vec3,
+    local_secondary: Vec3,
+    world_secondary: Vec3,
+) -> None:
+    """Fully constrain a bone's world rotation via two local→world axis pairs.
+
+    ``local_primary`` is forced to point along ``world_primary`` EXACTLY;
+    ``local_secondary`` is forced to point along the component of
+    ``world_secondary`` that is perpendicular to ``world_primary`` (Gram-
+    Schmidt). The third axis is implied by orthogonality. Use this when
+    a single-axis alignment leaves the bone free to twist around the
+    primary axis and that twist matters — e.g. for a foot, sole-down
+    alone leaves the foot tilted (heel-up) because the toe direction
+    isn't constrained; passing the chain-extension direction as the
+    secondary pulls the foot flat.
+
+    Degenerate cases (zero-length or colinear local axes) fall back to
+    a single-axis alignment using just the primary pair.
+    """
+    la = np.asarray(local_primary, dtype=np.float64).reshape(3)
+    lb = np.asarray(local_secondary, dtype=np.float64).reshape(3)
+    wa = np.asarray(world_primary, dtype=np.float64).reshape(3)
+    wb = np.asarray(world_secondary, dtype=np.float64).reshape(3)
+    la_norm = float(np.linalg.norm(la))
+    wa_norm = float(np.linalg.norm(wa))
+    if la_norm < _EPSILON or wa_norm < _EPSILON:
+        return
+    la = la / la_norm
+    wa = wa / wa_norm
+    # Orthogonalise the secondary axes against the primary.
+    lb_perp = lb - float(np.dot(lb, la)) * la
+    wb_perp = wb - float(np.dot(wb, wa)) * wa
+    lb_norm = float(np.linalg.norm(lb_perp))
+    wb_norm = float(np.linalg.norm(wb_perp))
+    if lb_norm < _EPSILON or wb_norm < _EPSILON:
+        # Degenerate: fall back to single-axis alignment for at least the primary.
+        align_bone_axis_to_world(node, tuple(la), tuple(wa))
+        return
+    lb_perp = lb_perp / lb_norm
+    wb_perp = wb_perp / wb_norm
+    lc = np.cross(la, lb_perp)
+    wc = np.cross(wa, wb_perp)
+    # R such that R @ la = wa, R @ lb_perp = wb_perp, R @ lc = wc.
+    # Build local basis (columns) and world basis (columns), then
+    # R = world_basis @ local_basis.T (local basis is orthonormal).
+    local_basis = np.column_stack([la, lb_perp, lc])
+    world_basis = np.column_stack([wa, wb_perp, wc])
+    r_mat = (world_basis @ local_basis.T).astype(np.float32, copy=False)
+    target_quat = _rotation_matrix_to_quat(r_mat)
+    set_bone_world_rotation(node, target_quat)
+
+
+def _rotation_matrix_to_quat(rot: np.ndarray) -> np.ndarray:
+    """Convert a 3×3 rotation matrix to a unit XYZW quaternion (Shepperd's method)."""
+    trace = float(rot[0, 0] + rot[1, 1] + rot[2, 2])
+    if trace > 0.0:
+        s = 0.5 / float(np.sqrt(trace + 1.0))
+        return np.array(
+            [
+                (rot[2, 1] - rot[1, 2]) * s,
+                (rot[0, 2] - rot[2, 0]) * s,
+                (rot[1, 0] - rot[0, 1]) * s,
+                0.25 / s,
+            ],
+            dtype=np.float32,
+        )
+    if rot[0, 0] > rot[1, 1] and rot[0, 0] > rot[2, 2]:
+        s = 2.0 * float(np.sqrt(1.0 + rot[0, 0] - rot[1, 1] - rot[2, 2]))
+        return np.array(
+            [
+                0.25 * s,
+                (rot[0, 1] + rot[1, 0]) / s,
+                (rot[0, 2] + rot[2, 0]) / s,
+                (rot[2, 1] - rot[1, 2]) / s,
+            ],
+            dtype=np.float32,
+        )
+    if rot[1, 1] > rot[2, 2]:
+        s = 2.0 * float(np.sqrt(1.0 + rot[1, 1] - rot[0, 0] - rot[2, 2]))
+        return np.array(
+            [
+                (rot[0, 1] + rot[1, 0]) / s,
+                0.25 * s,
+                (rot[1, 2] + rot[2, 1]) / s,
+                (rot[0, 2] - rot[2, 0]) / s,
+            ],
+            dtype=np.float32,
+        )
+    s = 2.0 * float(np.sqrt(1.0 + rot[2, 2] - rot[0, 0] - rot[1, 1]))
+    return np.array(
+        [
+            (rot[0, 2] + rot[2, 0]) / s,
+            (rot[1, 2] + rot[2, 1]) / s,
+            0.25 * s,
+            (rot[1, 0] - rot[0, 1]) / s,
+        ],
+        dtype=np.float32,
+    )
+
+
 def set_bone_world_rotation(node: Node, target_world_rotation: Vec3) -> None:
     """Force ``node`` to land at ``target_world_rotation`` in world space.
 
@@ -543,6 +646,7 @@ __all__ = [
     "IkChain",
     "IkLink",
     "align_bone_axis_to_world",
+    "align_bone_two_axes_to_world",
     "compose_trs",
     "set_bone_world_rotation",
     "solve_chain",

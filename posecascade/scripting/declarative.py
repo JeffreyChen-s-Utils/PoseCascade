@@ -1617,6 +1617,16 @@ class DeclarativeRuntime:
     # alignment can't recover this because the bone's local axes are
     # arbitrary 3D directions, not standard XYZ.
     _floor_align_rest_world: dict[int, np.ndarray] = field(default_factory=dict)
+    # Per-bone 'bone direction in local frame' captured at start from the
+    # first child's rest translation. Used as the secondary axis for the
+    # 2-axis floor alignment so the foot lies HEEL-TO-TOE along the
+    # chain's extension direction (sole flat AND heel on floor) instead
+    # of just being sole-down with the foot's long axis free.
+    _floor_align_bone_dir_local: dict[int, np.ndarray] = field(default_factory=dict)
+    # Per-bone chain root node — used at align time to compute the
+    # 'natural extension direction' for the bone (parent_joint → bone),
+    # which is the world target for the bone's local bone-direction axis.
+    _floor_align_chain_parent: dict[int, Any] = field(default_factory=dict)
     # Arm chain cache for hand-IK. Same shape as ``_leg_chain_nodes``:
     # ``{"L": (shoulder, elbow, wrist), "R": (...)}``. Populated at
     # ``_start`` from ``rig.arm_chain_l/r`` (resolved through the
@@ -1780,6 +1790,20 @@ class DeclarativeRuntime:
             bone_keys.update(phase.floor_align)
         if not bone_keys:
             return
+        # Map bone_key -> the IK chain whose END is that bone, so we can
+        # find the chain's 'previous joint' (knee for foot, elbow for
+        # hand) to derive the natural foot/hand extension direction.
+        end_to_parent: dict[str, Any] = {}
+        empty_chain = (None, None, None)
+        for side, chain_def, chain_nodes in (
+            ("L", self.animation.rig.leg_chain_l, self._leg_chain_nodes),
+            ("R", self.animation.rig.leg_chain_r, self._leg_chain_nodes),
+            ("L", self.animation.rig.arm_chain_l, self._arm_chain_nodes),
+            ("R", self.animation.rig.arm_chain_r, self._arm_chain_nodes),
+        ):
+            if not chain_def:
+                continue
+            end_to_parent[chain_def[2]] = chain_nodes.get(side, empty_chain)[1]
         for bone_key in bone_keys:
             bone_name = aliases.get(bone_key, bone_key)
             node = self.scene.find(bone_name)
@@ -1796,6 +1820,22 @@ class DeclarativeRuntime:
             if norm > 1.0e-6:  # noqa: PLR2004  # degenerate rest-pose guard
                 contact_local = contact_local / norm
             self._floor_align_rest_world[id(node)] = contact_local
+            # Bone direction in local frame = first child's REST translation,
+            # normalised. Captures the rig's 'down the bone' direction
+            # (toward fingertips / toe tip).
+            bone_dir_local: np.ndarray | None = None
+            if node.children:
+                offset = np.asarray(
+                    node.children[0].transform.translation, dtype=np.float32,
+                ).reshape(3)
+                offset_norm = float(np.linalg.norm(offset))
+                if offset_norm > 1.0e-6:  # noqa: PLR2004
+                    bone_dir_local = offset / offset_norm
+            if bone_dir_local is not None:
+                self._floor_align_bone_dir_local[id(node)] = bone_dir_local
+            parent_chain = end_to_parent.get(bone_key)
+            if parent_chain is not None:
+                self._floor_align_chain_parent[id(node)] = parent_chain
 
     def _apply_pose_blends(
         self,
@@ -2886,22 +2926,29 @@ class DeclarativeRuntime:
         return np.array((tx, ty, tz), dtype=np.float32)
 
     def _apply_floor_align(self, bone_keys: tuple[str, ...]) -> None:
-        """Rotate each named bone so its rig-specific 'contact normal' points world -Y.
+        """Full 2-axis orientation lock: contact-normal down + bone-axis horizontal.
 
-        Uses the per-bone local axis detected in
-        :meth:`_capture_floor_align_rest_world` (the axis that points
-        world -Y in rest standing pose). Aligning ONLY that axis
-        leaves the bone's twist around the contact normal free —
-        i.e. the toe / fingers stay in whatever direction the
-        upstream chain naturally produced after IK, while the sole /
-        palm flips to face the floor. This is what avoids the prior
-        bug where forcing the FULL rest world rotation made the foot
-        bone keep its 'standing' orientation while the leg chain had
-        folded back, producing the visibly-twisted shoe the user saw.
+        Each bone's rotation is set so that:
+        - the rest 'contact normal' local direction (palm normal for
+          wrist, sole normal for ankle) points world -Y, AND
+        - the local 'bone direction' (toward first child = toe / fingertip)
+          points along the chain's extension in the horizontal plane
+          (knee→ankle for foot, elbow→wrist for hand).
+
+        Result: foot lies flat with heel-and-toe both on the floor,
+        toe pointing along the leg's extension direction; hand lies
+        flat with fingers pointing along the forearm's extension
+        direction. No more 'heel lifted' artifact from single-axis
+        alignment leaving the bone's twist free.
+
+        Falls back to single-axis alignment when chain parent or
+        bone direction couldn't be captured (e.g. a non-IK bone the
+        user added to floor_align manually).
         """
         try:
             from posecascade.animation.ik import (  # noqa: PLC0415
                 align_bone_axis_to_world,
+                align_bone_two_axes_to_world,
             )
         except ImportError:
             return
@@ -2915,10 +2962,42 @@ class DeclarativeRuntime:
                     bone_key,
                 )
                 continue
-            local_axis = self._floor_align_rest_world.get(id(node))
-            if local_axis is None:
+            contact_local = self._floor_align_rest_world.get(id(node))
+            if contact_local is None:
                 continue
-            align_bone_axis_to_world(node, tuple(local_axis), (0.0, -1.0, 0.0))
+            bone_dir_local = self._floor_align_bone_dir_local.get(id(node))
+            parent_joint = self._floor_align_chain_parent.get(id(node))
+            if bone_dir_local is None or parent_joint is None:
+                align_bone_axis_to_world(node, tuple(contact_local), (0.0, -1.0, 0.0))
+                continue
+            # World extension direction = (bone pos - parent_joint pos),
+            # flattened to the horizontal plane (foot lies along
+            # ground, not tilted up toward shin).
+            bone_pos = _world_position(node)
+            parent_pos = _world_position(parent_joint)
+            extension = bone_pos - parent_pos
+            extension[1] = 0.0  # horizontal only
+            ext_norm = float(np.linalg.norm(extension))
+            if ext_norm < 1.0e-6:  # noqa: PLR2004
+                align_bone_axis_to_world(node, tuple(contact_local), (0.0, -1.0, 0.0))
+                continue
+            extension = extension / ext_norm
+            # PRIMARY = bone direction must hit horizontal extension EXACTLY
+            # — this is what puts heel-and-toe BOTH on the floor.
+            # SECONDARY = sole/palm normal aims at world -Y as close as the
+            # primary allows (orthogonalised). On rigs whose rest binds
+            # bone direction non-perpendicular to sole normal (Herta's
+            # high-heel-bound foot is 56 deg off), prioritising contact
+            # normal leaves the toe extending DOWN past the floor; the
+            # foot looks heel-up. Prioritising bone direction instead
+            # parks heel-AND-toe at ankle Y so the foot lies flat, with
+            # sole tilted a few degrees off horizontal (visually
+            # indistinguishable, but the heel is grounded).
+            align_bone_two_axes_to_world(
+                node,
+                tuple(bone_dir_local), tuple(extension),
+                tuple(contact_local), (0.0, -1.0, 0.0),
+            )
 
     def _apply_lock_targets(self) -> None:
         """Run CCD 2-bone IK on each foot with an active lock or release.
