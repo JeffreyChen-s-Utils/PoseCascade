@@ -222,6 +222,7 @@ def solve_two_bone_analytic(
     end: Node,
     target_world: Vec3,
     bend_hint: Vec3 | None = None,
+    max_stretch: float = 1.0,
 ) -> None:
     """Closed-form (law-of-cosines) 2-bone IK — guaranteed to converge.
 
@@ -258,6 +259,26 @@ def solve_two_bone_analytic(
     distance = float(np.linalg.norm(to_target))
     if distance < _EPSILON:
         return
+
+    # Stretchy IK: when the target is past the chain's reach AND the
+    # caller opted in (max_stretch > 1.0), scale both bone segments
+    # proportionally so the chain reaches the target. Snapshots each
+    # bone's REST translation on first encounter then re-applies
+    # absolute scale = needed_stretch (capped) so calling per-frame
+    # doesn't compound. Resets to scale=1.0 when target IS reachable,
+    # so the chain springs back to natural length as soon as it can.
+    if max_stretch > 1.0:
+        rest_u = _rest_segment_length(root, mid)
+        rest_l = _rest_segment_length(mid, end)
+        needed_stretch = distance / max(rest_u + rest_l, _EPSILON)
+        scale = min(max(needed_stretch, 1.0), max_stretch)
+        _scale_bone_translation(mid, scale)
+        _scale_bone_translation(end, scale)
+        # Re-read after scale changes the local translations.
+        knee = _world_position(mid).astype(np.float64)
+        tip = _world_position(end).astype(np.float64)
+        len_upper = float(np.linalg.norm(knee - hip))
+        len_lower = float(np.linalg.norm(tip - knee))
 
     # Clamp ``distance`` into the reachable annulus
     # [|len_upper-len_lower|, len_upper+len_lower]. Step a tiny epsilon
@@ -305,6 +326,44 @@ def solve_two_bone_analytic(
     tip_dir_new = knee_to_target / knee_to_target_norm
     delta_mid_world = _quat_from_to(tip_dir_old, tip_dir_new)
     _add_world_delta(mid, delta_mid_world)
+
+
+_REST_TRANSLATION_CACHE: dict[int, np.ndarray] = {}
+
+
+def _rest_segment_length(parent_node: Node, child_node: Node) -> float:
+    """Return ``child_node``'s rest local translation length (cached on first read).
+
+    Used by stretchy IK to know the bone's NATURAL length even after
+    stretches have changed its current local translation. ``parent_node``
+    is unused (signature parity with future relative-length variants).
+    """
+    del parent_node
+    rest = _REST_TRANSLATION_CACHE.get(id(child_node))
+    if rest is None:
+        rest = np.asarray(
+            child_node.transform.translation, dtype=np.float32,
+        ).copy()
+        _REST_TRANSLATION_CACHE[id(child_node)] = rest
+    return float(np.linalg.norm(rest))
+
+
+def _scale_bone_translation(node: Node, scale: float) -> None:
+    """Absolute-scale ``node``'s local translation to ``scale × rest_translation``.
+
+    First call snapshots ``node.transform.translation`` as the bone's
+    REST translation; subsequent calls scale that snapshot by ``scale``,
+    NOT the current (possibly already stretched) translation. Avoids
+    the compounding bug where calling each frame with scale=1.10 would
+    grow the bone exponentially. Used by stretchy IK; scale = 1.0
+    restores the bone to rest.
+    """
+    rest = _REST_TRANSLATION_CACHE.get(id(node))
+    if rest is None:
+        rest = np.asarray(node.transform.translation, dtype=np.float32).copy()
+        _REST_TRANSLATION_CACHE[id(node)] = rest
+    t = (rest * float(scale)).astype(np.float32, copy=False)
+    node.transform.set_translation(t)
 
 
 def align_bone_two_axes_to_world(

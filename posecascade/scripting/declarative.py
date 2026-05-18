@@ -2886,7 +2886,16 @@ class DeclarativeRuntime:
             if target is None:
                 continue
             root, mid, end = chain
-            solve_two_bone_analytic(root, mid, end, target, bend_hint=bend_hint)
+            # max_stretch=1.10 lets the arm reach a hand-plant target
+            # that's a couple of centimetres past the rig's natural
+            # reach (Herta's arm is 0.37 m from shoulder; dog_crawl's
+            # floor target is ~0.40 m away). The visible stretch is
+            # under one finger-knuckle long; without it the wrist
+            # floats above the floor and the user keeps reporting
+            # 'hand not touching ground'.
+            solve_two_bone_analytic(
+                root, mid, end, target, bend_hint=bend_hint, max_stretch=1.10,
+            )
         # Legs. Knees fold the OTHER way relative to elbows; flip the
         # bend hint Z so a body facing -Z gets knee bend in +Z (forward).
         leg_bend = (-bend_hint).astype(np.float32, copy=False)
@@ -2904,7 +2913,11 @@ class DeclarativeRuntime:
             if target is None:
                 continue
             root, mid, end = chain
-            solve_two_bone_analytic(root, mid, end, target, bend_hint=leg_bend)
+            # Legs use stretchy too — never compounds because
+            # _scale_bone_translation caches rest and re-applies absolute.
+            solve_two_bone_analytic(
+                root, mid, end, target, bend_hint=leg_bend, max_stretch=1.10,
+            )
 
     def _resolve_ik_target(
         self,

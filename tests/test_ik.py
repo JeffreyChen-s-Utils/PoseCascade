@@ -327,6 +327,47 @@ def test_align_bone_axis_handles_parented_node() -> None:
     np.testing.assert_allclose(out, np.array([0.0, -1.0, 0.0]), atol=1e-4)
 
 
+def test_stretchy_ik_extends_chain_to_unreachable_target() -> None:
+    """With max_stretch=1.5 the chain reaches a target past its natural span."""
+    root, mid, end = _make_analytic_chain()
+    # Chain reach is 2.0 (each bone 1.0). Target at distance 2.4 is unreachable.
+    target = vec3(2.4, 0.0, 0.0)
+    solve_two_bone_analytic(root, mid, end, target, max_stretch=1.5)
+    tip = _world_position(end)
+    np.testing.assert_allclose(tip, target, atol=1e-3)
+
+
+def test_stretchy_ik_does_not_compound_on_repeat_calls() -> None:
+    """Calling per-frame with same unreachable target must not exponentially stretch."""
+    root, mid, end = _make_analytic_chain()
+    target = vec3(2.4, 0.0, 0.0)
+    for _ in range(20):
+        solve_two_bone_analytic(root, mid, end, target, max_stretch=1.5)
+    tip = _world_position(end)
+    np.testing.assert_allclose(tip, target, atol=1e-3)
+    # End bone translation should be scaled to exactly needed_stretch (1.2),
+    # not to 1.5^20. Check by reading the stored rest cache vs current.
+    from posecascade.animation.ik import _REST_TRANSLATION_CACHE  # noqa: PLC0415
+    rest = _REST_TRANSLATION_CACHE[id(end)]
+    cur = np.asarray(end.transform.translation, dtype=np.float64)
+    scale = float(np.linalg.norm(cur) / np.linalg.norm(rest))
+    assert 1.1 < scale < 1.3, f"stretch compounded to {scale}"
+
+
+def test_stretchy_ik_returns_to_rest_when_target_back_in_reach() -> None:
+    """When target moves back inside the chain reach, the stretch undoes itself."""
+    root, mid, end = _make_analytic_chain()
+    # First over-reach
+    solve_two_bone_analytic(root, mid, end, vec3(2.4, 0.0, 0.0), max_stretch=1.5)
+    # Then reachable
+    solve_two_bone_analytic(root, mid, end, vec3(1.0, -1.0, 0.0), max_stretch=1.5)
+    from posecascade.animation.ik import _REST_TRANSLATION_CACHE  # noqa: PLC0415
+    rest = _REST_TRANSLATION_CACHE[id(end)]
+    cur = np.asarray(end.transform.translation, dtype=np.float64)
+    scale = float(np.linalg.norm(cur) / np.linalg.norm(rest))
+    assert abs(scale - 1.0) < 1e-3, f"chain didn't release stretch: scale={scale}"
+
+
 def test_align_bone_axis_is_noop_when_already_aligned() -> None:
     """No correction needed when current axis already matches target."""
     n = Node(name="palm", transform=Transform(rotation=quat_identity()))

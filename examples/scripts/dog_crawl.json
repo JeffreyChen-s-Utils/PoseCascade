@@ -4,18 +4,18 @@
   "name": "dog_crawl_demo",
   "loop_sec": 6.0,
 
-  "wind": {"direction": [1.0, 0.0, 0.0], "speed": 0.0,
-           "turbulence_amplitude": 0.0, "turbulence_frequency_hz": 0.0},
+  "wind": {"direction": [1.0, 0.0, 0.2], "speed": 0.015,
+           "turbulence_amplitude": 0.008, "turbulence_frequency_hz": 0.6},
 
   "physics_chains": {
-    "BackHair_L":    {"stiffness": 6.0, "damping": 0.8, "inertia": 0.15},
-    "BackHair_R":    {"stiffness": 6.0, "damping": 0.8, "inertia": 0.15},
-    "BackHairUpper": {"stiffness": 8.0, "damping": 1.0, "inertia": 0.10},
-    "hair_C":  {"stiffness": 8.0, "damping": 1.0, "inertia": 0.10},
-    "hair_L":  {"stiffness": 6.0, "damping": 0.8, "inertia": 0.13},
-    "hair_R":  {"stiffness": 6.0, "damping": 0.8, "inertia": 0.13},
-    "hair_LL": {"stiffness": 5.0, "damping": 0.7, "inertia": 0.15},
-    "hair_RR": {"stiffness": 5.0, "damping": 0.7, "inertia": 0.15}
+    "BackHair_L":    {"stiffness": 3.0, "damping": 0.35, "inertia": 0.15},
+    "BackHair_R":    {"stiffness": 3.0, "damping": 0.35, "inertia": 0.15},
+    "BackHairUpper": {"stiffness": 4.0, "damping": 0.45, "inertia": 0.10},
+    "hair_C":  {"stiffness": 4.0, "damping": 0.45, "inertia": 0.10},
+    "hair_L":  {"stiffness": 3.0, "damping": 0.35, "inertia": 0.13},
+    "hair_R":  {"stiffness": 3.0, "damping": 0.35, "inertia": 0.13},
+    "hair_LL": {"stiffness": 2.5, "damping": 0.30, "inertia": 0.15},
+    "hair_RR": {"stiffness": 2.5, "damping": 0.30, "inertia": 0.15}
   },
 
   "phases": [
