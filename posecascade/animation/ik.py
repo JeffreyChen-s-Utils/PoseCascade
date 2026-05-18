@@ -307,6 +307,31 @@ def solve_two_bone_analytic(
     _add_world_delta(mid, delta_mid_world)
 
 
+def set_bone_world_rotation(node: Node, target_world_rotation: Vec3) -> None:
+    """Force ``node`` to land at ``target_world_rotation`` in world space.
+
+    Computes the local rotation that produces ``target_world_rotation``
+    given the parent's current world rotation, and writes it into
+    ``node.transform``. Useful for clamping an end effector to a
+    specific orientation after upstream IK has moved its position —
+    e.g. forcing a wrist back to its REST world rotation so the palm
+    + fingers land in their natural 'standing' orientation rather than
+    the random tilt the elbow swing produced.
+
+    The argument is a unit quaternion (XYZW); no normalisation is done
+    here, so pass an already-normalised value.
+    """
+    parent = node.parent
+    target = np.asarray(target_world_rotation, dtype=np.float32)
+    if parent is None:
+        node.transform.set_rotation(target.astype(np.float32, copy=False))
+        return
+    parent_rot = _world_rotation(parent)
+    parent_inv = _quat_inverse(parent_rot)
+    local = _quat_mul(parent_inv, target)
+    node.transform.set_rotation(local.astype(np.float32, copy=False))
+
+
 def align_bone_axis_to_world(node: Node, local_axis: Vec3, world_target: Vec3) -> None:
     """Rotate ``node`` so its local-frame ``local_axis`` points along ``world_target``.
 
@@ -519,6 +544,7 @@ __all__ = [
     "IkLink",
     "align_bone_axis_to_world",
     "compose_trs",
+    "set_bone_world_rotation",
     "solve_chain",
     "solve_two_bone",
     "solve_two_bone_analytic",

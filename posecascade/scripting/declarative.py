@@ -1594,6 +1594,14 @@ class DeclarativeRuntime:
     # translated body.
     _foot_release: dict[str, tuple[np.ndarray, int]] = field(default_factory=dict)
     _leg_chain_nodes: dict[str, tuple[Any, Any, Any]] = field(default_factory=dict)
+    # Cached rest world rotation for every floor_align bone. Captured at
+    # ``_start`` (before any pose-driven rotation overrides), used by
+    # :meth:`_apply_floor_align` to restore the bone's INITIAL world
+    # orientation — which on a humanoid rig is 'palm-down, fingers-out'
+    # for wrists and 'sole-flat, toes-forward' for ankles. Single-axis
+    # alignment can't recover this because the bone's local axes are
+    # arbitrary 3D directions, not standard XYZ.
+    _floor_align_rest_world: dict[int, np.ndarray] = field(default_factory=dict)
     # Arm chain cache for hand-IK. Same shape as ``_leg_chain_nodes``:
     # ``{"L": (shoulder, elbow, wrist), "R": (...)}``. Populated at
     # ``_start`` from ``rig.arm_chain_l/r`` (resolved through the
@@ -1729,6 +1737,39 @@ class DeclarativeRuntime:
                     side, resolved_names,
                     tuple(n.name if n is not None else None for n in nodes),
                 )
+        self._capture_floor_align_rest_world(aliases)
+
+    def _capture_floor_align_rest_world(self, aliases: dict[str, str]) -> None:
+        """Snapshot the rest world rotation for every bone any phase will floor-align.
+
+        Done ONCE at start (the scene is in T-pose / bind pose before
+        any phase has authored bone rotations), so the rest world
+        captures the rig's intended 'natural standing' orientation —
+        palm-down for wrists, sole-flat for ankles, etc. After pose
+        authoring drifts the wrist into the IK target, _apply_floor_align
+        snaps the orientation back to this captured rest world.
+        """
+        bone_keys: set[str] = set()
+        for phase in self.animation.phases:
+            bone_keys.update(phase.floor_align)
+        if not bone_keys:
+            return
+        for bone_key in bone_keys:
+            bone_name = aliases.get(bone_key, bone_key)
+            node = self.scene.find(bone_name)
+            if node is None:
+                continue
+            # Walk parent chain → rest world rotation (no pose yet).
+            matrix = node.transform.to_matrix()
+            parent = node.parent
+            while parent is not None:
+                matrix = parent.transform.to_matrix() @ matrix
+                parent = parent.parent
+            from posecascade.utils.math3d import decompose_trs  # noqa: PLC0415
+            _t, rest_rot, _s = decompose_trs(matrix.astype(np.float32, copy=False))
+            self._floor_align_rest_world[id(node)] = rest_rot.astype(
+                np.float32, copy=False,
+            )
 
     def _apply_pose_blends(
         self,
@@ -2756,7 +2797,6 @@ class DeclarativeRuntime:
             return
         try:
             from posecascade.animation.ik import (  # noqa: PLC0415
-                align_bone_axis_to_world,
                 solve_two_bone_analytic,
             )
         except ImportError:
@@ -2789,30 +2829,26 @@ class DeclarativeRuntime:
             target = np.array((tx, ty, tz), dtype=np.float32)
             root, mid, end = chain
             solve_two_bone_analytic(root, mid, end, target, bend_hint=bend_hint)
-            # Palm-flat alignment: rotate the wrist around itself so its
-            # local +Y axis (palm normal in this rig family) points world
-            # -Y. Makes the hand lie flat on the floor after a plant,
-            # instead of cocked at whatever angle the elbow swing left
-            # it at. The bone's twist around the +Y axis is preserved
-            # (only the axis ORIENTATION is corrected) so fingers keep
-            # whatever yaw the chain naturally produced.
-            align_bone_axis_to_world(end, (0.0, 1.0, 0.0), (0.0, -1.0, 0.0))
 
     def _apply_floor_align(self, bone_keys: tuple[str, ...]) -> None:
-        """Align each named bone so its local +Y axis points world -Y.
+        """Restore each named bone's world rotation to its REST world value.
 
         Lets a pose declare 'these bones sit flat on the floor' (feet
-        for a kneel, palms for a hands-and-knees pose without using
-        the full IK chain) without authoring per-axis rotation values
-        by hand. Names go through the rig's body_bones alias map so
-        ``foot_L`` resolves to whatever the rig calls the foot bone.
+        for a kneel, palms for a hands-and-knees pose) without
+        authoring per-axis rotation values by hand. The captured rest
+        world rotation IS 'palm-down, fingers-out' for wrists and
+        'sole-flat, toes-forward' for ankles on a humanoid bind pose,
+        so restoring it after IK + bones_local writes guarantees a
+        natural ground-contact orientation regardless of how the
+        chain rotated upstream.
 
-        No-op for any bone that doesn't resolve. Wraps the engine-side
-        helper :func:`posecascade.animation.ik.align_bone_axis_to_world`.
+        Names go through the rig's body_bones alias map so ``foot_L``
+        resolves to whatever the rig calls the foot bone. No-op for
+        any bone whose rest world wasn't captured at _start.
         """
         try:
             from posecascade.animation.ik import (  # noqa: PLC0415
-                align_bone_axis_to_world,
+                set_bone_world_rotation,
             )
         except ImportError:
             return
@@ -2826,7 +2862,10 @@ class DeclarativeRuntime:
                     bone_key,
                 )
                 continue
-            align_bone_axis_to_world(node, (0.0, 1.0, 0.0), (0.0, -1.0, 0.0))
+            rest_world = self._floor_align_rest_world.get(id(node))
+            if rest_world is None:
+                continue
+            set_bone_world_rotation(node, rest_world)
 
     def _apply_lock_targets(self) -> None:
         """Run CCD 2-bone IK on each foot with an active lock or release.
