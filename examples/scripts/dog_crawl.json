@@ -30,14 +30,14 @@
         "chest":       {"x_rad":  0.75},
         "neck":        {"x_rad": -0.55},
         "head":        {"x_rad": -0.65},
-        "upper_arm_L": {"x_rad": -1.55, "z_rad": -1.55},
-        "upper_arm_R": {"x_rad": -1.55, "z_rad":  1.55},
+        "upper_arm_L": {"x_rad": -1.55, "y_rad": -0.30, "z_rad": -1.40},
+        "upper_arm_R": {"x_rad": -1.55, "y_rad":  0.30, "z_rad":  1.40},
         "lower_arm_L": {"x_rad":  0.10},
         "lower_arm_R": {"x_rad":  0.10},
         "upper_leg_L": {"x_rad":  0.00, "z_rad": -0.08},
         "upper_leg_R": {"x_rad":  0.00, "z_rad":  0.08},
-        "lower_leg_L": {"x_rad":  1.57},
-        "lower_leg_R": {"x_rad":  1.57}
+        "lower_leg_L": {"x_rad":  1.20},
+        "lower_leg_R": {"x_rad":  1.20}
       }
     }
   ]
