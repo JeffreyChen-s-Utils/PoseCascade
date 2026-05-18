@@ -49,8 +49,7 @@
         "foot_l_target": [ 0.10, 0.005,-0.30],
         "foot_r_target": [-0.10, 0.005,-0.30]
       },
-      "floor_align": ["hand_L", "hand_R"],
-      "hidden_nodes": ["Boot_Mesh"]
+      "floor_align": ["hand_L", "hand_R"]
     }
   ]
 }
