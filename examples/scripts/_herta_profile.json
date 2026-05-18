@@ -4,7 +4,9 @@
   "rig": {
     "character_root": "Object_4",
     "leg_chain_l": ["upper_leg_L", "lower_leg_L", "foot_L"],
-    "leg_chain_r": ["upper_leg_R", "lower_leg_R", "foot_R"]
+    "leg_chain_r": ["upper_leg_R", "lower_leg_R", "foot_R"],
+    "arm_chain_l": ["upper_arm_L", "lower_arm_L", "hand_L"],
+    "arm_chain_r": ["upper_arm_R", "lower_arm_R", "hand_R"]
   },
 
   "ground": {

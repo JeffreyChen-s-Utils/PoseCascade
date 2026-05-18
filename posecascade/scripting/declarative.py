@@ -2716,24 +2716,41 @@ class DeclarativeRuntime:
     def _apply_hand_ik(
         self, phase: Phase, scope: dict[str, float], phase_t: float,
     ) -> None:
-        """Solve two-bone CCD IK on each declared arm chain toward its target.
+        """Solve analytical 2-bone IK on each declared arm chain toward its target.
+
+        Uses :func:`solve_two_bone_analytic` — closed-form law-of-cosines —
+        so the wrist lands EXACTLY at the target when it's within the
+        chain's reachable annulus, no iterations needed. CCD (the prior
+        choice here) under-converged for the dog_crawl hand-plant target:
+        with 8 iterations + elbow limits the wrist sat ~10 cm short of
+        the floor and reading 'hands hovering' rather than 'palms planted'.
+        Analytical also has no iteration knob to leak from script to
+        script, so behaviour is deterministic across rigs.
 
         No-op when ``rig.arm_chain_l/r`` wasn't declared OR the phase
         didn't author ``ik.hand_l_target`` / ``hand_r_target``. Both
         sides resolve independently — a phase can pin just one hand.
-        Target curves are resolved per axis per frame so an animation
-        can move the target across time.
+        ``body_forward_world`` (taken from the foot planter when
+        available) serves as the elbow bend hint so the arm folds in
+        the body's facing plane instead of locking to a fixed axis.
         """
         if not self._arm_chain_nodes:
             return
         if phase.hand_l_target is None and phase.hand_r_target is None:
             return
         try:
-            from posecascade.animation.ik import solve_two_bone  # noqa: PLC0415
+            from posecascade.animation.ik import (  # noqa: PLC0415
+                solve_two_bone_analytic,
+            )
         except ImportError:
             return
-        elbow_min = self.animation.rig.elbow_limit_min
-        elbow_max = self.animation.rig.elbow_limit_max
+        bend_hint = vec3(0.0, 0.0, -1.0)
+        if self.floor_api is not None:
+            planter = getattr(self.floor_api, "_planter", None)
+            if planter is not None:
+                bend_hint = np.asarray(
+                    planter.body_forward_world, dtype=np.float32,
+                )
         for side, target_spec in (
             ("L", phase.hand_l_target), ("R", phase.hand_r_target),
         ):
@@ -2754,11 +2771,7 @@ class DeclarativeRuntime:
                 continue
             target = np.array((tx, ty, tz), dtype=np.float32)
             root, mid, end = chain
-            solve_two_bone(
-                root, mid, end, target,
-                iterations=8, step_radian=0.6,
-                mid_limit_min=elbow_min, mid_limit_max=elbow_max,
-            )
+            solve_two_bone_analytic(root, mid, end, target, bend_hint=bend_hint)
 
     def _apply_lock_targets(self) -> None:
         """Run CCD 2-bone IK on each foot with an active lock or release.
