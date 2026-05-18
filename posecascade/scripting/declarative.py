@@ -459,6 +459,14 @@ class Phase:
     # ``ik`` block: ``{ik: {hand_l_target: [x, y, z], ...}}``.
     hand_l_target: tuple[Any, Any, Any] | None
     hand_r_target: tuple[Any, Any, Any] | None
+    # Foot IK targets — same semantics as ``hand_l/r_target`` but resolved
+    # against ``rig.leg_chain_l/r``. Used by quadruped poses to plant the
+    # ankle bone AT a chosen world position (typically on the floor) so
+    # the cloth/skin clamp doesn't have to push the foot mesh up from an
+    # underground bone. Parsed from the same ``ik`` block:
+    # ``{ik: {foot_l_target: [x, y, z], foot_r_target: [...]}}``.
+    foot_l_target: tuple[Any, Any, Any] | None = None
+    foot_r_target: tuple[Any, Any, Any] | None = None
     # Bone-name list whose end of frame world rotation should be aligned
     # so the bone's local +Y axis points world -Y — i.e. the bone's
     # 'top face' is up, 'bottom face' (sole / palm) is down. Useful for
@@ -838,7 +846,9 @@ def _parse_phase(raw: dict[str, Any], bpm: float) -> Phase:
     pose, pose_weight = _parse_pose(raw.get("pose"))
     hand_l = _parse_hand_field(raw.get("hand_L"), "hand_L")
     hand_r = _parse_hand_field(raw.get("hand_R"), "hand_R")
-    hand_l_target, hand_r_target = _parse_ik_block(raw.get("ik"))
+    hand_l_target, hand_r_target, foot_l_target, foot_r_target = _parse_ik_block(
+        raw.get("ik"),
+    )
     floor_align_raw = raw.get("floor_align", ())
     if not isinstance(floor_align_raw, (list, tuple)):
         raise DeclarativeAnimationError(
@@ -863,21 +873,24 @@ def _parse_phase(raw: dict[str, Any], bpm: float) -> Phase:
         hand_r=hand_r,
         hand_l_target=hand_l_target,
         hand_r_target=hand_r_target,
+        foot_l_target=foot_l_target,
+        foot_r_target=foot_r_target,
         floor_align=floor_align,
     )
 
 
 def _parse_ik_block(raw: Any) -> tuple[
     tuple[Any, Any, Any] | None, tuple[Any, Any, Any] | None,
+    tuple[Any, Any, Any] | None, tuple[Any, Any, Any] | None,
 ]:
     """Parse the optional per-phase ``ik`` block.
 
-    Returns ``(hand_l_target, hand_r_target)`` where each is a 3-tuple
-    of value-curve specs (numeric or expression string) or ``None`` if
-    the side wasn't authored. Missing block = both ``None``.
+    Returns ``(hand_l, hand_r, foot_l, foot_r)`` — each is a 3-tuple of
+    value-curve specs or ``None`` if the side wasn't authored. Missing
+    block = all ``None``.
     """
     if raw is None:
-        return None, None
+        return None, None, None, None
     if not isinstance(raw, dict):
         raise DeclarativeAnimationError(
             f"phase 'ik' must be an object, got {type(raw).__name__}",
@@ -885,6 +898,8 @@ def _parse_ik_block(raw: Any) -> tuple[
     return (
         _parse_hand_target(raw.get("hand_l_target"), "hand_l_target"),
         _parse_hand_target(raw.get("hand_r_target"), "hand_r_target"),
+        _parse_hand_target(raw.get("foot_l_target"), "foot_l_target"),
+        _parse_hand_target(raw.get("foot_r_target"), "foot_r_target"),
     )
 
 
@@ -1740,14 +1755,17 @@ class DeclarativeRuntime:
         self._capture_floor_align_rest_world(aliases)
 
     def _capture_floor_align_rest_world(self, aliases: dict[str, str]) -> None:
-        """Snapshot the rest world rotation for every bone any phase will floor-align.
+        """For each floor_align bone, find the LOCAL axis that points world -Y in rest.
 
-        Done ONCE at start (the scene is in T-pose / bind pose before
-        any phase has authored bone rotations), so the rest world
-        captures the rig's intended 'natural standing' orientation —
-        palm-down for wrists, sole-flat for ankles, etc. After pose
-        authoring drifts the wrist into the IK target, _apply_floor_align
-        snaps the orientation back to this captured rest world.
+        On a humanoid bind pose the wrist's 'palm normal' axis and the
+        ankle's 'sole normal' axis both point world -Y in standing
+        rest (palm faces down, sole faces down). But the LOCAL axis
+        carrying that direction is rig-specific — Herta's wrist uses
+        local +Y while its ankle uses local +Z. Snapshotting the
+        rotation row that maximises |y_component| at start lets the
+        engine auto-detect which local axis to align per bone, instead
+        of asking the user to author both palm/sole-normal axes in
+        the rig profile.
         """
         bone_keys: set[str] = set()
         for phase in self.animation.phases:
@@ -1759,17 +1777,34 @@ class DeclarativeRuntime:
             node = self.scene.find(bone_name)
             if node is None:
                 continue
-            # Walk parent chain → rest world rotation (no pose yet).
+            # Walk parent chain → rest world matrix (no pose yet).
             matrix = node.transform.to_matrix()
             parent = node.parent
             while parent is not None:
                 matrix = parent.transform.to_matrix() @ matrix
                 parent = parent.parent
-            from posecascade.utils.math3d import decompose_trs  # noqa: PLC0415
-            _t, rest_rot, _s = decompose_trs(matrix.astype(np.float32, copy=False))
-            self._floor_align_rest_world[id(node)] = rest_rot.astype(
-                np.float32, copy=False,
-            )
+            # Each column of the rotation block is one local axis expressed
+            # in world; pick the column with the most-negative Y component
+            # — that's the local axis currently pointing 'world down', i.e.
+            # the contact normal for this bone in its rest standing pose.
+            rot = matrix[:3, :3].astype(np.float32, copy=False)
+            best_axis = -1
+            best_y = float("inf")
+            best_sign = 1.0
+            for col in range(3):
+                ycomp = float(rot[1, col])
+                # Allow either +axis or -axis to point world -Y.
+                if ycomp < best_y:
+                    best_y = ycomp
+                    best_axis = col
+                    best_sign = 1.0
+                if -ycomp < best_y:
+                    best_y = -ycomp
+                    best_axis = col
+                    best_sign = -1.0
+            local_axis = np.zeros(3, dtype=np.float32)
+            local_axis[best_axis] = best_sign
+            self._floor_align_rest_world[id(node)] = local_axis
 
     def _apply_pose_blends(
         self,
@@ -2773,28 +2808,25 @@ class DeclarativeRuntime:
     def _apply_hand_ik(
         self, phase: Phase, scope: dict[str, float], phase_t: float,
     ) -> None:
-        """Solve analytical 2-bone IK on each declared arm chain toward its target.
+        """Solve analytical 2-bone IK on each arm AND leg chain that has a target.
 
-        Uses :func:`solve_two_bone_analytic` — closed-form law-of-cosines —
-        so the wrist lands EXACTLY at the target when it's within the
-        chain's reachable annulus, no iterations needed. CCD (the prior
-        choice here) under-converged for the dog_crawl hand-plant target:
-        with 8 iterations + elbow limits the wrist sat ~10 cm short of
-        the floor and reading 'hands hovering' rather than 'palms planted'.
-        Analytical also has no iteration knob to leak from script to
-        script, so behaviour is deterministic across rigs.
+        Uses :func:`solve_two_bone_analytic` — closed-form law-of-cosines.
+        Arm chain runs against ``ik.hand_l_target`` / ``hand_r_target``
+        (resolved via ``rig.arm_chain_l/r``), leg chain runs against
+        ``ik.foot_l_target`` / ``foot_r_target`` (via ``rig.leg_chain_l/r``).
 
-        No-op when ``rig.arm_chain_l/r`` wasn't declared OR the phase
-        didn't author ``ik.hand_l_target`` / ``hand_r_target``. Both
-        sides resolve independently — a phase can pin just one hand.
+        Foot IK is what fixes the 'foot mesh visibly squashed against
+        the floor' bug: when a pose drives the leg via bones_local
+        alone, the ankle bone usually ends up underground (the chain
+        can't naturally land at Y=0 from a deep knee fold). The cloth
+        floor clamp then pancakes the foot mesh to the floor plane.
+        Driving the ankle via IK puts the bone AT the floor target so
+        the foot mesh sits naturally on top instead.
+
         ``body_forward_world`` (taken from the foot planter when
-        available) serves as the elbow bend hint so the arm folds in
-        the body's facing plane instead of locking to a fixed axis.
+        available) serves as the bend hint so knees fold forward and
+        elbows fold backward along the body's facing plane.
         """
-        if not self._arm_chain_nodes:
-            return
-        if phase.hand_l_target is None and phase.hand_r_target is None:
-            return
         try:
             from posecascade.animation.ik import (  # noqa: PLC0415
                 solve_two_bone_analytic,
@@ -2808,6 +2840,7 @@ class DeclarativeRuntime:
                 bend_hint = np.asarray(
                     planter.body_forward_world, dtype=np.float32,
                 )
+        # Arms.
         for side, target_spec in (
             ("L", phase.hand_l_target), ("R", phase.hand_r_target),
         ):
@@ -2816,39 +2849,68 @@ class DeclarativeRuntime:
             chain = self._arm_chain_nodes.get(side)
             if chain is None:
                 continue
-            try:
-                tx = _resolve_value_curve(target_spec[0], phase_t, scope)
-                ty = _resolve_value_curve(target_spec[1], phase_t, scope)
-                tz = _resolve_value_curve(target_spec[2], phase_t, scope)
-            except DeclarativeAnimationError as err:
-                _log.warning(
-                    "declarative: hand_%s_target failed to evaluate: %s",
-                    side.lower(), err,
-                )
+            target = self._resolve_ik_target(
+                target_spec, f"hand_{side.lower()}_target", phase_t, scope,
+            )
+            if target is None:
                 continue
-            target = np.array((tx, ty, tz), dtype=np.float32)
             root, mid, end = chain
             solve_two_bone_analytic(root, mid, end, target, bend_hint=bend_hint)
+        # Legs. Knees fold the OTHER way relative to elbows; flip the
+        # bend hint Z so a body facing -Z gets knee bend in +Z (forward).
+        leg_bend = (-bend_hint).astype(np.float32, copy=False)
+        for side, target_spec in (
+            ("L", phase.foot_l_target), ("R", phase.foot_r_target),
+        ):
+            if target_spec is None:
+                continue
+            chain = self._leg_chain_nodes.get(side)
+            if chain is None:
+                continue
+            target = self._resolve_ik_target(
+                target_spec, f"foot_{side.lower()}_target", phase_t, scope,
+            )
+            if target is None:
+                continue
+            root, mid, end = chain
+            solve_two_bone_analytic(root, mid, end, target, bend_hint=leg_bend)
+
+    def _resolve_ik_target(
+        self,
+        target_spec: tuple[Any, Any, Any],
+        field_name: str,
+        phase_t: float,
+        scope: dict[str, float],
+    ) -> np.ndarray | None:
+        """Resolve a 3-tuple of value curves to a world-space target vec3."""
+        try:
+            tx = _resolve_value_curve(target_spec[0], phase_t, scope)
+            ty = _resolve_value_curve(target_spec[1], phase_t, scope)
+            tz = _resolve_value_curve(target_spec[2], phase_t, scope)
+        except DeclarativeAnimationError as err:
+            _log.warning(
+                "declarative: %s failed to evaluate: %s", field_name, err,
+            )
+            return None
+        return np.array((tx, ty, tz), dtype=np.float32)
 
     def _apply_floor_align(self, bone_keys: tuple[str, ...]) -> None:
-        """Restore each named bone's world rotation to its REST world value.
+        """Rotate each named bone so its rig-specific 'contact normal' points world -Y.
 
-        Lets a pose declare 'these bones sit flat on the floor' (feet
-        for a kneel, palms for a hands-and-knees pose) without
-        authoring per-axis rotation values by hand. The captured rest
-        world rotation IS 'palm-down, fingers-out' for wrists and
-        'sole-flat, toes-forward' for ankles on a humanoid bind pose,
-        so restoring it after IK + bones_local writes guarantees a
-        natural ground-contact orientation regardless of how the
-        chain rotated upstream.
-
-        Names go through the rig's body_bones alias map so ``foot_L``
-        resolves to whatever the rig calls the foot bone. No-op for
-        any bone whose rest world wasn't captured at _start.
+        Uses the per-bone local axis detected in
+        :meth:`_capture_floor_align_rest_world` (the axis that points
+        world -Y in rest standing pose). Aligning ONLY that axis
+        leaves the bone's twist around the contact normal free —
+        i.e. the toe / fingers stay in whatever direction the
+        upstream chain naturally produced after IK, while the sole /
+        palm flips to face the floor. This is what avoids the prior
+        bug where forcing the FULL rest world rotation made the foot
+        bone keep its 'standing' orientation while the leg chain had
+        folded back, producing the visibly-twisted shoe the user saw.
         """
         try:
             from posecascade.animation.ik import (  # noqa: PLC0415
-                set_bone_world_rotation,
+                align_bone_axis_to_world,
             )
         except ImportError:
             return
@@ -2862,10 +2924,10 @@ class DeclarativeRuntime:
                     bone_key,
                 )
                 continue
-            rest_world = self._floor_align_rest_world.get(id(node))
-            if rest_world is None:
+            local_axis = self._floor_align_rest_world.get(id(node))
+            if local_axis is None:
                 continue
-            set_bone_world_rotation(node, rest_world)
+            align_bone_axis_to_world(node, tuple(local_axis), (0.0, -1.0, 0.0))
 
     def _apply_lock_targets(self) -> None:
         """Run CCD 2-bone IK on each foot with an active lock or release.
