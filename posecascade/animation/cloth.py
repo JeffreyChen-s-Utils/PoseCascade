@@ -35,6 +35,15 @@ except ImportError:                                                         # pr
     _native = None
 
 _NUMERIC_EPSILON = 1.0e-8
+# Tiny lift applied above ``ground_y`` when the floor clamp fires so the
+# clamped vertex lands JUST above the floor plane instead of exactly on it.
+# Without this, a clamped vert and the floor's renderable surface both sit
+# at world Y == ground_y and the depth test flickers between them — visible
+# as a thin slice of cloth/skin "peeking through" the floor from grazing
+# camera angles. 1 mm is below visible scale for human-figure assets but
+# well above any float-precision noise from the world→local→world round
+# trip inside the GPU compute path.
+_FLOOR_CLEARANCE = 1.0e-3
 _DEFAULT_GRAVITY = (0.0, -9.8, 0.0)
 _DEFAULT_LINEAR_DAMPING = 0.985
 _DEFAULT_STRUCTURAL_STIFFNESS = 0.85
@@ -917,12 +926,13 @@ def _project_ground_plane(
     movable = inverse_masses > 0.0
     if not np.any(movable):
         return
+    floor_y = ground_y + _FLOOR_CLEARANCE
     y = positions[:, 1]
-    below = movable & (y < ground_y)
+    below = movable & (y < floor_y)
     if not np.any(below):
         return
-    lift = ground_y - y[below]
-    positions[below, 1] = ground_y
+    lift = floor_y - y[below]
+    positions[below, 1] = floor_y
     # Carry the lift into prev_positions so velocity = pos - prev keeps the
     # tangential component but zeroes the normal (vertical) component.
     prev_positions[below, 1] = prev_positions[below, 1] + lift

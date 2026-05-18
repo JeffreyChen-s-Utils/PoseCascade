@@ -165,8 +165,11 @@ void main() {
     // Ground clamp — applied in world space, AFTER collider push so the
     // collider that would have shoved a vert below ground (foot capsule
     // sitting underground in a deep knee fold, etc.) doesn't leak through.
-    if (u_groundEnabled != 0u && world_p.y < u_groundY) {
-        world_p.y = u_groundY;
+    // The 1 mm clearance pushes the vert just ABOVE the floor plane so
+    // it doesn't z-fight the ground render (mirrors _FLOOR_CLEARANCE in
+    // posecascade/animation/cloth.py).
+    if (u_groundEnabled != 0u && world_p.y < u_groundY + 1.0e-3) {
+        world_p.y = u_groundY + 1.0e-3;
     }
 
     // World → mesh-local so the renderer's existing model-matrix uniform

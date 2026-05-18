@@ -113,6 +113,30 @@ def test_floor_clamp_holds_cloth_above_floor() -> None:
     assert float(np.min(piece.positions[:, 1])) >= -1.0e-5
 
 
+def test_floor_clamp_includes_small_clearance_to_avoid_z_fight() -> None:
+    """Verts pushed by the clamp land STRICTLY above floor_y (not exactly on it).
+
+    Without a clearance the clamped verts would sit at exactly the floor's
+    rendered Y, producing depth-fight that the user sees as 'dress visible
+    through the floor' at grazing camera angles.
+    """
+    from posecascade.animation.cloth import ClothParams  # noqa: PLC0415
+    scene, _node, mesh = _scene_with_cloth_node()
+    imported = _make_imported(scene, mesh)
+    host = ClothHost()
+    host.floor_y = 0.0
+    host.register_imported_scene(imported)
+    piece = host.find_piece("cape")
+    piece.params.passive_skin_deform = True
+    # Drag every vert below floor; reclamp should lift them ABOVE the plane.
+    piece.positions[:, 1] = -0.5
+    host.tick(1.0 / 60.0)
+    assert float(np.min(piece.positions[:, 1])) > 0.0, (
+        "clamped verts must be strictly above floor to avoid z-fight"
+    )
+    _ = ClothParams  # silence unused-import linter
+
+
 def test_reclamp_after_collider_push_keeps_passive_verts_above_floor() -> None:
     """The collider push runs AFTER the solver substep, so it can shove a
     passive-skin vert below the floor (e.g. a foot-capsule below ground

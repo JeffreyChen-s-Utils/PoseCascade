@@ -605,12 +605,17 @@ class ClothHost:
         on every vertex (the solver-side version honours per-vert
         ``inverse_mass == 0`` anchors; here we don't care — anchored
         verts that landed below ground are just as wrong as movable
-        ones). The cost is one ``y < floor_y`` mask per piece, well
+        ones). The cost is one ``y < floor`` mask per piece, well
         under 100 µs on a 30k-vert mesh.
+
+        Uses the same ``ground_y + _FLOOR_CLEARANCE`` target as the
+        solver-side clamp so a vert lifted here doesn't immediately
+        get re-flagged 'below' next tick.
         """
         if self._solver.ground_y is None:
             return
-        floor = float(self._solver.ground_y)
+        from posecascade.animation.cloth import _FLOOR_CLEARANCE  # noqa: PLC0415
+        floor = float(self._solver.ground_y) + _FLOOR_CLEARANCE
         for piece in self._solver.pieces:
             if not piece.enabled or not piece.params.passive_skin_deform:
                 continue
