@@ -42,7 +42,8 @@
       "ik": {
         "hand_l_target": [ 0.22, 0.05, 0.30],
         "hand_r_target": [-0.22, 0.05, 0.30]
-      }
+      },
+      "floor_align": ["foot_L", "foot_R"]
     }
   ]
 }

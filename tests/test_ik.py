@@ -10,6 +10,7 @@ from pmx.importer import PmxImporter
 from posecascade.animation.ik import (
     IkChain,
     IkLink,
+    align_bone_axis_to_world,
     solve_chain,
     solve_two_bone,
     solve_two_bone_analytic,
@@ -285,6 +286,53 @@ def test_solve_two_bone_analytic_clamps_target_inside_fold_hole() -> None:
     distance = float(np.linalg.norm(end_pos))
     # Should land on the INNER reach boundary (≈ 1.5) along H→T direction.
     assert 1.4 < distance < 1.6, f"end at distance {distance} not on fold-hole boundary"
+
+
+# ----- end-bone axis alignment (sole / palm flat to ground) ----------------
+def _world_axis(node: Node, axis_local: tuple[float, float, float]) -> np.ndarray:
+    matrix = node.transform.to_matrix()
+    parent = node.parent
+    while parent is not None:
+        matrix = parent.transform.to_matrix() @ matrix
+        parent = parent.parent
+    a = np.asarray(axis_local, dtype=np.float32)
+    return matrix[:3, :3] @ a
+
+
+def test_align_bone_axis_to_world_rotates_to_world_down() -> None:
+    """A bone whose local +Y starts at world +Y gets flipped to world -Y."""
+    n = Node(name="palm", transform=Transform(rotation=quat_identity()))
+    # Initial: local +Y -> world +Y. After alignment: should be world -Y.
+    align_bone_axis_to_world(n, (0.0, 1.0, 0.0), (0.0, -1.0, 0.0))
+    out = _world_axis(n, (0.0, 1.0, 0.0))
+    np.testing.assert_allclose(out, np.array([0.0, -1.0, 0.0]), atol=1e-4)
+
+
+def test_align_bone_axis_handles_parented_node() -> None:
+    """Alignment uses world rotation — respects the parent chain.
+
+    Parent rotates the child by 90° around X (so child's local +Y now
+    points world -Z), then align asks for world -Y; the result must
+    rotate the child's local +Y from world -Z to world -Y, ignoring
+    that the parent already moved it.
+    """
+    parent = Node(name="parent")
+    child = Node(name="child")
+    parent.add_child(child)
+    parent.transform.set_rotation(
+        quat_from_euler_xyz(np.pi / 2, 0.0, 0.0).astype(np.float32, copy=False),
+    )
+    align_bone_axis_to_world(child, (0.0, 1.0, 0.0), (0.0, -1.0, 0.0))
+    out = _world_axis(child, (0.0, 1.0, 0.0))
+    np.testing.assert_allclose(out, np.array([0.0, -1.0, 0.0]), atol=1e-4)
+
+
+def test_align_bone_axis_is_noop_when_already_aligned() -> None:
+    """No correction needed when current axis already matches target."""
+    n = Node(name="palm", transform=Transform(rotation=quat_identity()))
+    rest = n.transform.rotation.copy()
+    align_bone_axis_to_world(n, (0.0, 1.0, 0.0), (0.0, 1.0, 0.0))
+    np.testing.assert_allclose(n.transform.rotation, rest, atol=1e-6)
 
 
 def test_solve_two_bone_analytic_uses_bend_hint_when_colinear() -> None:

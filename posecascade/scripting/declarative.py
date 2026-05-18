@@ -459,6 +459,13 @@ class Phase:
     # ``ik`` block: ``{ik: {hand_l_target: [x, y, z], ...}}``.
     hand_l_target: tuple[Any, Any, Any] | None
     hand_r_target: tuple[Any, Any, Any] | None
+    # Bone-name list whose end of frame world rotation should be aligned
+    # so the bone's local +Y axis points world -Y — i.e. the bone's
+    # 'top face' is up, 'bottom face' (sole / palm) is down. Useful for
+    # planting feet flat on the floor without authoring per-axis foot
+    # rotations by hand. Parsed from a phase ``floor_align`` array:
+    # ``"floor_align": ["foot_L", "foot_R"]``. Empty list = no aligner.
+    floor_align: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -832,6 +839,12 @@ def _parse_phase(raw: dict[str, Any], bpm: float) -> Phase:
     hand_l = _parse_hand_field(raw.get("hand_L"), "hand_L")
     hand_r = _parse_hand_field(raw.get("hand_R"), "hand_R")
     hand_l_target, hand_r_target = _parse_ik_block(raw.get("ik"))
+    floor_align_raw = raw.get("floor_align", ())
+    if not isinstance(floor_align_raw, (list, tuple)):
+        raise DeclarativeAnimationError(
+            "phase 'floor_align' must be a list of bone names",
+        )
+    floor_align = tuple(str(b) for b in floor_align_raw)
     return Phase(
         name=str(raw.get("name", "")),
         duration_sec=_resolve_phase_duration(raw, bpm),
@@ -850,6 +863,7 @@ def _parse_phase(raw: dict[str, Any], bpm: float) -> Phase:
         hand_r=hand_r,
         hand_l_target=hand_l_target,
         hand_r_target=hand_r_target,
+        floor_align=floor_align,
     )
 
 
@@ -2362,6 +2376,8 @@ class DeclarativeRuntime:
         # the wrist at the target world position regardless of what the
         # rest of the chain just did. Mirrors the foot-IK ordering.
         self._apply_hand_ik(phase, scope, phase_t)
+        if phase.floor_align:
+            self._apply_floor_align(phase.floor_align)
         self._post_bone_writes(output, elapsed)
 
     def _post_bone_writes(self, output: PhaseOutput, elapsed: float) -> None:
@@ -2740,6 +2756,7 @@ class DeclarativeRuntime:
             return
         try:
             from posecascade.animation.ik import (  # noqa: PLC0415
+                align_bone_axis_to_world,
                 solve_two_bone_analytic,
             )
         except ImportError:
@@ -2772,6 +2789,44 @@ class DeclarativeRuntime:
             target = np.array((tx, ty, tz), dtype=np.float32)
             root, mid, end = chain
             solve_two_bone_analytic(root, mid, end, target, bend_hint=bend_hint)
+            # Palm-flat alignment: rotate the wrist around itself so its
+            # local +Y axis (palm normal in this rig family) points world
+            # -Y. Makes the hand lie flat on the floor after a plant,
+            # instead of cocked at whatever angle the elbow swing left
+            # it at. The bone's twist around the +Y axis is preserved
+            # (only the axis ORIENTATION is corrected) so fingers keep
+            # whatever yaw the chain naturally produced.
+            align_bone_axis_to_world(end, (0.0, 1.0, 0.0), (0.0, -1.0, 0.0))
+
+    def _apply_floor_align(self, bone_keys: tuple[str, ...]) -> None:
+        """Align each named bone so its local +Y axis points world -Y.
+
+        Lets a pose declare 'these bones sit flat on the floor' (feet
+        for a kneel, palms for a hands-and-knees pose without using
+        the full IK chain) without authoring per-axis rotation values
+        by hand. Names go through the rig's body_bones alias map so
+        ``foot_L`` resolves to whatever the rig calls the foot bone.
+
+        No-op for any bone that doesn't resolve. Wraps the engine-side
+        helper :func:`posecascade.animation.ik.align_bone_axis_to_world`.
+        """
+        try:
+            from posecascade.animation.ik import (  # noqa: PLC0415
+                align_bone_axis_to_world,
+            )
+        except ImportError:
+            return
+        aliases = self.animation.rig.body_bones
+        for bone_key in bone_keys:
+            bone_name = aliases.get(bone_key, bone_key)
+            node = self.scene.find(bone_name)
+            if node is None:
+                _log.warning(
+                    "declarative: floor_align bone %r not in scene; skipping",
+                    bone_key,
+                )
+                continue
+            align_bone_axis_to_world(node, (0.0, 1.0, 0.0), (0.0, -1.0, 0.0))
 
     def _apply_lock_targets(self) -> None:
         """Run CCD 2-bone IK on each foot with an active lock or release.

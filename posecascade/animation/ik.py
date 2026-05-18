@@ -307,6 +307,37 @@ def solve_two_bone_analytic(
     _add_world_delta(mid, delta_mid_world)
 
 
+def align_bone_axis_to_world(node: Node, local_axis: Vec3, world_target: Vec3) -> None:
+    """Rotate ``node`` so its local-frame ``local_axis`` points along ``world_target``.
+
+    Used as the post-step after a hand- or foot-IK solve to flatten the
+    palm / sole onto the ground plane: the IK puts the end joint AT
+    the target position, this rotates the end bone around itself so
+    the contact surface lies parallel to the world XZ plane (with the
+    contact normal along world ``-Y``). Pass ``world_target = (0, -1, 0)``
+    for sole-down or palm-down.
+
+    Reads the node's current world rotation, computes where its local
+    axis currently points in world space, then composes the shortest-arc
+    quaternion that maps THAT direction onto ``world_target`` and applies
+    it via :func:`_add_world_delta` — preserves the bone's parent-relative
+    twist around the axis (only the axis ORIENTATION is corrected).
+    """
+    cur_world = _world_rotation(node)
+    cur_axis_world = _rotate_vec_by_quat(cur_world, np.asarray(local_axis, dtype=np.float64))
+    target = np.asarray(world_target, dtype=np.float64)
+    target_norm = float(np.linalg.norm(target))
+    if target_norm < _EPSILON:
+        return
+    target = target / target_norm
+    cur_norm = float(np.linalg.norm(cur_axis_world))
+    if cur_norm < _EPSILON:
+        return
+    cur_axis_world = cur_axis_world / cur_norm
+    correction = _quat_from_to(cur_axis_world, target)
+    _add_world_delta(node, correction)
+
+
 def _resolve_bend_direction(
     hip_to_knee: np.ndarray,
     target_dir: np.ndarray,
@@ -486,6 +517,7 @@ def solve_two_bone(
 __all__ = [
     "IkChain",
     "IkLink",
+    "align_bone_axis_to_world",
     "compose_trs",
     "solve_chain",
     "solve_two_bone",
