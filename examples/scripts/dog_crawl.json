@@ -23,7 +23,7 @@
       "name": "settle_into_crawl",
       "duration_sec": 6.0,
       "body": {
-        "translation": [0.0, -0.72, 0.0]
+        "translation": [0.0, -0.50, 0.0]
       },
       "bones_local": {
         "spine":       {"x_rad":  0.85},
@@ -34,18 +34,16 @@
         "upper_arm_R": {"x_rad": -1.55, "y_rad":  0.30, "z_rad":  1.40},
         "lower_arm_L": {"x_rad":  0.10},
         "lower_arm_R": {"x_rad":  0.10},
-        "upper_leg_L": {"x_rad": -0.30, "z_rad": -0.08},
-        "upper_leg_R": {"x_rad": -0.30, "z_rad":  0.08},
-        "lower_leg_L": {"x_rad":  1.00},
-        "lower_leg_R": {"x_rad":  1.00}
+        "upper_leg_L": {"x_rad":  0.00, "z_rad": -0.08},
+        "upper_leg_R": {"x_rad":  0.00, "z_rad":  0.08},
+        "lower_leg_L": {"x_rad":  1.45},
+        "lower_leg_R": {"x_rad":  1.45}
       },
       "ik": {
         "hand_l_target": [ 0.22, 0.005, 0.30],
-        "hand_r_target": [-0.22, 0.005, 0.30],
-        "foot_l_target": [ 0.10, 0.005,-0.30],
-        "foot_r_target": [-0.10, 0.005,-0.30]
+        "hand_r_target": [-0.22, 0.005, 0.30]
       },
-      "floor_align": ["hand_L", "hand_R", "foot_L", "foot_R"]
+      "floor_align": ["hand_L", "hand_R"]
     }
   ]
 }
