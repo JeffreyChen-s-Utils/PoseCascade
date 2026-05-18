@@ -1755,17 +1755,25 @@ class DeclarativeRuntime:
         self._capture_floor_align_rest_world(aliases)
 
     def _capture_floor_align_rest_world(self, aliases: dict[str, str]) -> None:
-        """For each floor_align bone, find the LOCAL axis that points world -Y in rest.
+        """For each floor_align bone, capture the LOCAL DIRECTION pointing world -Y in rest.
 
-        On a humanoid bind pose the wrist's 'palm normal' axis and the
-        ankle's 'sole normal' axis both point world -Y in standing
-        rest (palm faces down, sole faces down). But the LOCAL axis
-        carrying that direction is rig-specific — Herta's wrist uses
-        local +Y while its ankle uses local +Z. Snapshotting the
-        rotation row that maximises |y_component| at start lets the
-        engine auto-detect which local axis to align per bone, instead
-        of asking the user to author both palm/sole-normal axes in
-        the rig profile.
+        On a humanoid bind pose 'palm faces world -Y' for the wrist
+        and 'sole faces world -Y' for the ankle. The LOCAL direction
+        carrying that 'world down' meaning is rig-specific AND in
+        general not axis-aligned — Herta's wrist needs a 3D mixture
+        of local axes (~(-0.49, +0.70, -0.53)) because its rest world
+        rotation puts the bone at a ~45° tilt. Naive single-axis
+        detection picks 'local +Y' because that column has the most
+        negative world-Y component, but local +Y is the FINGER
+        direction, not the palm normal — aligning it to world -Y
+        sent the fingers stabbing into the floor.
+
+        Math: world -Y direction expressed in the bone's local frame
+        equals ``-rot.T[:, 1]`` = ``-rot[1, :]`` (row 1 of the rest
+        rotation matrix, negated). Storing this 3-vector lets
+        :meth:`_apply_floor_align` rotate the bone so this vector
+        points world -Y in EVERY pose — sole/palm stays flat without
+        spinning the bone's twist around its own axis.
         """
         bone_keys: set[str] = set()
         for phase in self.animation.phases:
@@ -1777,34 +1785,17 @@ class DeclarativeRuntime:
             node = self.scene.find(bone_name)
             if node is None:
                 continue
-            # Walk parent chain → rest world matrix (no pose yet).
             matrix = node.transform.to_matrix()
             parent = node.parent
             while parent is not None:
                 matrix = parent.transform.to_matrix() @ matrix
                 parent = parent.parent
-            # Each column of the rotation block is one local axis expressed
-            # in world; pick the column with the most-negative Y component
-            # — that's the local axis currently pointing 'world down', i.e.
-            # the contact normal for this bone in its rest standing pose.
             rot = matrix[:3, :3].astype(np.float32, copy=False)
-            best_axis = -1
-            best_y = float("inf")
-            best_sign = 1.0
-            for col in range(3):
-                ycomp = float(rot[1, col])
-                # Allow either +axis or -axis to point world -Y.
-                if ycomp < best_y:
-                    best_y = ycomp
-                    best_axis = col
-                    best_sign = 1.0
-                if -ycomp < best_y:
-                    best_y = -ycomp
-                    best_axis = col
-                    best_sign = -1.0
-            local_axis = np.zeros(3, dtype=np.float32)
-            local_axis[best_axis] = best_sign
-            self._floor_align_rest_world[id(node)] = local_axis
+            contact_local = -rot[1, :].astype(np.float32, copy=True)
+            norm = float(np.linalg.norm(contact_local))
+            if norm > 1.0e-6:  # noqa: PLR2004  # degenerate rest-pose guard
+                contact_local = contact_local / norm
+            self._floor_align_rest_world[id(node)] = contact_local
 
     def _apply_pose_blends(
         self,
