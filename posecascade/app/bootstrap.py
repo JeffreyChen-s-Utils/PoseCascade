@@ -166,6 +166,11 @@ def attach_script(window: MainWindow, services: Services, script_path: Path) -> 
         camera=window.viewport.camera,
         overlay=window.viewport.set_overlay_text,
     )
+    # Expose the renderer so declarative scripts can flip
+    # render-time toggles (projected_shadow etc.) at load time.
+    renderer = getattr(window.viewport, "renderer", None)
+    if renderer is not None:
+        api["renderer"] = renderer
     try:
         if script_path.suffix.lower() == ".json":
             from posecascade.scripting.declarative import (  # noqa: PLC0415

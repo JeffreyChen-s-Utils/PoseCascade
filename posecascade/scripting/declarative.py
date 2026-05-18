@@ -648,6 +648,14 @@ class DeclarativeAnimation:
     # for rigs whose meshes should be free to drape below the floor
     # plane (e.g. underground sequences, abstract scenes).
     auto_clamp_skinned_to_ground: bool = True
+    # Renderer's projected-shadow pass: when ``False`` the bootstrap
+    # turns it off after loading this script. Useful for poses (e.g.
+    # dog_crawl) where the character is mostly horizontal and the
+    # side-angled directional light projects an elongated silhouette
+    # across the floor — the projection is geometrically correct but
+    # reads as a 'deformed shadow' to the eye. Defaults to ``True``
+    # so existing scripts keep their shadow.
+    projected_shadow: bool = True
 
 
 @dataclass
@@ -1192,6 +1200,7 @@ def parse_animation(document: dict[str, Any]) -> DeclarativeAnimation:
         auto_clamp_skinned_to_ground=bool(
             document.get("auto_clamp_skinned_to_ground", True),
         ),
+        projected_shadow=bool(document.get("projected_shadow", True)),
         collision_deform_meshes=_parse_collision_deform_meshes(
             document.get("collision_deform_meshes"),
         ),
@@ -3608,6 +3617,13 @@ def load_animation(
         cloth_host=api.get("cloth_host"),
         source_dir=source_dir,
     )
+    # Apply renderer toggles that live at the animation top level. The
+    # renderer reference is plumbed through ``api['renderer']`` so this
+    # works for any host that wires the script up (editor, demo,
+    # tests). Missing ``renderer`` key = no-op.
+    renderer = api.get("renderer")
+    if renderer is not None and hasattr(renderer, "set_projected_shadow_enabled"):
+        renderer.set_projected_shadow_enabled(parsed.projected_shadow)
     return runtime.hooks()
 
 

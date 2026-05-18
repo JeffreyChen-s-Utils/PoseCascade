@@ -2511,6 +2511,20 @@ def test_translation_array_rejects_wrong_length() -> None:
         _resolve_translation([0.0, 1.0], 0.0, {})
 
 
+def test_projected_shadow_field_defaults_true() -> None:
+    """Missing ``projected_shadow`` defaults to True."""
+    parsed = parse_animation(_minimal_doc())
+    assert parsed.projected_shadow is True
+
+
+def test_projected_shadow_field_parses_false() -> None:
+    """Explicitly set ``projected_shadow: false`` parses through."""
+    doc = _minimal_doc()
+    doc["projected_shadow"] = False
+    parsed = parse_animation(doc)
+    assert parsed.projected_shadow is False
+
+
 def test_hidden_nodes_field_parses_from_phase() -> None:
     """``hidden_nodes`` parses into a tuple of node names."""
     doc = _minimal_doc()
