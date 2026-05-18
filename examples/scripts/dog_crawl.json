@@ -26,10 +26,10 @@
         "translation": [0.0, -0.60, 0.0]
       },
       "bones_local": {
-        "spine":       {"x_rad":  0.85},
-        "chest":       {"x_rad":  0.75},
-        "neck":        {"x_rad": -0.55},
-        "head":        {"x_rad": -0.65},
+        "spine":       {"x_rad":  1.05},
+        "chest":       {"x_rad":  0.85},
+        "neck":        {"x_rad": -0.70},
+        "head":        {"x_rad": -0.80},
         "upper_arm_L": {"x_rad": -1.55, "y_rad": -0.30, "z_rad": -1.40},
         "upper_arm_R": {"x_rad": -1.55, "y_rad":  0.30, "z_rad":  1.40},
         "lower_arm_L": {"x_rad":  0.10},
@@ -40,8 +40,8 @@
         "lower_leg_R": {"x_rad":  1.20}
       },
       "ik": {
-        "hand_l_target": [ 0.22, 0.005, 0.30],
-        "hand_r_target": [-0.22, 0.005, 0.30],
+        "hand_l_target": [ 0.22,-0.02, 0.30],
+        "hand_r_target": [-0.22,-0.02, 0.30],
         "foot_l_target": [ 0.10, 0.005,-0.30],
         "foot_r_target": [-0.10, 0.005,-0.30]
       },
