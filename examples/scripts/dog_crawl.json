@@ -45,7 +45,7 @@
         "foot_l_target": [ 0.10, 0.005,-0.30],
         "foot_r_target": [-0.10, 0.005,-0.30]
       },
-      "floor_align": ["hand_L", "hand_R"]
+      "floor_align": ["hand_L", "hand_R", "foot_L", "foot_R"]
     }
   ]
 }
