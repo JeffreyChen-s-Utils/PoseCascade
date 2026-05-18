@@ -4,18 +4,32 @@
   "name": "dog_crawl_demo",
   "loop_sec": 6.0,
 
+  "wind": {"direction": [1.0, 0.0, 0.0], "speed": 0.0,
+           "turbulence_amplitude": 0.0, "turbulence_frequency_hz": 0.0},
+
+  "physics_chains": {
+    "BackHair_L":    {"stiffness": 6.0, "damping": 0.8, "inertia": 0.15},
+    "BackHair_R":    {"stiffness": 6.0, "damping": 0.8, "inertia": 0.15},
+    "BackHairUpper": {"stiffness": 8.0, "damping": 1.0, "inertia": 0.10},
+    "hair_C":  {"stiffness": 8.0, "damping": 1.0, "inertia": 0.10},
+    "hair_L":  {"stiffness": 6.0, "damping": 0.8, "inertia": 0.13},
+    "hair_R":  {"stiffness": 6.0, "damping": 0.8, "inertia": 0.13},
+    "hair_LL": {"stiffness": 5.0, "damping": 0.7, "inertia": 0.15},
+    "hair_RR": {"stiffness": 5.0, "damping": 0.7, "inertia": 0.15}
+  },
+
   "phases": [
     {
       "name": "settle_into_crawl",
       "duration_sec": 6.0,
       "body": {
-        "translation": [0.0, -0.46, "0.008 * sin(phase_t * tau)"]
+        "translation": [0.0, -0.46, 0.0]
       },
       "bones_local": {
         "spine":       {"x_rad":  0.85},
         "chest":       {"x_rad":  0.75},
         "neck":        {"x_rad": -0.55},
-        "head":        {"x_rad": "-0.65 + 0.04 * sin(phase_t * tau)"},
+        "head":        {"x_rad": -0.65},
         "upper_arm_L": {"x_rad": -1.55, "z_rad": -1.55},
         "upper_arm_R": {"x_rad": -1.55, "z_rad":  1.55},
         "lower_arm_L": {"x_rad":  0.10},
