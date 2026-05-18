@@ -2983,18 +2983,14 @@ class DeclarativeRuntime:
             if bone_dir_local is None or parent_joint is None:
                 align_bone_axis_to_world(node, tuple(contact_local), (0.0, -1.0, 0.0))
                 continue
-            # World extension direction = (bone pos - parent_joint pos),
-            # flattened to the horizontal plane (foot lies along
-            # ground, not tilted up toward shin).
-            bone_pos = _world_position(node)
-            parent_pos = _world_position(parent_joint)
-            extension = bone_pos - parent_pos
-            extension[1] = 0.0  # horizontal only
-            ext_norm = float(np.linalg.norm(extension))
-            if ext_norm < 1.0e-6:  # noqa: PLR2004
-                align_bone_axis_to_world(node, tuple(contact_local), (0.0, -1.0, 0.0))
-                continue
-            extension = extension / ext_norm
+            # Secondary axis: flatten the bone's CURRENT world direction
+            # to the horizontal plane. Preserves the heel-to-toe (or
+            # forearm-to-fingertip) direction the chain naturally
+            # produced after IK, just removes the Y component so the
+            # bone lies horizontal instead of tilted up/down. This is
+            # what makes 'heel + toe both on the floor' work without
+            # forcing a >90 deg flip (which is what the chain-extension
+            # secondary used to require for dog_crawl's folded shin).
             from posecascade.animation.ik import (  # noqa: PLC0415
                 _rotate_vec_by_quat,
                 _world_rotation,
@@ -3003,17 +2999,32 @@ class DeclarativeRuntime:
             cur_bone_dir = _rotate_vec_by_quat(
                 cur_world_rot, np.asarray(bone_dir_local, dtype=np.float64),
             )
-            cur_norm = float(np.linalg.norm(cur_bone_dir))
-            if cur_norm > 1.0e-6:  # noqa: PLR2004
-                cur_bone_dir = cur_bone_dir / cur_norm
-                if float(np.dot(cur_bone_dir, extension)) < 0.0:
+            cur_bone_horiz = cur_bone_dir.copy()
+            cur_bone_horiz[1] = 0.0
+            horiz_norm = float(np.linalg.norm(cur_bone_horiz))
+            if horiz_norm < 1.0e-6:  # noqa: PLR2004
+                # Bone is straight up/down — no horizontal direction to
+                # preserve. Use parent-to-bone extension as fallback if
+                # available, else single-axis.
+                if parent_joint is None:
                     align_bone_axis_to_world(
                         node, tuple(contact_local), (0.0, -1.0, 0.0),
                     )
                     continue
+                bone_pos = _world_position(node)
+                parent_pos = _world_position(parent_joint)
+                cur_bone_horiz = bone_pos - parent_pos
+                cur_bone_horiz[1] = 0.0
+                horiz_norm = float(np.linalg.norm(cur_bone_horiz))
+                if horiz_norm < 1.0e-6:  # noqa: PLR2004
+                    align_bone_axis_to_world(
+                        node, tuple(contact_local), (0.0, -1.0, 0.0),
+                    )
+                    continue
+            cur_bone_horiz = cur_bone_horiz / horiz_norm
             align_bone_two_axes_to_world(
                 node,
-                tuple(bone_dir_local), tuple(extension),
+                tuple(bone_dir_local), tuple(cur_bone_horiz),
                 tuple(contact_local), (0.0, -1.0, 0.0),
             )
 
