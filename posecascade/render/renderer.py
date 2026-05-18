@@ -1132,6 +1132,8 @@ class Renderer:
             mesh_ids = self._node_to_mesh.get(id(node))
             if not mesh_ids:
                 continue
+            if not node.visible:
+                continue
             skin = self._node_to_skin.get(id(node))
             # When a mesh has BOTH skin AND cloth, the cloth solver already
             # produces world-space positions that account for body motion.
@@ -1539,6 +1541,8 @@ class Renderer:
             for node in scene.root.traverse():
                 mesh_ids = self._node_to_mesh.get(id(node))
                 if not mesh_ids:
+                    continue
+                if not node.visible:
                     continue
                 skin = self._node_to_skin.get(id(node))
                 program = (

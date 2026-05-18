@@ -18,6 +18,11 @@ class Node:
     components: list[Component] = field(default_factory=list)
     children: list[Node] = field(default_factory=list)
     parent: Node | None = field(default=None, repr=False, compare=False)
+    # When False, the renderer skips this node's mesh draws (and any
+    # other node-attached visual). Children are not affected — toggle
+    # them independently. Use to hide accessories (shoes, props) per
+    # pose without modifying the scene graph or the underlying assets.
+    visible: bool = True
 
     def add_child(self, child: Node) -> None:
         """Attach ``child`` under this node. Raises if ``child`` is already parented."""

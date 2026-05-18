@@ -474,6 +474,13 @@ class Phase:
     # rotations by hand. Parsed from a phase ``floor_align`` array:
     # ``"floor_align": ["foot_L", "foot_R"]``. Empty list = no aligner.
     floor_align: tuple[str, ...] = ()
+    # Scene node names whose mesh draws should be SKIPPED during this
+    # phase. Useful for hiding accessories (shoes / props / hat) per
+    # pose without modifying the underlying asset. Parsed from a
+    # phase ``hidden_nodes`` array: ``"hidden_nodes": ["Object_362"]``.
+    # The node's visibility flips back to True on phase exit so
+    # subsequent phases (or the rest pose) get the full character.
+    hidden_nodes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -855,6 +862,12 @@ def _parse_phase(raw: dict[str, Any], bpm: float) -> Phase:
             "phase 'floor_align' must be a list of bone names",
         )
     floor_align = tuple(str(b) for b in floor_align_raw)
+    hidden_nodes_raw = raw.get("hidden_nodes", ())
+    if not isinstance(hidden_nodes_raw, (list, tuple)):
+        raise DeclarativeAnimationError(
+            "phase 'hidden_nodes' must be a list of node names",
+        )
+    hidden_nodes = tuple(str(b) for b in hidden_nodes_raw)
     return Phase(
         name=str(raw.get("name", "")),
         duration_sec=_resolve_phase_duration(raw, bpm),
@@ -876,6 +889,7 @@ def _parse_phase(raw: dict[str, Any], bpm: float) -> Phase:
         foot_l_target=foot_l_target,
         foot_r_target=foot_r_target,
         floor_align=floor_align,
+        hidden_nodes=hidden_nodes,
     )
 
 
@@ -1627,6 +1641,11 @@ class DeclarativeRuntime:
     # 'natural extension direction' for the bone (parent_joint → bone),
     # which is the world target for the bone's local bone-direction axis.
     _floor_align_chain_parent: dict[int, Any] = field(default_factory=dict)
+    # Nodes whose ``visible`` was flipped to False by the current phase's
+    # ``hidden_nodes`` list. Cleared + restored to True at the top of
+    # every phase apply so a phase that drops a node from its list
+    # restores it to visible automatically.
+    _previously_hidden_nodes: list[Any] = field(default_factory=list)
     # Arm chain cache for hand-IK. Same shape as ``_leg_chain_nodes``:
     # ``{"L": (shoulder, elbow, wrist), "R": (...)}``. Populated at
     # ``_start`` from ``rig.arm_chain_l/r`` (resolved through the
@@ -2485,7 +2504,34 @@ class DeclarativeRuntime:
         self._apply_hand_ik(phase, scope, phase_t)
         if phase.floor_align:
             self._apply_floor_align(phase.floor_align)
+        self._apply_node_visibility(phase.hidden_nodes)
         self._post_bone_writes(output, elapsed)
+
+    def _apply_node_visibility(self, hidden_nodes: tuple[str, ...]) -> None:
+        """Toggle ``Node.visible`` so the renderer skips listed mesh nodes.
+
+        Resets ALL previously-hidden nodes to visible first (so a phase
+        that doesn't list a node restores it), then hides the ones the
+        current phase declares. Names go through ``scene.find`` which
+        honours the rig's bone-alias map.
+        """
+        # Restore any previously hidden ones.
+        if self._previously_hidden_nodes:
+            for node in self._previously_hidden_nodes:
+                node.visible = True
+            self._previously_hidden_nodes.clear()
+        if not hidden_nodes:
+            return
+        for name in hidden_nodes:
+            node = self.scene.find(name)
+            if node is None:
+                _log.warning(
+                    "declarative: hidden_nodes entry %r not in scene; skipping",
+                    name,
+                )
+                continue
+            node.visible = False
+            self._previously_hidden_nodes.append(node)
 
     def _post_bone_writes(self, output: PhaseOutput, elapsed: float) -> None:
         """Side-effect wiring that runs once all per-frame bone writes are

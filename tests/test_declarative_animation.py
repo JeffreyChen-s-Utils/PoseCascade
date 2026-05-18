@@ -2511,6 +2511,59 @@ def test_translation_array_rejects_wrong_length() -> None:
         _resolve_translation([0.0, 1.0], 0.0, {})
 
 
+def test_hidden_nodes_field_parses_from_phase() -> None:
+    """``hidden_nodes`` parses into a tuple of node names."""
+    doc = _minimal_doc()
+    doc["phases"][0]["hidden_nodes"] = ["Object_362", "Boot_L"]
+    parsed = parse_animation(doc)
+    assert parsed.phases[0].hidden_nodes == ("Object_362", "Boot_L")
+
+
+def test_hidden_nodes_rejects_non_list() -> None:
+    """``hidden_nodes`` must be a list — string or dict raises."""
+    doc = _minimal_doc()
+    doc["phases"][0]["hidden_nodes"] = "Object_362"
+    with pytest.raises(DeclarativeAnimationError, match="hidden_nodes"):
+        parse_animation(doc)
+
+
+def test_hidden_nodes_default_empty() -> None:
+    """Missing ``hidden_nodes`` defaults to empty tuple."""
+    parsed = parse_animation(_minimal_doc())
+    assert parsed.phases[0].hidden_nodes == ()
+
+
+def test_apply_node_visibility_flips_and_restores() -> None:
+    """Listed nodes flip to invisible; on next call without that name, they restore."""
+    target = Node(name="Hideable")
+    target.visible = True
+    root = Node(name="root")
+    root.add_child(target)
+    scene = Scene(root=root)
+    doc = _minimal_doc()
+    parsed = parse_animation(doc)
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+        physics_lite=None, cloth_host=None, floor_api=None,
+    )
+    runtime._apply_node_visibility(("Hideable",))  # noqa: SLF001
+    assert target.visible is False
+    runtime._apply_node_visibility(())  # noqa: SLF001
+    assert target.visible is True
+
+
+def test_apply_node_visibility_logs_missing_name(caplog) -> None:
+    """A name that doesn't resolve in the scene is logged + skipped, not raised."""
+    scene = Scene(root=Node(name="root"))
+    parsed = parse_animation(_minimal_doc())
+    runtime = DeclarativeRuntime(
+        animation=parsed, scene=scene, time=lambda: 0.0,
+        physics_lite=None, cloth_host=None, floor_api=None,
+    )
+    runtime._apply_node_visibility(("NotInScene",))  # noqa: SLF001
+    # Should not raise; warning is logged.
+
+
 def test_bone_axis_aliases_accept_short_form() -> None:
     """``{x: ...}`` reads as ``{x_rad: ...}`` and mixing the two raises."""
     doc = _minimal_doc()
