@@ -8,7 +8,7 @@ markers, snapshots each tagged mesh into a :class:`ClothPiece`, and drives
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -231,12 +231,65 @@ class ClothHost:
     def floor_y(self, value: float | None) -> None:
         self._solver.set_ground_y(value)
 
+    @property
+    def floor_clamp_tolerance(self) -> float:
+        """Soft-floor tolerance (metres) for passive-skin-deform pieces.
+
+        With tolerance = 0 (default) the passive-skin clamp hard-snaps every
+        below-floor vertex to ``floor_y + 1 mm``, producing the pancake
+        silhouette that's visible on the calf / palm in horizontal poses.
+        With tolerance > 0 the vert is instead clamped to
+        ``floor_y + 1 mm - tolerance``, so the mesh can dip up to that far
+        below the visible floor before the clamp fires. Trades a small
+        amount of visible mesh-through-floor for skinning curvature
+        preservation (dog-crawl calf, prone elbow no longer pancake).
+        """
+        return self._solver.ground_tolerance
+
+    @floor_clamp_tolerance.setter
+    def floor_clamp_tolerance(self, value: float) -> None:
+        self._solver.set_ground_tolerance(value)
+
     def install_default_forces(self) -> None:
         """Install default world-space gravity (idempotent)."""
         if self._gravity_installed:
             return
         self._solver.add_force(ClothGravity(acceleration=vec3(*_DEFAULT_GRAVITY)))
         self._gravity_installed = True
+
+    def snapshot_cloth_state(self) -> dict[str, np.ndarray]:
+        """Return ``{piece_name: (N, 3) world positions}`` for every cloth piece.
+
+        Pairs with :meth:`restore_cloth_state` for the per-pose drape snapshot
+        flow (see :mod:`posecascade.animation.drape_snapshot`). Cheap copy:
+        each piece's position array is read once.
+        """
+        return {
+            piece.name: np.asarray(piece.positions, dtype=np.float32).copy()
+            for piece in self._solver.pieces
+        }
+
+    def restore_cloth_state(self, state: Mapping[str, np.ndarray]) -> None:
+        """Restore vertex positions from a snapshot. Verlet ``prev_positions``
+        is set equal to ``positions`` so velocity reads as zero on the next
+        substep — i.e. the cloth comes up at rest in the snapshot's pose.
+        Pieces not present in ``state`` are left untouched. Vertex-count
+        mismatches are skipped silently (with a debug log) so a snapshot
+        captured on an older rig version doesn't crash the load.
+        """
+        for piece in self._solver.pieces:
+            target = state.get(piece.name)
+            if target is None:
+                continue
+            arr = np.asarray(target, dtype=np.float32)
+            if arr.shape != piece.positions.shape:
+                _log.debug(
+                    "cloth restore: piece %r shape mismatch (%s vs %s); skipping",
+                    piece.name, arr.shape, piece.positions.shape,
+                )
+                continue
+            piece.positions[:] = arr
+            piece.prev_positions[:] = arr
 
     def register_imported_scene(self, imported: ImportedScene) -> None:
         """Scan ``imported.scene`` for :class:`ClothComponent` markers and rig each one.
@@ -273,6 +326,8 @@ class ClothHost:
         iterations: int = 8,
         substeps: int = 2,
         rest_pull: float = 4.0,
+        attract_to_bones: tuple[str, ...] = (),
+        attract_max_distance: float = 0.10,
     ) -> ClothPiece | None:
         """Build a cloth piece from a Node's mesh and register it.
 
@@ -300,6 +355,8 @@ class ClothHost:
             iterations=iterations,
             substeps=substeps,
             rest_pull=rest_pull,
+            attract_to_bones=tuple(attract_to_bones),
+            attract_max_distance=attract_max_distance,
         )
         # Attach the component to the node so the editor's inspector (and any
         # later register_imported_scene scan) can discover the cloth via
@@ -597,6 +654,18 @@ class ClothHost:
                 if eligible_idx.size == 0:
                     continue
                 _push_out_collider(piece.positions, eligible_idx, collider)
+            # Attract pass: pull verts close to named surfaces onto them.
+            # Runs AFTER push-out so verts that were inside the body have
+            # been kicked out first; attract then snaps the close-outside
+            # verts onto the surface. Skirt + cape drape uses this to lie
+            # along the body cleanly instead of floating at push-out
+            # distance.
+            attract_bones = piece.params.attract_to_bones
+            if attract_bones:
+                _attract_piece_to_surfaces(
+                    piece, self._solver.colliders, piece_cache,
+                    attract_bones, piece.params.attract_max_distance,
+                )
 
     def _reclamp_passive_pieces_to_ground(self) -> None:
         """Snap every passive-skin-deform vert below ``floor_y`` back up to it.
@@ -615,7 +684,8 @@ class ClothHost:
         if self._solver.ground_y is None:
             return
         from posecascade.animation.cloth import _FLOOR_CLEARANCE  # noqa: PLC0415
-        floor = float(self._solver.ground_y) + _FLOOR_CLEARANCE
+        tolerance = max(float(self._solver.ground_tolerance), 0.0)
+        floor = float(self._solver.ground_y) + _FLOOR_CLEARANCE - tolerance
         for piece in self._solver.pieces:
             if not piece.enabled or not piece.params.passive_skin_deform:
                 continue
@@ -681,55 +751,94 @@ class ClothHost:
                 # mesh.
                 continue
 
-            bind_h = follower._bind_h               # noqa: SLF001 — same module
-            combined = follower._combined           # noqa: SLF001
-            gather = follower._gather               # noqa: SLF001
-            skinned_h = follower._skinned_h         # noqa: SLF001
-            num_slots = follower.joints_per_vert.shape[1]
-            # Per-slot gather + weighted accumulate into ``combined``,
-            # then one (N, 4, 4) @ (N, 4, 1) matmul. einsum
-            # (``ns,nsij->nij``) was tried as an alternative but ran
-            # ~15 % slower on 30k verts — the per-slot loop with
-            # in-place ops hits BLAS's small-matmul fast paths better.
-            np.take(
-                joint_matrices, follower.joints_per_vert[:, 0], axis=0,
-                out=gather,
-            )
-            np.multiply(
-                gather, follower.weights_per_vert[:, 0, None, None],
-                out=combined,
-            )
-            for slot in range(1, num_slots):
-                np.take(
-                    joint_matrices, follower.joints_per_vert[:, slot], axis=0,
-                    out=gather,
-                )
-                gather *= follower.weights_per_vert[:, slot, None, None]
-                combined += gather
-            np.matmul(combined, bind_h[:, :, None], out=skinned_h)
-            follower.piece.rest_positions[:] = skinned_h[:, :3, 0]
-            # LBS the bind-pose normals through the SAME combined matrix
-            # (3x3 sub-block only — translation column doesn't apply to
-            # normals). Saves the ~3 ms per-frame
-            # ``compute_vertex_normals`` recompute in ``iter_local_state``
-            # AND gives more accurate normals (proper per-vert rotation
-            # vs. recomputed-from-positions area-weighted average).
-            if follower.bind_normals is not None:
-                skinned_n = follower._skinned_n     # noqa: SLF001
-                np.matmul(
-                    combined[:, :3, :3],
-                    follower.bind_normals[:, :, None],
-                    out=skinned_n,
-                )
-                # Normalise in-place (skinning preserves direction but
-                # weighted-blend can shorten the vector through joint
-                # collapse on LBS).
-                norms = skinned_n[:, :, 0]
-                lengths = np.sqrt(np.einsum("ij,ij->i", norms, norms))
-                safe = np.maximum(lengths, 1.0e-6, dtype=np.float32)   # noqa: PLR2004
-                self._piece_skinned_normals[id(follower.piece)] = (
-                    norms / safe[:, None]
-                ).astype(np.float32, copy=False)
+            self._skin_piece_dqs(follower, joint_matrices)
+
+    def _skin_piece_dqs(
+        self,
+        follower: _SkinTargetFollower,
+        joint_matrices: NDArray[np.float32],
+    ) -> None:
+        """Dual-quaternion skin one passive_skin_deform piece on the CPU.
+
+        Mirrors the GPU shader ``shaders/toon/toon_skinned_dqs.vert``
+        per-vert math so positions written into ``piece.rest_positions``
+        match what the renderer's DQS toon pass would have produced if
+        cloth_host weren't overriding them. Without this, ``cloth_host``
+        was forcing LBS-skinned positions onto passive_skin_deform body
+        meshes, which made every DQS shader the renderer compiled
+        irrelevant for the parts the cloth host owns — visible as the
+        candy-wrap kinks at shoulder / waist / knee that DQS in the
+        renderer was supposed to fix.
+
+        Vectorised per-vert: gather 4 dual quaternions, antipodal-flip
+        slots 1-3 against slot 0, weighted sum, normalise by the real
+        quaternion length, then apply the screw motion (rotate the bind
+        position by qr, add the translation extracted from qd).
+        """
+        from posecascade.utils.dual_quaternion import (  # noqa: PLC0415
+            matrices_to_dual_quaternions,
+        )
+
+        # (J, 8) dual quaternions; cheap (354 bones * 8 floats).
+        dqs = matrices_to_dual_quaternions(joint_matrices)
+        joints = follower.joints_per_vert       # (N, 4)
+        weights = follower.weights_per_vert     # (N, 4)
+        bind_pos = follower._bind_h[:, :3]      # noqa: SLF001 -- (N, 3) bind positions
+
+        # Gather DQs per slot. dqs_per_slot[k] is (N, 8).
+        dqs_per_slot = [dqs[joints[:, k]] for k in range(joints.shape[1])]
+
+        # Antipodal correction: dqs in slot k are flipped to the same
+        # hemisphere as slot 0 so the weighted sum doesn't cancel.
+        base_qr = dqs_per_slot[0][:, :4]
+        for k in range(1, len(dqs_per_slot)):
+            dot = np.einsum("ij,ij->i", base_qr, dqs_per_slot[k][:, :4])
+            sign = np.where(dot < 0.0, -1.0, 1.0).astype(np.float32)
+            dqs_per_slot[k] = dqs_per_slot[k] * sign[:, None]
+
+        # Weighted blend: (N, 8) sum of weights[k] * dqs_per_slot[k].
+        blend = weights[:, 0, None] * dqs_per_slot[0]
+        for k in range(1, len(dqs_per_slot)):
+            blend = blend + weights[:, k, None] * dqs_per_slot[k]
+
+        qr = blend[:, :4]
+        qd = blend[:, 4:]
+
+        # Normalise by |qr| so the result is a unit dual quaternion.
+        qr_len = np.sqrt(np.einsum("ij,ij->i", qr, qr))
+        safe = np.maximum(qr_len, 1.0e-6, dtype=np.float32)   # noqa: PLR2004
+        qr = qr / safe[:, None]
+        qd = qd / safe[:, None]
+
+        # Rotate bind_pos by qr using p + 2 * cross(qr.xyz, cross(qr.xyz, p) + qr.w * p)
+        qr_xyz = qr[:, :3]
+        qr_w = qr[:, 3]
+        cross1 = np.cross(qr_xyz, bind_pos) + qr_w[:, None] * bind_pos
+        rotated = bind_pos + 2.0 * np.cross(qr_xyz, cross1)
+
+        # Translation: t = 2 * (qr.w * qd.xyz - qd.w * qr.xyz + cross(qr.xyz, qd.xyz))
+        qd_xyz = qd[:, :3]
+        qd_w = qd[:, 3]
+        translation = 2.0 * (
+            qr_w[:, None] * qd_xyz
+            - qd_w[:, None] * qr_xyz
+            + np.cross(qr_xyz, qd_xyz)
+        )
+        world_pos = (rotated + translation).astype(np.float32, copy=False)
+        follower.piece.rest_positions[:] = world_pos
+
+        # Normals: rotate bind normal by the same blended quaternion.
+        if follower.bind_normals is not None:
+            # bind_normals is (N, 3); the per-quat rotate works on 2D
+            # without any extra axis manipulation.
+            bind_n = np.asarray(follower.bind_normals, dtype=np.float32)
+            cross_n = np.cross(qr_xyz, bind_n) + qr_w[:, None] * bind_n
+            rotated_n = bind_n + 2.0 * np.cross(qr_xyz, cross_n)
+            lengths = np.sqrt(np.einsum("ij,ij->i", rotated_n, rotated_n))
+            safe_n = np.maximum(lengths, 1.0e-6, dtype=np.float32)   # noqa: PLR2004
+            self._piece_skinned_normals[id(follower.piece)] = (
+                rotated_n / safe_n[:, None]
+            ).astype(np.float32, copy=False)
 
     def _update_anchor_followers(self) -> None:
         if not self._anchor_followers:
@@ -898,6 +1007,8 @@ class ClothHost:
             iterations=component.iterations,
             substeps=component.substeps,
             rest_pull=component.rest_pull,
+            attract_to_bones=tuple(component.attract_to_bones),
+            attract_max_distance=component.attract_max_distance,
         )
         piece = cloth_from_mesh(
             component.cloth_name or f"cloth_{component.mesh_index}",
@@ -987,6 +1098,125 @@ def _transform_in_place(points: NDArray, matrix: Mat4) -> None:
         return
     homog = np.hstack([points, np.ones((n, 1), dtype=points.dtype)])
     points[:] = (homog @ matrix.T)[:, :3]
+
+
+# Lower bound for "vert exactly at collider centre / axis" guards in the
+# attract pass. Any positive distance under this is treated as 0 to avoid
+# divide-by-zero when normalising the radial direction; mathematically
+# impossible after push-out (which moves verts to radius + skin_offset),
+# but the guard keeps things robust against caller misuse / NaNs.
+_ATTRACT_NUMERIC_EPS = 1.0e-6
+# Lower bound for ``|b - a|²`` below which a capsule is treated as a
+# degenerate sphere at ``a``. Squared because we never need the actual
+# length for this check.
+_CAPSULE_DEGENERATE_LEN_SQ = 1.0e-12
+
+
+def _attract_piece_to_surfaces(
+    piece: ClothPiece,
+    colliders: Sequence[object],
+    piece_cache: dict[int, tuple[NDArray[np.bool_], NDArray[np.int64]]],
+    attract_to_bones: tuple[str, ...],
+    attract_max_distance: float,
+) -> None:
+    """Pull each vertex of ``piece`` onto its nearest qualifying collider surface.
+
+    For every collider whose ``bone_tag`` is in ``attract_to_bones`` AND that
+    has a non-empty eligible-vertex set on this piece, walks the eligible
+    verts and snaps any whose distance to the collider surface is in
+    ``(0, attract_max_distance]`` onto the surface (radius + skin_offset
+    from the axis). Verts INSIDE the surface have already been kicked out
+    by the push-out pass that runs first, so this pulls "close-outside"
+    verts cleanly without fighting the push-out.
+
+    Per-collider; if multiple attract colliders qualify the closest surface
+    wins because the loop runs sequentially and a later collider's snap
+    only fires when the current vert is still farther than its own
+    threshold — natural prioritisation by surface proximity.
+    """
+    if attract_max_distance <= 0.0 or not attract_to_bones:
+        return
+    positions = piece.positions
+    for collider in colliders:
+        bone_tag = getattr(collider, "bone_tag", "")
+        if not bone_tag or bone_tag not in attract_to_bones:
+            continue
+        entry = piece_cache.get(id(collider))
+        if entry is None:
+            continue
+        _, eligible_idx = entry
+        if eligible_idx.size == 0:
+            continue
+        if isinstance(collider, SphereCollider):
+            _attract_sphere(positions, eligible_idx, collider, attract_max_distance)
+        elif isinstance(collider, CapsuleCollider):
+            _attract_capsule(positions, eligible_idx, collider, attract_max_distance)
+
+
+def _attract_sphere(
+    positions: NDArray[np.float32],
+    eligible_idx: NDArray[np.int64],
+    sphere: SphereCollider,
+    attract_max_distance: float,
+) -> None:
+    """Snap eligible verts onto ``sphere``'s surface when within attract range."""
+    pts = positions[eligible_idx]
+    deltas = pts - sphere.center
+    dists = np.linalg.norm(deltas, axis=1)
+    surface_r = sphere.radius + sphere.skin_offset
+    # Attract only verts that are OUTSIDE the surface (push-out handles inside)
+    # AND within attract_max_distance of the surface.
+    outside_distance = dists - surface_r
+    mask = (outside_distance > 0.0) & (outside_distance <= attract_max_distance)
+    if not np.any(mask):
+        return
+    selected = eligible_idx[mask]
+    sel_deltas = deltas[mask]
+    sel_dists = dists[mask][:, None]
+    # Guard against zero distance (vert exactly at centre — impossible after push-out)
+    safe_dists = np.where(sel_dists < _ATTRACT_NUMERIC_EPS, 1.0, sel_dists)
+    dirs = sel_deltas / safe_dists
+    positions[selected] = sphere.center + dirs * surface_r
+
+
+def _attract_capsule(
+    positions: NDArray[np.float32],
+    eligible_idx: NDArray[np.int64],
+    capsule: CapsuleCollider,
+    attract_max_distance: float,
+) -> None:
+    """Snap eligible verts onto ``capsule``'s surface when within attract range."""
+    pts = positions[eligible_idx]
+    a = np.asarray(capsule.a, dtype=np.float32)
+    b = np.asarray(capsule.b, dtype=np.float32)
+    ab = b - a
+    ab_len_sq = float(np.dot(ab, ab))
+    if ab_len_sq < _CAPSULE_DEGENERATE_LEN_SQ:
+        # Degenerate capsule = sphere at a
+        _attract_sphere(
+            positions, eligible_idx,
+            SphereCollider(center=a, radius=capsule.radius,
+                           skin_offset=capsule.skin_offset),
+            attract_max_distance,
+        )
+        return
+    pa = pts - a
+    t = np.clip((pa @ ab) / ab_len_sq, 0.0, 1.0)
+    axis_pts = a + t[:, None] * ab
+    deltas = pts - axis_pts
+    dists = np.linalg.norm(deltas, axis=1)
+    surface_r = capsule.radius + capsule.skin_offset
+    outside_distance = dists - surface_r
+    mask = (outside_distance > 0.0) & (outside_distance <= attract_max_distance)
+    if not np.any(mask):
+        return
+    selected = eligible_idx[mask]
+    sel_deltas = deltas[mask]
+    sel_dists = dists[mask][:, None]
+    sel_axis = axis_pts[mask]
+    safe_dists = np.where(sel_dists < _ATTRACT_NUMERIC_EPS, 1.0, sel_dists)
+    dirs = sel_deltas / safe_dists
+    positions[selected] = sel_axis + dirs * surface_r
 
 
 def _push_out_collider(

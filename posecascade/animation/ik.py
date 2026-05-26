@@ -223,6 +223,7 @@ def solve_two_bone_analytic(
     target_world: Vec3,
     bend_hint: Vec3 | None = None,
     max_stretch: float = 1.0,
+    floor_y: float | None = None,
 ) -> None:
     """Closed-form (law-of-cosines) 2-bone IK — guaranteed to converge.
 
@@ -326,6 +327,117 @@ def solve_two_bone_analytic(
     tip_dir_new = knee_to_target / knee_to_target_norm
     delta_mid_world = _quat_from_to(tip_dir_old, tip_dir_new)
     _add_world_delta(mid, delta_mid_world)
+
+    # Post-correction: if the caller provided a floor plane and the mid
+    # joint (knee / elbow) is below it, re-solve with the knee planted
+    # AT the floor. This prevents the GPU contact-clamp from pancaking
+    # the shin/knee mesh into the ground plane on deeply folded poses
+    # like dog_crawl, where the natural bend would drive the knee
+    # underground.
+    if floor_y is not None:
+        _enforce_mid_floor_clearance(
+            root, mid, end, target, len_upper, len_lower, bend_hint, floor_y,
+        )
+
+
+def _enforce_mid_floor_clearance(  # noqa: PLR0913
+    root: Node,
+    mid: Node,
+    end: Node,
+    target: np.ndarray,
+    len_upper: float,
+    len_lower: float,
+    bend_hint: Vec3 | None,
+    floor_y: float,
+) -> None:
+    """If ``mid`` is below ``floor_y``, plant the knee exactly on the plane.
+
+    Closed-form: the knee must satisfy three constraints — distance
+    ``len_upper`` from the hip, distance ``len_lower`` from the end,
+    and ``y = floor_y``. The first two confine the knee to the circle
+    where two spheres intersect; adding the plane reduces it to two
+    candidate points (mirror images across the hip-end horizontal axis).
+    Pick whichever lies closer to ``bend_hint`` so the knee still bends
+    on the anatomical side (forward for legs, backward for arms).
+    """
+    knee = _world_position(mid).astype(np.float64)
+    if knee[1] >= floor_y - _EPSILON:
+        return
+    hip = _world_position(root).astype(np.float64)
+    new_knee = _solve_knee_on_plane(
+        hip, target, len_upper, len_lower, floor_y, bend_hint,
+    )
+    if new_knee is None:
+        return
+    # Rotate root so its tail lands at new_knee.
+    knee_dir_old = (knee - hip) / max(np.linalg.norm(knee - hip), _EPSILON)
+    knee_dir_new = (new_knee - hip) / max(np.linalg.norm(new_knee - hip), _EPSILON)
+    delta_root_world = _quat_from_to(knee_dir_old, knee_dir_new)
+    _add_world_delta(root, delta_root_world)
+    # Re-orient mid so the end lands at the target with the knee at new_knee.
+    tip = _world_position(end).astype(np.float64)
+    tip_dir_old = (tip - new_knee) / max(np.linalg.norm(tip - new_knee), _EPSILON)
+    tip_dir_new = (target - new_knee) / max(
+        np.linalg.norm(target - new_knee), _EPSILON,
+    )
+    delta_mid_world = _quat_from_to(tip_dir_old, tip_dir_new)
+    _add_world_delta(mid, delta_mid_world)
+
+
+def _solve_knee_on_plane(  # noqa: PLR0913
+    hip: np.ndarray,
+    target: np.ndarray,
+    len_upper: float,
+    len_lower: float,
+    plane_y: float,
+    bend_hint: Vec3 | None,
+) -> np.ndarray | None:
+    """Two-circle intersection in the plane ``y = plane_y``.
+
+    Returns one of the two candidate knee positions (or None if the
+    plane is unreachable for either sphere, or the spheres' XZ
+    projections don't intersect). The candidate is chosen by maximum
+    dot product with ``bend_hint`` so the knee bends on the anatomical
+    side. ``bend_hint = None`` falls back to "knee toward +Z" — fine
+    for the default Herta-style facing.
+    """
+    r_h_sq = len_upper * len_upper - (plane_y - hip[1]) ** 2
+    r_t_sq = len_lower * len_lower - (plane_y - target[1]) ** 2
+    if r_h_sq <= 0.0 or r_t_sq <= 0.0:
+        return None
+    r_h = float(np.sqrt(r_h_sq))
+    r_t = float(np.sqrt(r_t_sq))
+    h_xz = np.array([hip[0], hip[2]], dtype=np.float64)
+    t_xz = np.array([target[0], target[2]], dtype=np.float64)
+    d_vec = t_xz - h_xz
+    d = float(np.linalg.norm(d_vec))
+    if d < _EPSILON or d > r_h + r_t or d < abs(r_h - r_t):
+        return None
+    # Distance from hip-circle-centre along the centre line to the chord.
+    a = (r_h * r_h - r_t * r_t + d * d) / (2.0 * d)
+    h_perp_sq = r_h * r_h - a * a
+    if h_perp_sq < 0.0:
+        return None
+    h_perp = float(np.sqrt(h_perp_sq))
+    base = h_xz + a * d_vec / d
+    perp_xz = np.array([-d_vec[1], d_vec[0]], dtype=np.float64) / d
+    cand1 = np.array(
+        [base[0] + h_perp * perp_xz[0], plane_y, base[1] + h_perp * perp_xz[1]],
+        dtype=np.float64,
+    )
+    cand2 = np.array(
+        [base[0] - h_perp * perp_xz[0], plane_y, base[1] - h_perp * perp_xz[1]],
+        dtype=np.float64,
+    )
+    hint = (
+        np.asarray(bend_hint, dtype=np.float64).reshape(3)
+        if bend_hint is not None
+        else np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    )
+    mid_pt = 0.5 * (hip + target)
+    score1 = float(np.dot(cand1 - mid_pt, hint))
+    score2 = float(np.dot(cand2 - mid_pt, hint))
+    return cand1 if score1 >= score2 else cand2
 
 
 _REST_TRANSLATION_CACHE: dict[int, np.ndarray] = {}

@@ -1,38 +1,39 @@
 #version 430 core
 //
-// pass: passive skin LBS + collider push (compute)
+// pass: passive skin DQS + collider push (compute)
 //
 // One invocation per mesh vertex:
 //   1. Reads ``bind_positions[vid]`` (the rest-pose vertex in mesh-local space)
-//   2. Does 4-bone linear blend skinning against ``bone_matrices`` to get the
-//      animated world position
+//   2. Does 4-bone dual-quaternion skinning against ``bone_dual_quats`` to get
+//      the animated world position (with screw-motion blending, no LBS
+//      candy-wrap at twisted joints)
 //   3. Iterates colliders, projecting the world position outside any sphere
 //      or capsule it landed inside — skipping colliders whose excluded-joint
-//      bitmask covers this vertex's dominant joint (so a hand-sphere does
-//      not push the hand's own skin verts)
+//      bitmask covers this vertex's dominant joint
 //   4. Transforms the result by ``u_worldToLocal`` and writes it as a packed
 //      float[3] into ``out_positions`` — i.e. directly into the mesh's
 //      position VBO, no CPU readback needed.
 //
+// Previously this compute pass did LBS even though the toon/outline/shadow
+// vertex shaders use DQS. For passive_skin_deform pieces (like the main
+// body mesh registered via collision_deform_meshes) the GPU compute path
+// owns the final positions, so the visible skin used LBS regardless of
+// what the renderer's DQS shaders did downstream. Switching this shader
+// to DQS makes the GPU passive-skin path match the GPU vertex-shader path
+// — joint volume is preserved at the shoulder / waist / knee.
+//
 // Bindings:
-//   SSBO 0: BindPositions   (read)   — packed float[3] per vert (matches VBO layout)
+//   SSBO 0: BindPositions   (read)   — packed float[3] per vert
 //   SSBO 1: Joints          (read)   — 4 uints per vert
 //   SSBO 2: Weights         (read)   — 4 floats per vert
-//   SSBO 3: BoneMatrices    (read)   — mat4 per joint (joint_world × inv_bind)
-//   SSBO 4: OutputPositions (write)  — packed float[3] per vert (bound on the position VBO)
-//   SSBO 5: DominantJoint   (read)   — one int per vert (highest-weight joint)
-//   SSBO 6: ColliderExclude (read)   — bit-flag mask per (collider, joint)
-//   SSBO 7: BindNormals     (read)   — packed float[3] per vert (mesh-local bind normals)
-//   SSBO 8: OutputNormals   (write)  — packed float[3] per vert (bound on the normal VBO)
+//   SSBO 3: BoneDualQuats   (read)   — 2 vec4 per joint (qr, qd)
+//   SSBO 4: OutputPositions (write)
+//   SSBO 5: DominantJoint   (read)
+//   SSBO 6: ColliderExclude (read)
+//   SSBO 7: BindNormals     (read)
+//   SSBO 8: OutputNormals   (write)
 //
-//   UBO 0: CollidersUBO              — collider count + flat collider array
-//
-// Uniforms:
-//   u_vertCount     (uint)
-//   u_worldToLocal  (mat4)            — applied after the optional collider push
-//
-// Compute group size 64 is a safe choice across AMD / Intel / NVIDIA; bumping to
-// 128 or 256 gives a marginal win on RDNA / Ampere but loses on Intel iGPUs.
+//   UBO 0: CollidersUBO
 
 layout(local_size_x = 64) in;
 
@@ -45,8 +46,9 @@ layout(std430, binding = 1) readonly buffer Joints {
 layout(std430, binding = 2) readonly buffer Weights {
     float weights[];
 };
-layout(std430, binding = 3) readonly buffer BoneMatrices {
-    mat4 bone_matrices[];
+layout(std430, binding = 3) readonly buffer BoneDualQuats {
+    // 2 * vec4 per joint: index j has real at 2*j and dual at 2*j+1.
+    vec4 bone_dual_quats[];
 };
 layout(std430, binding = 4) writeonly buffer OutputPositions {
     float out_positions[];
@@ -55,8 +57,6 @@ layout(std430, binding = 5) readonly buffer DominantJoint {
     int dominant_joint[];
 };
 layout(std430, binding = 6) readonly buffer ColliderExclude {
-    // Flat bitfield: layout[c * BONE_WORDS + word_index] is a 32-bit mask of
-    // joint indices whose dominant verts collider ``c`` must NOT push.
     uint collider_exclude_bits[];
 };
 layout(std430, binding = 7) readonly buffer BindNormals {
@@ -66,13 +66,10 @@ layout(std430, binding = 8) writeonly buffer OutputNormals {
     float out_normals[];
 };
 
-#define MAX_COLLIDERS 16
-#define BONE_WORDS 16  // ceil(384 / 32) — must match _MAX_BONES in renderer.py
+#define MAX_COLLIDERS 32
+#define BONE_WORDS 16
 
 struct GpuCollider {
-    // Sphere: data1=(center.xyz, radius), data2.w=0
-    // Capsule: data1=(a.xyz, radius), data2=(b.xyz, kind=1)
-    // skin_offset is in extras.x; extras.yzw are padding for std140 alignment.
     vec4 data1;
     vec4 data2;
     vec4 extras;
@@ -88,14 +85,17 @@ layout(std140, binding = 0) uniform CollidersUBO {
 
 uniform uint u_vertCount;
 uniform mat4 u_worldToLocal;
-// Ground-clamp gate. When ``u_groundEnabled != 0`` every world-space vertex
-// that ends up below ``u_groundY`` is lifted back to ``u_groundY``. Mirrors
-// the CPU passive-skin path's _reclamp_passive_pieces_to_ground so the
-// GPU-managed pieces don't visibly clip through the floor in poses where
-// the skinning pushes verts underground (dog-crawl knees, feet on stairs,
-// any prone pose).
+// Ground-clamp gate. See passive_skin_push.comp prior version for full
+// rationale. Tolerance > 0 lets verts dip up to that far below the floor
+// before being clamped, so the mesh keeps natural skinning curvature.
 uniform uint u_groundEnabled;
 uniform float u_groundY;
+uniform float u_groundTolerance;
+
+
+vec3 _rotate_by_quat(vec3 v, vec4 q) {
+    return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+}
 
 
 void main() {
@@ -104,25 +104,60 @@ void main() {
         return;
     }
 
-    vec4 p_bind = vec4(
+    vec3 p_bind = vec3(
         bind_positions[vid * 3u + 0u],
         bind_positions[vid * 3u + 1u],
-        bind_positions[vid * 3u + 2u],
-        1.0
+        bind_positions[vid * 3u + 2u]
     );
 
-    // 4-bone LBS — accumulate weighted joint matrix, then apply.
-    mat4 skin_mat = mat4(0.0);
-    for (int s = 0; s < 4; ++s) {
-        uint j = joints[vid * 4u + uint(s)];
-        float w = weights[vid * 4u + uint(s)];
-        skin_mat += w * bone_matrices[j];
-    }
-    vec4 world_p = skin_mat * p_bind;
+    // 4-bone DQS blend. Mirrors toon_skinned_dqs.vert per-vert math.
+    uint j0 = joints[vid * 4u + 0u];
+    uint j1 = joints[vid * 4u + 1u];
+    uint j2 = joints[vid * 4u + 2u];
+    uint j3 = joints[vid * 4u + 3u];
+    float w0 = weights[vid * 4u + 0u];
+    float w1 = weights[vid * 4u + 1u];
+    float w2 = weights[vid * 4u + 2u];
+    float w3 = weights[vid * 4u + 3u];
 
-    // Collision push — sphere / capsule, with per-vertex bone-filter.
+    vec4 q0r = bone_dual_quats[j0 * 2u + 0u];
+    vec4 q0d = bone_dual_quats[j0 * 2u + 1u];
+    vec4 q1r = bone_dual_quats[j1 * 2u + 0u];
+    vec4 q1d = bone_dual_quats[j1 * 2u + 1u];
+    vec4 q2r = bone_dual_quats[j2 * 2u + 0u];
+    vec4 q2d = bone_dual_quats[j2 * 2u + 1u];
+    vec4 q3r = bone_dual_quats[j3 * 2u + 0u];
+    vec4 q3d = bone_dual_quats[j3 * 2u + 1u];
+
+    // Antipodal correction so weighted blend doesn't cancel at twisted joints.
+    if (dot(q0r, q1r) < 0.0) { q1r = -q1r; q1d = -q1d; }
+    if (dot(q0r, q2r) < 0.0) { q2r = -q2r; q2d = -q2d; }
+    if (dot(q0r, q3r) < 0.0) { q3r = -q3r; q3d = -q3d; }
+
+    vec4 blend_r = w0 * q0r + w1 * q1r + w2 * q2r + w3 * q3r;
+    vec4 blend_d = w0 * q0d + w1 * q1d + w2 * q2d + w3 * q3d;
+
+    float norm = max(length(blend_r), 1.0e-6);
+    blend_r /= norm;
+    blend_d /= norm;
+
+    vec3 rotated_p = _rotate_by_quat(p_bind, blend_r);
+    vec3 t = 2.0 * (
+        blend_r.w * blend_d.xyz - blend_d.w * blend_r.xyz
+        + cross(blend_r.xyz, blend_d.xyz)
+    );
+    vec3 world_p = rotated_p + t;
+
+    vec3 n_bind = vec3(
+        bind_normals[vid * 3u + 0u],
+        bind_normals[vid * 3u + 1u],
+        bind_normals[vid * 3u + 2u]
+    );
+    vec3 n_world = _rotate_by_quat(n_bind, blend_r);
+
+    // Collision push.
     int my_dominant = dominant_joint[vid];
-    int dom_word = my_dominant >> 5;            // / 32
+    int dom_word = my_dominant >> 5;
     uint dom_bit = 1u << uint(my_dominant & 31);
 
     for (uint c = 0u; c < u_colliderCount; ++c) {
@@ -135,12 +170,12 @@ void main() {
         if (cl.data2.w < 0.5) {
             // Sphere
             vec3 center = cl.data1.xyz;
-            vec3 delta = world_p.xyz - center;
+            vec3 delta = world_p - center;
             float dist_sq = dot(delta, delta);
             if (dist_sq < r * r) {
                 float d = sqrt(max(dist_sq, 1.0e-12));
                 vec3 norm = delta / d;
-                world_p.xyz = center + norm * r;
+                world_p = center + norm * r;
             }
         } else {
             // Capsule
@@ -149,47 +184,33 @@ void main() {
             vec3 ab = b - a;
             float ab_len_sq = dot(ab, ab);
             if (ab_len_sq > 1.0e-12) {
-                float t = clamp(dot(world_p.xyz - a, ab) / ab_len_sq, 0.0, 1.0);
-                vec3 closest = a + t * ab;
-                vec3 delta = world_p.xyz - closest;
+                float tc = clamp(dot(world_p - a, ab) / ab_len_sq, 0.0, 1.0);
+                vec3 closest = a + tc * ab;
+                vec3 delta = world_p - closest;
                 float dist_sq = dot(delta, delta);
                 if (dist_sq < r * r) {
                     float d = sqrt(max(dist_sq, 1.0e-12));
                     vec3 norm = delta / d;
-                    world_p.xyz = closest + norm * r;
+                    world_p = closest + norm * r;
                 }
             }
         }
     }
 
-    // Ground clamp — applied in world space, AFTER collider push so the
-    // collider that would have shoved a vert below ground (foot capsule
-    // sitting underground in a deep knee fold, etc.) doesn't leak through.
-    // The 1 mm clearance pushes the vert just ABOVE the floor plane so
-    // it doesn't z-fight the ground render (mirrors _FLOOR_CLEARANCE in
-    // posecascade/animation/cloth.py).
-    if (u_groundEnabled != 0u && world_p.y < u_groundY + 1.0e-3) {
-        world_p.y = u_groundY + 1.0e-3;
+    // Soft floor clamp.
+    if (u_groundEnabled != 0u) {
+        float soft_floor = u_groundY + 1.0e-3 - u_groundTolerance;
+        if (world_p.y < soft_floor) {
+            world_p.y = soft_floor;
+        }
     }
 
-    // World → mesh-local so the renderer's existing model-matrix uniform
-    // produces correct final world positions.
-    vec4 local_p = u_worldToLocal * world_p;
+    // World → mesh-local for the renderer's model-matrix uniform.
+    vec4 local_p = u_worldToLocal * vec4(world_p, 1.0);
     out_positions[vid * 3u + 0u] = local_p.x;
     out_positions[vid * 3u + 1u] = local_p.y;
     out_positions[vid * 3u + 2u] = local_p.z;
 
-    // LBS the bind-pose normal through the same combined matrix's 3x3
-    // sub-block — translation column does not apply to normals. Skip
-    // re-orthonormalisation: PBD-free passive skinning never twists hard
-    // enough for the LBS-shortened length to read off. The renderer's
-    // shader normalises on read anyway.
-    vec3 n_bind = vec3(
-        bind_normals[vid * 3u + 0u],
-        bind_normals[vid * 3u + 1u],
-        bind_normals[vid * 3u + 2u]
-    );
-    vec3 n_world = mat3(skin_mat) * n_bind;
     vec3 n_local = mat3(u_worldToLocal) * n_world;
     out_normals[vid * 3u + 0u] = n_local.x;
     out_normals[vid * 3u + 1u] = n_local.y;

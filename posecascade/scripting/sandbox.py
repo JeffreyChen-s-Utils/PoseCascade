@@ -92,6 +92,11 @@ def build_api(
         # cloth pieces + bone-following colliders without going
         # through the simpler PhysicsLite façade.
         api["cloth_host"] = cloth_host
+    # Expose the raw imported mesh list so the declarative runtime can
+    # build mesh colliders from named mesh nodes (resolve a node's
+    # MeshRefComponent.mesh_indices into actual Mesh dataclass entries).
+    if meshes:
+        api["meshes"] = meshes
     if foot_planter is not None:
         from posecascade.scripting.floor_api import FloorApi  # noqa: PLC0415
         api["floor"] = FloorApi(foot_planter, skins=skins, meshes=meshes)

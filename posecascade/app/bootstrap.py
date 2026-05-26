@@ -49,6 +49,7 @@ def run_app(scene_path: Path | None = None, script_path: Path | None = None) -> 
     services = build_services(project_root=project_root)
     window = MainWindow(services=services)
     window.viewport.set_cloth_host(services.cloth_host)
+    window.viewport.set_physics_host(services.physics_host)
     _size_window_for_screen(window)
     window.show()
 

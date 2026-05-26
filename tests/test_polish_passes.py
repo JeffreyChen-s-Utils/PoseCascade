@@ -84,6 +84,81 @@ def test_renderer_force_toon_shading_toggle_default_off() -> None:
     assert renderer._force_toon_shading is True        # noqa: SLF001
 
 
+def test_renderer_shadow_light_direction_defaults_none() -> None:
+    """A fresh renderer has no shadow-light override (shadows follow main light)."""
+    renderer = Renderer(shaders_root=_SHADERS_ROOT)
+    assert renderer._shadow_light_direction is None        # noqa: SLF001
+    assert renderer._shadow_light_direction_f32 is None    # noqa: SLF001
+
+
+def test_renderer_shadow_light_direction_setter_caches_f32() -> None:
+    """Setting an override stores both the tuple and a precomputed float32 view."""
+    renderer = Renderer(shaders_root=_SHADERS_ROOT)
+    renderer.set_shadow_light_direction((0.0, 1.0, 0.05))
+    assert renderer._shadow_light_direction == (0.0, 1.0, 0.05)    # noqa: SLF001
+    f32 = renderer._shadow_light_direction_f32                      # noqa: SLF001
+    assert f32 is not None
+    assert f32.dtype == np.float32
+    np.testing.assert_allclose(f32, [0.0, 1.0, 0.05])
+
+
+def test_renderer_shadow_light_direction_setter_clears_with_none() -> None:
+    """Passing ``None`` reverts to the main-light fallback."""
+    renderer = Renderer(shaders_root=_SHADERS_ROOT)
+    renderer.set_shadow_light_direction((1.0, 0.0, 0.0))
+    renderer.set_shadow_light_direction(None)
+    assert renderer._shadow_light_direction is None        # noqa: SLF001
+    assert renderer._shadow_light_direction_f32 is None    # noqa: SLF001
+
+
+def test_renderer_projected_shadow_max_height_defaults_positive() -> None:
+    """The contact-fade cutoff defaults to a positive value so horizontal
+    bodies don't cast unbroken full-silhouette shadows."""
+    renderer = Renderer(shaders_root=_SHADERS_ROOT)
+    assert renderer._projected_shadow_max_height > 0.0     # noqa: SLF001
+
+
+def test_renderer_projected_shadow_max_height_setter() -> None:
+    """Setter clamps negative inputs to zero and accepts positive values."""
+    renderer = Renderer(shaders_root=_SHADERS_ROOT)
+    renderer.set_projected_shadow_max_height(0.42)
+    assert renderer._projected_shadow_max_height == pytest.approx(0.42)  # noqa: SLF001
+    renderer.set_projected_shadow_max_height(-1.0)
+    assert renderer._projected_shadow_max_height == 0.0    # noqa: SLF001
+
+
+def test_shadow_projection_frag_has_height_fade() -> None:
+    """The fragment shader fades alpha by per-vertex height above ground."""
+    frag = (
+        _SHADERS_ROOT / "ground" / "shadow_projection.frag"
+    ).read_text(encoding="utf-8")
+    assert "u_shadowMaxHeight" in frag, (
+        "frag must read the contact-fade cutoff uniform"
+    )
+    assert "v_height_above_ground" in frag, (
+        "frag must consume the per-vertex height varying"
+    )
+    assert "smoothstep" in frag, (
+        "alpha fade should be a smoothstep so the edge isn't hard"
+    )
+    assert "discard" in frag, (
+        "non-contact fragments must be discarded so the long-body silhouette "
+        "doesn't show as a faint streak across the floor"
+    )
+
+
+def test_shadow_projection_vert_emits_height_varying() -> None:
+    """Both projection vertex shaders compute the per-vertex height varying."""
+    for variant in ("shadow_projection.vert", "shadow_projection_skinned.vert"):
+        vert = (_SHADERS_ROOT / "ground" / variant).read_text(encoding="utf-8")
+        assert "v_height_above_ground" in vert, (
+            f"{variant} must emit the height varying"
+        )
+        assert "world.y - u_groundY" in vert, (
+            f"{variant} must measure height above the ground plane"
+        )
+
+
 def test_default_toon_material_carries_edge_flag() -> None:
     """The synthesised MMD material opts every non-MMD mesh into the outline pass."""
     from posecascade.render.material import MAT_FLAG_HAS_EDGE  # noqa: PLC0415

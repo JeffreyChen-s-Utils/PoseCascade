@@ -48,6 +48,7 @@ U_COLOR_B = "u_colorB"
 U_FADE_START = "u_fadeStart"
 U_FADE_END = "u_fadeEnd"
 U_SHADOW_COLOR = "u_shadowColor"
+U_SHADOW_MAX_HEIGHT = "u_shadowMaxHeight"
 U_GROUND_Y = "u_groundY"
 
 # Self-shadow map (depth pass + toon sampling)

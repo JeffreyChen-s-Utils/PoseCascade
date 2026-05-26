@@ -90,6 +90,7 @@ from OpenGL.GL import (
 from posecascade.assets.types import ImportedScene, Mesh, Skin
 from posecascade.errors import GLError
 from posecascade.gl.binding import bind_vao, use_program
+from posecascade.gl.compute_hair import HairComputeDispatcher
 from posecascade.gl.compute_skin import PassiveSkinDispatcher, build_exclude_bits
 from posecascade.gl.mesh_uploader import (
     GLMesh,
@@ -135,6 +136,7 @@ from posecascade.gl.uniforms import (
     U_SHADOW_COLOR,
     U_SHADOW_ENABLED,
     U_SHADOW_MAP,
+    U_SHADOW_MAX_HEIGHT,
     U_SHADOW_STRENGTH,
     U_SPECULAR,
     U_SPECULAR_POWER,
@@ -192,6 +194,14 @@ _GROUND_FADE_END = 16.0
 # and the body's silhouette flattened onto the ground plane in the
 # vertex shader. Alpha < 1 so the checker still reads through.
 _PROJECTED_SHADOW_COLOR = (0.0, 0.0, 0.0, 0.35)
+# Vertices farther than this above the ground fade their shadow alpha
+# to zero. Keeps the projected silhouette a CONTACT effect — a
+# horizontal body (e.g. dog crawl) only casts shadow where it actually
+# touches the floor, not a full-body streak the user reads as
+# "deformed shadow." 0.30 m ≈ a forearm length; tuned to cover the
+# body parts close enough to floor to feel grounded without faking a
+# soft penumbra across the whole silhouette.
+_PROJECTED_SHADOW_MAX_HEIGHT_DEFAULT = 0.30
 # Depth-map self-shadow. The scene is rendered once from the light's
 # point of view into a depth texture, then the toon shader compares
 # each fragment's light-space depth against it. 1024² is enough to
@@ -355,6 +365,32 @@ class Renderer:
     _ground_index_count: int = field(default=0, init=False)
     _ground_enabled: bool = field(default=True, init=False)
     _projected_shadow_enabled: bool = field(default=True, init=False)
+    # Forward-skinned shader's optional floor clamp. When enabled, the
+    # vertex shader lifts any skinned position below ``floor_y - tolerance``
+    # to that soft floor — replaces the cloth-host floor clamp for meshes
+    # that aren't routed through cloth_host (e.g. body+clothes meshes
+    # the user wants rendered via clean forward DQS without paying the
+    # cloth-simulation cost on the body skin verts).
+    _forward_floor_clamp_enabled: bool = field(default=False, init=False)
+    _forward_floor_clamp_y: float = field(default=0.0, init=False)
+    _forward_floor_clamp_tolerance: float = field(default=0.0, init=False)
+    # Optional override for the projected-shadow light direction. When set,
+    # the projected-shadow pass projects along ``-_shadow_light_direction``
+    # instead of the scene's main ``_light_direction``. Lets a horizontal
+    # pose (e.g. dog_crawl) use a near-overhead direction for the shadow
+    # so the silhouette stays compact under the body, while the toon pass
+    # keeps the side-angled light for readable shading. ``None`` falls
+    # back to ``_light_direction``.
+    _shadow_light_direction: tuple[float, float, float] | None = field(
+        default=None, init=False,
+    )
+    _shadow_light_direction_f32: np.ndarray | None = field(default=None, init=False)
+    # Per-vertex height cutoff for the projected-shadow alpha fade.
+    # Larger values keep the full silhouette visible; smaller values
+    # restrict the shadow to contact regions. ``None`` = engine default.
+    _projected_shadow_max_height: float = field(
+        default=_PROJECTED_SHADOW_MAX_HEIGHT_DEFAULT, init=False,
+    )
     # Depth-map self-shadow programs + FBO. The depth pass renders all
     # opaque scene meshes from the light's POV into ``_shadow_depth_tex``
     # before the main forward pass starts; the toon program then samples
@@ -403,6 +439,24 @@ class Renderer:
     _passive_skin_dispatcher: PassiveSkinDispatcher | None = field(
         default=None, init=False,
     )
+    # GPU compute dispatcher for hair / spring chain physics. ``None``
+    # when the active GL context lacks 4.3 compute; the spring solver's
+    # CPU path remains authoritative in that case.
+    _hair_compute_dispatcher: HairComputeDispatcher | None = field(
+        default=None, init=False,
+    )
+    _hair_compute_registered_chains: set[int] = field(
+        default_factory=set, init=False,
+    )
+    # Minimum chain count to use the GPU compute path. When the user
+    # explicitly sets ``gpu_hair_compute: true`` we honour that — at
+    # threshold 1 we always go to GPU as long as the shader compiled
+    # and the chain count is non-zero. The previous default of 12 was
+    # a perf heuristic (CPU is faster for tiny chain counts), but it
+    # silently overrode user intent — a scene with 3 hair chains and
+    # ``gpu_hair_compute: true`` would still run on CPU. Honour the
+    # flag; let users profile and set their own preference.
+    _hair_compute_min_chains: int = 1
     # Per-frame, per-program uniform-state cache. GL uniform state is
     # persistent across draws within a program — once a uniform is set,
     # it stays until overwritten. The previous code re-uploaded the same
@@ -466,6 +520,14 @@ class Renderer:
         if passive_shader.is_file():
             self._passive_skin_dispatcher = PassiveSkinDispatcher.try_create(
                 passive_shader,
+            )
+        # Hair / spring chain compute dispatcher — same fall-back semantics
+        # as passive-skin: ``None`` on GL<4.3 / driver compute bugs means
+        # the CPU spring solver stays authoritative for hair.
+        hair_shader = self.shaders_root / "hair" / "hair_spring.comp"
+        if hair_shader.is_file():
+            self._hair_compute_dispatcher = HairComputeDispatcher.try_create(
+                hair_shader,
             )
 
     def _compile_shadow_programs(self, shadow_root: Path) -> None:
@@ -991,6 +1053,9 @@ class Renderer:
                 colliders=colliders,
                 exclude_bits=exclude_bits,
                 ground_y=getattr(cloth_host, "floor_y", None),
+                ground_tolerance=getattr(
+                    cloth_host, "floor_clamp_tolerance", 0.0,
+                ),
             )
 
     def set_selected_holder(self, holder: Node | None) -> None:
@@ -1003,6 +1068,137 @@ class Renderer:
         """
         self._selected_holder = holder
 
+    def apply_hair_compute(                                                  # noqa: PLR0912, PLR0915
+        self,
+        physics_host: object,
+        cloth_host: object,
+        dt: float,
+    ) -> None:
+        """Dispatch the hair-spring compute shader for every chain the
+        physics host has flagged GPU-managed.
+
+        Lifecycle: chains marked via ``physics_host.mark_gpu_managed``
+        are registered on first call (SSBOs allocated, joint state
+        packed). Each subsequent call uploads anchor + collider state +
+        ``SimConstants`` UBO, dispatches the compute pass, and reads
+        back the joint world rotations to convert to local and assign
+        back to ``Node.transform`` — same observable effect as the
+        CPU path.
+
+        ``dt`` is the simulation substep duration (typically the
+        spring sim's ``fixed_dt`` = 1/120 s).
+
+        Must run on the GL-owning thread. Idempotent across newly-added
+        chains since the prior call.
+        """
+        dispatcher = self._hair_compute_dispatcher
+        if not hasattr(physics_host, "gpu_managed_chains"):
+            return
+        chains = physics_host.gpu_managed_chains()
+        if not chains:
+            return
+        # Auto-fallback when (1) compute shader didn't compile or
+        # (2) chain count is too low for the GPU round-trip to pay off.
+        if dispatcher is None or len(chains) < self._hair_compute_min_chains:
+            reason = (
+                "compute shader unavailable"
+                if dispatcher is None
+                else f"only {len(chains)} chains (threshold {self._hair_compute_min_chains})"
+            )
+            for chain in chains:
+                chain.gpu_managed = False
+            _logger.info(
+                "renderer: hair compute disabled — %s — "
+                "%d chains fell back to CPU spring solver",
+                reason, len(chains),
+            )
+            return
+        # Re-register if the chain set has changed shape (new chain
+        # added, or first call). Cheap identity-based check.
+        chain_ids = {id(c) for c in chains}
+        if chain_ids != self._hair_compute_registered_chains:
+            dispatcher.register_chains(chains)
+            self._hair_compute_registered_chains = chain_ids
+
+        # Anchor xforms — walk parent chain on CPU once (cached) per
+        # anchor since chains share anchors.
+        from posecascade.animation.spring import node_world_pose  # noqa: PLC0415
+
+        anchor_rows: list[tuple[np.ndarray, np.ndarray]] = []
+        for chain in chains:
+            pos, rot = node_world_pose(chain.anchor)
+            anchor_rows.append((rot, pos))
+        from posecascade.gl.compute_hair import (  # noqa: PLC0415
+            pack_anchor_xforms,
+            pack_capsules,
+            pack_spheres,
+        )
+
+        anchor_xforms = pack_anchor_xforms(anchor_rows)
+
+        # Collider snapshot from cloth_host (shared with physics host).
+        spheres: list = []
+        capsules: list = []
+        if hasattr(cloth_host, "_solver"):
+            for col in cloth_host._solver.colliders:                          # noqa: SLF001
+                cn = type(col).__name__
+                if cn == "SphereCollider":
+                    spheres.append((col.center, col.radius, col.skin_offset))
+                elif cn == "CapsuleCollider":
+                    capsules.append(
+                        (col.a, col.b, col.radius, col.skin_offset),
+                    )
+        sphere_buf = pack_spheres(spheres)
+        capsule_buf = pack_capsules(capsules)
+
+        # Gravity + wind from the host's global forces.
+        gravity = np.zeros(3, dtype=np.float32)
+        wind = np.zeros(3, dtype=np.float32)
+        for force in getattr(physics_host, "_sim", physics_host).global_forces:
+            cn = type(force).__name__
+            if cn == "Gravity":
+                gravity = np.asarray(force.force, dtype=np.float32)
+            elif cn == "Wind":
+                wind = np.asarray(
+                    force.direction, dtype=np.float32,
+                ) * float(force.speed)
+
+        dispatcher.dispatch(
+            dt=dt,
+            gravity=gravity,
+            wind=wind,
+            anchor_xforms=anchor_xforms,
+            spheres=sphere_buf,
+            capsules=capsule_buf,
+        )
+
+        # Read back joint world rotations and write the new LOCAL
+        # rotation into the corresponding Node.transform so the
+        # renderer's bone matrices reflect the GPU result this frame.
+        state = dispatcher.readback_to_cpu()
+        from posecascade.utils.math3d import (  # noqa: PLC0415
+            quat_inverse,
+            quat_mul,
+            quat_normalize,
+        )
+
+        for slot, chain in zip(dispatcher.slots, chains, strict=False):
+            anchor_pos, anchor_rot = node_world_pose(chain.anchor)
+            parent_rot = anchor_rot
+            for local_i in range(slot.joint_count):
+                row = state[slot.joint_start + local_i]
+                world_rot = row[0:4].astype(np.float32)
+                world_rot = quat_normalize(world_rot)
+                new_local = quat_normalize(
+                    quat_mul(quat_inverse(parent_rot), world_rot),
+                )
+                joint = chain.joints[local_i]
+                joint.world_rotation = world_rot
+                joint.world_position = row[4:7].astype(np.float32).copy()
+                joint.angular_velocity = row[8:11].astype(np.float32).copy()
+                joint.node.transform.set_rotation(new_local)
+                parent_rot = world_rot
+
     def set_ground_enabled(self, enabled: bool) -> None:
         """Toggle the procedural checker ground + projected shadow pass."""
         self._ground_enabled = bool(enabled)
@@ -1014,6 +1210,80 @@ class Renderer:
     def set_projected_shadow_enabled(self, enabled: bool) -> None:
         """Toggle the projected ground-shadow pass independently of the ground."""
         self._projected_shadow_enabled = bool(enabled)
+
+    def set_shadow_light_direction(
+        self, direction: tuple[float, float, float] | None,
+    ) -> None:
+        """Override the light direction used by the projected-shadow pass.
+
+        Pass ``None`` to fall back to the scene's main ``_light_direction``.
+        Passing a vector decouples shadow projection from shading: the toon
+        shader keeps its side-angled light while the floor shadow is cast
+        from this direction. The vector points TOWARD the source — an
+        overhead ``(0, 1, 0)`` projects straight down, producing a compact
+        shadow under the body for horizontal poses.
+        """
+        if direction is None:
+            self._shadow_light_direction = None
+            self._shadow_light_direction_f32 = None
+            return
+        self._shadow_light_direction = (
+            float(direction[0]), float(direction[1]), float(direction[2]),
+        )
+        self._shadow_light_direction_f32 = np.asarray(
+            self._shadow_light_direction, dtype=np.float32,
+        )
+
+    def set_projected_shadow_max_height(self, height: float) -> None:
+        """Set the height-above-ground cutoff for projected-shadow alpha fade.
+
+        The shader smoothly drops a vertex's shadow alpha to zero as its
+        world-Y rises from the ground plane to ``height``. Smaller =
+        more "contact only" feel (tight shadow under hands / feet /
+        knees of a horizontal body); larger = full-silhouette shadow
+        as before. Negative or zero falls back to a very small positive
+        epsilon so the shader's smoothstep stays well defined.
+        """
+        self._projected_shadow_max_height = max(float(height), 0.0)
+
+    def set_forward_floor_clamp(
+        self,
+        floor_y: float | None,
+        tolerance: float = 0.0,
+    ) -> None:
+        """Enable / configure the forward skinned shader's soft floor clamp.
+
+        Pass ``floor_y=None`` to disable (default). Pass a Y value with an
+        optional tolerance to clamp every forward-skinned vert below
+        ``floor_y - tolerance`` up to that soft floor. Used when a mesh
+        is rendered through the forward DQS path (cloth_host not owning
+        it) but the user still wants the skirt / coat to stop at the
+        ground rather than sink through it.
+        """
+        if floor_y is None:
+            self._forward_floor_clamp_enabled = False
+            return
+        self._forward_floor_clamp_enabled = True
+        self._forward_floor_clamp_y = float(floor_y)
+        self._forward_floor_clamp_tolerance = max(float(tolerance), 0.0)
+
+    def _bind_forward_floor_clamp(self, program: Program) -> None:
+        """Upload the forward floor-clamp uniforms to ``program`` (no-op if absent)."""
+        loc_enabled = program.uniform_location("u_groundEnabled")
+        if loc_enabled < 0:
+            return
+        if self._forward_floor_clamp_enabled:
+            glUniform1i(loc_enabled, 1)
+            glUniform1f(
+                program.uniform_location("u_groundY"),
+                self._forward_floor_clamp_y,
+            )
+            glUniform1f(
+                program.uniform_location("u_groundTolerance"),
+                self._forward_floor_clamp_tolerance,
+            )
+        else:
+            glUniform1i(loc_enabled, 0)
 
     def set_self_shadow_enabled(self, enabled: bool) -> None:
         """Toggle the depth-map self-shadow pass + sampling.
@@ -1242,6 +1512,12 @@ class Renderer:
                     program.uniform_location(U_EDGE_COLOR),
                     1, np.asarray(edge_color, dtype=np.float32),
                 )
+                # Floor clamp uniforms — the outline-skinned shader inflates
+                # the silhouette along the normal, which can poke below the
+                # ground plane for downward-facing normals (foot soles,
+                # palm). Clamping in the shader stops the outline halo from
+                # leaking under the floor.
+                self._bind_forward_floor_clamp(program)
                 with bind_vao(gl_mesh.vao):
                     glDrawElements(
                         GL_TRIANGLES, gl_mesh.index_count,
@@ -1559,14 +1835,24 @@ class Renderer:
                 state = self._program_state(program)
                 if not state.lights_uploaded:
                     state.lights_uploaded = True
+                    if self._shadow_light_direction_f32 is not None:
+                        shadow_dir_f32 = self._shadow_light_direction_f32
+                    elif self._light_direction_f32 is not None:
+                        shadow_dir_f32 = self._light_direction_f32
+                    else:
+                        shadow_dir_f32 = np.asarray(
+                            self._light_direction, dtype=np.float32,
+                        )
                     glUniform3fv(
-                        program.uniform_location(U_LIGHT_DIRECTION), 1,
-                        self._light_direction_f32 if self._light_direction_f32 is not None
-                        else np.asarray(self._light_direction, dtype=np.float32),
+                        program.uniform_location(U_LIGHT_DIRECTION), 1, shadow_dir_f32,
                     )
                     glUniform1f(program.uniform_location(U_GROUND_Y), _GROUND_Y_LEVEL)
                     glUniform4fv(
                         program.uniform_location(U_SHADOW_COLOR), 1, shadow_color_f32,
+                    )
+                    glUniform1f(
+                        program.uniform_location(U_SHADOW_MAX_HEIGHT),
+                        float(self._projected_shadow_max_height),
                     )
                 self._set_geometry_uniforms(program, node, skin)
                 for mesh_id in mesh_ids:
@@ -1664,7 +1950,14 @@ class Renderer:
         self, program: Program, node: Node, skin: Skin | None,
     ) -> None:
         """Push per-draw geometry transforms — model+normal for non-skinned,
-        the bone matrix array for skinned. Both pipelines share view/proj."""
+        the bone matrix array for skinned. Both pipelines share view/proj.
+
+        Also uploads the optional forward floor-clamp uniforms (no-op for
+        programs that don't declare ``u_groundEnabled``). Centralising the
+        upload here means every skinned pass (toon, outline, shadow,
+        projected shadow) picks up the clamp without per-call wiring.
+        """
+        self._bind_forward_floor_clamp(program)
         if skin is None:
             model_matrix = _world_matrix(node)
             glUniformMatrix4fv(
@@ -1812,11 +2105,36 @@ class Renderer:
         bone_matrices = self._bone_matrices_for(skin)
         with use_program(program.program_id):
             self._set_camera_uniforms(program, view, proj)
+            # The forward skinned program now uses DQS uniforms instead of
+            # the matrix array. Fall through to the DQ upload path when the
+            # matrix uniform is absent so the shader can pick up either form
+            # gracefully — same pattern as :meth:`_upload_skin_uniforms`.
             loc_bones = program.uniform_location(U_BONE_MATRICES)
-            glUniformMatrix4fv(
-                loc_bones, bone_matrices.shape[0], GL_TRUE,
-                np.ascontiguousarray(bone_matrices, dtype=np.float32),
-            )
+            if loc_bones >= 0:
+                glUniformMatrix4fv(
+                    loc_bones, bone_matrices.shape[0], GL_TRUE,
+                    np.ascontiguousarray(bone_matrices, dtype=np.float32),
+                )
+            else:
+                dual_quats = matrices_to_dual_quaternions(bone_matrices)
+                count = dual_quats.shape[0]
+                loc_real = program.uniform_location(U_BONE_DQ_REAL)
+                loc_dual = program.uniform_location(U_BONE_DQ_DUAL)
+                if loc_real >= 0 and loc_dual >= 0:
+                    glUniform4fv(
+                        loc_real, count,
+                        np.ascontiguousarray(dual_quats[:, :4], dtype=np.float32),
+                    )
+                    glUniform4fv(
+                        loc_dual, count,
+                        np.ascontiguousarray(dual_quats[:, 4:], dtype=np.float32),
+                    )
+            # Shader-side floor clamp lets the forward skinned path keep
+            # skirt / coat above the ground even when cloth_host isn't
+            # owning the mesh as a passive_skin_deform piece (which would
+            # otherwise be the only floor clamp). Driven by the renderer's
+            # ground-plane state set via :meth:`set_forward_floor_clamp`.
+            self._bind_forward_floor_clamp(program)
             self._bind_material_uniforms(program, gl_mesh)
             with bind_vao(gl_mesh.vao):
                 glDrawElements(

@@ -59,9 +59,9 @@ def test_build_exclude_bits_caps_at_max_colliders() -> None:
     """Passing more than MAX_COLLIDERS filters caps at MAX_COLLIDERS rows of output."""
     filters = [frozenset({i}) for i in range(_MAX_COLLIDERS + 4)]
     bits = build_exclude_bits(filters, collider_count=len(filters))
-    # Bits beyond _MAX_COLLIDERS are silently truncated — only the first 16
-    # rows carry data; the slot is sized at MAX_COLLIDERS so callers can't
-    # over-run the shader's UBO.
+    # Bits beyond _MAX_COLLIDERS are silently truncated — only the first
+    # MAX_COLLIDERS rows carry data; the slot is sized at MAX_COLLIDERS
+    # so callers can't over-run the shader's UBO.
     assert bits.shape == (_MAX_COLLIDERS, _BONE_WORDS)
 
 

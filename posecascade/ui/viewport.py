@@ -66,6 +66,11 @@ class Viewport(QOpenGLWidget):
         self._scene: Scene | None = None
         self._camera: Camera = Camera()
         self._cloth_host: object | None = None
+        self._physics_host: object | None = None
+        # Substep duration used by the GPU hair compute dispatcher.
+        # Matches the spring solver's ``_DEFAULT_FIXED_DT``; callers can
+        # override via :meth:`set_hair_compute_dt`.
+        self._hair_compute_dt: float = 1.0 / 120.0
         self._shaders_root: Path = _detect_shaders_root()
         self._drag_mode: str = _DRAG_NONE
         self._last_mouse_xy: tuple[int, int] | None = None
@@ -88,6 +93,19 @@ class Viewport(QOpenGLWidget):
     def set_cloth_host(self, host: object | None) -> None:
         """Bind a cloth simulator so per-frame paintGL streams its positions to GPU."""
         self._cloth_host = host
+
+    def set_physics_host(self, host: object | None) -> None:
+        """Bind a physics host so per-frame paintGL can dispatch GPU
+        compute for any GPU-managed spring chains. Same threading
+        contract as :meth:`set_cloth_host` — call from the main thread,
+        actual GL work happens on the GL-owning thread."""
+        self._physics_host = host
+
+    def set_hair_compute_dt(self, dt: float) -> None:
+        """Override the substep duration the GPU hair compute path
+        uses. Default 1/120 s matches the CPU spring solver."""
+        if dt > 0:
+            self._hair_compute_dt = float(dt)
 
     @property
     def scene(self) -> Scene | None:
@@ -138,6 +156,10 @@ class Viewport(QOpenGLWidget):
             return
         if self._cloth_host is not None:
             self._renderer.apply_cloth_state(self._cloth_host)
+        if self._physics_host is not None and self._cloth_host is not None:
+            self._renderer.apply_hair_compute(
+                self._physics_host, self._cloth_host, self._hair_compute_dt,
+            )
         size = self.size()
         self._renderer.draw(
             self._scene,

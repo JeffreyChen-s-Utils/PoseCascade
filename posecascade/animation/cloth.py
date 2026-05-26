@@ -35,15 +35,30 @@ except ImportError:                                                         # pr
     _native = None
 
 _NUMERIC_EPSILON = 1.0e-8
-# Tiny lift applied above ``ground_y`` when the floor clamp fires so the
-# clamped vertex lands JUST above the floor plane instead of exactly on it.
-# Without this, a clamped vert and the floor's renderable surface both sit
-# at world Y == ground_y and the depth test flickers between them — visible
-# as a thin slice of cloth/skin "peeking through" the floor from grazing
-# camera angles. 1 mm is below visible scale for human-figure assets but
-# well above any float-precision noise from the world→local→world round
-# trip inside the GPU compute path.
-_FLOOR_CLEARANCE = 1.0e-3
+# Lift applied above ``ground_y`` when the floor clamp fires so the
+# clamped vertex lands cleanly above the floor plane instead of inside it.
+# Without sufficient clearance, the clamped vert sits within a fraction of
+# a millimetre of the floor's renderable surface and the depth test
+# flickers between them frame-to-frame — visible as ghosting / residual
+# strobing on whichever cloth surface is touching the floor.
+#
+# 1 cm: the value the prone / kneeling / dog-crawl poses need. PBD with
+# 6 iterations + 2 substeps per frame leaves a residual ~3-5 mm vertical
+# wobble on contact verts (gravity pushes them down, distance constraint
+# pulls them back up). 5 mm clearance still let the wobble dip into the
+# z-fight zone of the floor's shader; 1 cm puts the trough of the wobble
+# safely above. Cost: cloth that should look "draped on the ground"
+# floats a visible centimetre off, but at typical camera distances
+# (≥ 1 m) that's indistinguishable from contact thanks to the
+# perspective foreshortening.
+_FLOOR_CLEARANCE = 2.0e-2
+# Fraction of tangential (XZ) velocity that survives one floor contact.
+# 0 = full stop (cloth glues to floor immediately), 1 = no friction.
+# 0.05 = very strong friction — contact verts effectively don't slide;
+# the rest of the cloth swings around them as if the floor were
+# Velcro. Lower than 0.10 because the dog-crawl coat tail kept showing
+# residual ghosting from sub-mm tangential drift at 0.10.
+_FLOOR_FRICTION_RETENTION = 0.05
 _DEFAULT_GRAVITY = (0.0, -9.8, 0.0)
 _DEFAULT_LINEAR_DAMPING = 0.985
 _DEFAULT_STRUCTURAL_STIFFNESS = 0.85
@@ -139,6 +154,11 @@ class SphereCollider:
     radius: float
     skin_offset: float = 0.005  # extra clearance so verts don't tangent-graze the sphere
     prev_center: Vec3 | None = None
+    # Optional tag = the ``follow_bone`` the collider was created for.
+    # Spring chains use this to match colliders for the attract-to-surface
+    # pass (``SpringChain.attract_to_bones``). Empty string = collider was
+    # created without a bone reference (e.g. test fixture).
+    bone_tag: str = ""
 
 
 @dataclass
@@ -157,6 +177,312 @@ class CapsuleCollider:
     skin_offset: float = 0.005
     prev_a: Vec3 | None = None
     prev_b: Vec3 | None = None
+    # Optional tag = the ``follow_bone`` the collider was created for.
+    # Spring chains use this to match colliders for the attract-to-surface
+    # pass (``SpringChain.attract_to_bones``). Empty string = collider was
+    # created without a bone reference (e.g. test fixture).
+    bone_tag: str = ""
+
+
+@dataclass
+class MeshCollider:
+    """Skinned triangle mesh collider — hair joints near the surface get pushed
+    out to a triangle-normal offset.
+
+    Unlike sphere / capsule colliders that approximate the body with primitives,
+    this collider walks ACTUAL triangles of the body mesh so concave / oblong
+    regions (hat brim, jaw line, shoulder slope) are honoured. The mesh updates
+    its world-space vertex positions every frame from the skin matrix palette
+    so a posed body shape stays in sync with the rest of the rig.
+
+    ``triangle_world_positions`` is filled by ``update_world_positions(palette)``
+    each frame — store the bind-pose verts + bone indices + bone weights on
+    instance creation and re-skin them per frame. ``triangle_world_normals``
+    is recomputed alongside.
+    """
+
+    # Static data — populated once at construction:
+    bind_positions: object  # (V, 3) float32 — bind-pose vertex positions
+    bind_normals: object    # (V, 3) float32 — bind-pose vertex normals
+    joints: object          # (V, 4) uint16  — bone indices per vertex
+    weights: object         # (V, 4) float32 — bone weights per vertex
+    indices: object         # (T, 3) int32   — triangle vertex indices
+    skin_offset: float = 0.01
+
+    # Per-frame, refreshed by update_world_positions:
+    triangle_world_positions: object | None = None  # (T, 3, 3)
+    triangle_world_normals: object | None = None    # (T, 3)
+    triangle_aabb_min: object | None = None         # (T, 3) per-triangle AABB
+    triangle_aabb_max: object | None = None         # (T, 3)
+    aabb_min: object | None = None                  # (3,) overall mesh AABB
+    aabb_max: object | None = None
+    # Spatial hash for O(1) avg per-query triangle lookup. ``grid_origin``
+    # and ``grid_cell_size`` describe the uniform grid; ``grid_cells`` is a
+    # dict mapping (i, j, k) integer cell coordinates → np.ndarray of
+    # triangle indices that overlap that cell.
+    grid_origin: object | None = None      # (3,) float32
+    grid_cell_size: float = 0.0
+    grid_cells: object | None = None       # dict[(int,int,int), ndarray]
+    # Bumped each time ``update_world_positions`` re-skins; spring joints
+    # cache their last mesh test by this version + position so a stable
+    # pose hits cache instead of re-running closest-point per substep.
+    update_version: int = 0
+
+
+@dataclass
+class SDFCollider:
+    """Signed distance field collider — VTuber Magica Cloth-style.
+
+    Bake a uniform 3D voxel grid where each voxel stores the signed
+    distance from its center to the nearest mesh triangle (positive
+    outside, negative inside). Spring solver queries via trilinear
+    interpolation: 8 voxel reads + lerps = O(1) per query, vs O(T)
+    closest-point on the mesh-collider equivalent.
+
+    Per-frame, the host re-bakes the SDF when the source mesh has moved
+    significantly (otherwise reuses the cached field — body bones are
+    usually stable across most poses). Query is sub-microsecond so
+    push-out works for spring chains with no substep budget impact.
+
+    Limitations:
+      - Voxel size determines surface sharpness. Default 2 cm gives
+        good push-out for hair / cloth on a metre-scale humanoid.
+      - Bake cost is O(V_voxels × T_triangles) up-front — for a 100³
+        grid + 30 k triangles that's ~5-10 s, but only on initial load
+        or when the host explicitly asks for a re-bake.
+      - For animated bodies, baking every frame is too slow. The host
+        is expected to re-bake only on significant pose change.
+    """
+
+    grid: object                # (Nx, Ny, Nz) float32 signed distance
+    grid_origin: object         # (3,) float32 — world position of voxel (0,0,0)
+    voxel_size: float           # m
+    skin_offset: float = 0.01
+    # Bumped on re-bake so per-joint caches can invalidate.
+    update_version: int = 0
+
+
+def bake_sdf_from_triangles(
+    triangles: NDArray[np.float32],
+    voxel_size: float = 0.02,
+    padding: float = 0.05,
+    skin_offset: float = 0.02,
+) -> SDFCollider:
+    """Bake a signed distance field from a triangle soup.
+
+    Voxelises the mesh's AABB (padded) at ``voxel_size`` resolution and
+    fills each voxel with the signed distance to the nearest triangle.
+    Sign is determined by ray-casting along world +X: an odd number of
+    ray-triangle intersections to the +X boundary means the voxel is
+    INSIDE the mesh (negative distance).
+
+    Parameters
+    ----------
+    triangles
+        ``(T, 3, 3)`` array of triangle vertex positions in world space.
+    voxel_size
+        Side length of each voxel. 2 cm gives sub-cm surface accuracy
+        and ~2-5 MB grid memory on a humanoid-scale mesh.
+    padding
+        Extra metres around the mesh AABB so push-out works for points
+        slightly outside the original mesh bounds.
+    skin_offset
+        Default push-out threshold the spring solver uses against this
+        collider. Override on the returned :class:`SDFCollider` instance
+        if a script needs a different keep-out distance.
+
+    Returns
+    -------
+    SDFCollider
+        Ready to register with the cloth host / spring chain solver.
+    """
+    if triangles.ndim != 3 or triangles.shape[1:] != (3, 3):                # noqa: PLR2004
+        raise ValueError(
+            f"triangles must be shape (T, 3, 3), got {triangles.shape}",
+        )
+    # Voxel grid covers the padded AABB.
+    aabb_min = triangles.reshape(-1, 3).min(axis=0) - padding
+    aabb_max = triangles.reshape(-1, 3).max(axis=0) + padding
+    dims = np.ceil((aabb_max - aabb_min) / voxel_size).astype(np.int32)
+    nx, ny, nz = int(dims[0]), int(dims[1]), int(dims[2])
+    # Center of each voxel — used as the sample point for distance.
+    xs = aabb_min[0] + (np.arange(nx, dtype=np.float32) + 0.5) * voxel_size
+    ys = aabb_min[1] + (np.arange(ny, dtype=np.float32) + 0.5) * voxel_size
+    zs = aabb_min[2] + (np.arange(nz, dtype=np.float32) + 0.5) * voxel_size
+    xx, yy, zz = np.meshgrid(xs, ys, zs, indexing="ij")
+    voxel_centers = np.stack([xx, yy, zz], axis=-1).reshape(-1, 3)
+    grid = np.empty((nx, ny, nz), dtype=np.float32)
+    flat = _bake_sdf_kernel(voxel_centers, triangles)
+    grid[:] = flat.reshape(nx, ny, nz)
+    return SDFCollider(
+        grid=grid,
+        grid_origin=aabb_min.astype(np.float32),
+        voxel_size=float(voxel_size),
+        skin_offset=float(skin_offset),
+    )
+
+
+def _bake_sdf_kernel(                                                        # noqa: PLR0915
+    voxel_centers: NDArray[np.float32],
+    triangles: NDArray[np.float32],
+) -> NDArray[np.float32]:
+    """Compute signed distance from every voxel centre to the mesh.
+
+    Uses a KD-tree of triangle centroids to find the K nearest candidate
+    triangles per voxel (instead of evaluating against ALL triangles).
+    Drops bake complexity from O(V × T) to O(V × (log T + K)) — at K=24
+    on a 13 k-tri mesh that's a ~500× win.
+
+    Two-stage:
+      1. Distance pass — KD-tree query for K nearest triangle centroids,
+         vectorised closest-point on triangle for those K, min distance.
+      2. Parity pass — only voxels within 3 voxel widths of the mesh
+         need the inside/outside ray-cast.
+    """
+    from scipy.spatial import cKDTree  # noqa: PLC0415
+
+    n_voxels = len(voxel_centers)
+    v0 = triangles[:, 0]
+    v1 = triangles[:, 1]
+    v2 = triangles[:, 2]
+    edge0 = v1 - v0
+    edge1 = v2 - v0
+    centroids = triangles.mean(axis=1)
+    tree = cKDTree(centroids)
+    a = np.einsum("ti,ti->t", edge0, edge0)
+    b = np.einsum("ti,ti->t", edge0, edge1)
+    c = np.einsum("ti,ti->t", edge1, edge1)
+
+    # K — how many nearest triangle candidates each voxel evaluates
+    # against. 24 is empirically enough to find the true closest tri
+    # for ~all voxels on a well-tessellated humanoid mesh; bumping to
+    # 48 catches the few outliers near sharp concavities at ~2× cost.
+    k = min(24, len(triangles))
+
+    out = np.empty(n_voxels, dtype=np.float32)
+    # Chunked KD-tree query keeps the (chunk, K, 3) intermediate within
+    # ~100 MB even on giant meshes.
+    chunk = 8192
+    for chunk_start in range(0, n_voxels, chunk):
+        end = min(chunk_start + chunk, n_voxels)
+        p = voxel_centers[chunk_start:end]                                   # (C, 3)
+        # (C, K) indices into triangles array.
+        _, idx = tree.query(p, k=k)
+        if k == 1:
+            idx = idx[:, None]
+        # Gather per-voxel K triangle vertices.
+        v0_k = v0[idx]                                                       # (C, K, 3)
+        edge0_k = edge0[idx]
+        edge1_k = edge1[idx]
+        a_k = a[idx]                                                         # (C, K)
+        b_k = b[idx]
+        c_k = c[idx]
+        det_k = a_k * c_k - b_k * b_k
+        safe_det = np.where(np.abs(det_k) < 1.0e-10, 1.0, det_k)             # noqa: PLR2004
+        v0_to_p = p[:, None, :] - v0_k                                       # (C, K, 3)
+        d = np.einsum("ckj,ckj->ck", v0_to_p, edge0_k)
+        e = np.einsum("ckj,ckj->ck", v0_to_p, edge1_k)
+        s = (b_k * e - c_k * d) / safe_det
+        t = (b_k * d - a_k * e) / safe_det
+        s = np.clip(s, 0.0, 1.0)
+        t = np.clip(t, 0.0, 1.0)
+        over = s + t > 1.0
+        if np.any(over):
+            sum_st = s + t
+            scale = np.where(over, 1.0 / np.where(over, sum_st, 1.0), 1.0)
+            s = np.where(over, s * scale, s)
+            t = np.where(over, t * scale, t)
+        closest = v0_k + edge0_k * s[..., None] + edge1_k * t[..., None]
+        deltas = closest - p[:, None, :]
+        dist_sq = np.einsum("ckj,ckj->ck", deltas, deltas)
+        nearest_dist_sq = dist_sq.min(axis=1)
+        out[chunk_start:end] = np.sqrt(nearest_dist_sq)
+
+    # Parity in two stages:
+    #   1. Ray-cast for voxels within the surface band (cheap: ~6×
+    #      voxel-side wide, typically 10-20 % of the grid).
+    #   2. For non-band voxels, inherit the sign of their nearest band
+    #      voxel via KD-tree lookup. For closed meshes this is correct
+    #      (interior connectivity preserves sign); the band test on the
+    #      unit-cube interior passes because the nearest band voxel is
+    #      itself inside.
+    voxel_side = float(np.linalg.norm(
+        voxel_centers[1] - voxel_centers[0],
+    )) if n_voxels > 1 else 0.02
+    parity_band = voxel_side * 6.0
+    band_mask = out < parity_band
+    inside_full = np.zeros(n_voxels, dtype=bool)
+    if band_mask.any():
+        band_points = voxel_centers[band_mask]
+        band_inside = _parity_inside(band_points, v0, v1, v2)
+        inside_full[band_mask] = band_inside
+        outside_mask = ~band_mask
+        if outside_mask.any():
+            band_tree = cKDTree(band_points)
+            _, nearest_band_idx = band_tree.query(voxel_centers[outside_mask])
+            inside_full[outside_mask] = band_inside[nearest_band_idx]
+    return np.where(inside_full, -out, out)
+
+
+def _parity_inside(
+    points: NDArray[np.float32],
+    v0: NDArray[np.float32],
+    v1: NDArray[np.float32],
+    v2: NDArray[np.float32],
+) -> NDArray[np.bool_]:
+    """Ray-cast each point along world +X, count odd intersections.
+
+    Uses a 2D (Y-Z) KD-tree on triangle centroids to prune candidate
+    triangles. Only the K=64 nearest centroids per point are tested
+    — for closed humanoid meshes this is more than enough to cover
+    every triangle whose Y-Z bbox contains the point's ray, and it
+    turns the O(V × T) parity sweep into O(V × (log T + K)).
+
+    Strict inequalities (s > 0, t > 0, s + t < 1) avoid double-
+    counting shared edges.
+    """
+    from scipy.spatial import cKDTree  # noqa: PLC0415
+
+    eps = 1.0e-6
+    pts = points.copy()
+    pts[:, 1] += eps
+    pts[:, 2] += eps * 0.5
+    n_tri = len(v0)
+    if n_tri == 0:
+        return np.zeros(len(pts), dtype=bool)
+
+    centroids_yz = (v0[:, 1:] + v1[:, 1:] + v2[:, 1:]) / 3.0
+    tree = cKDTree(centroids_yz)
+    k = min(64, n_tri)
+
+    n_pts = len(pts)
+    hit_counts = np.zeros(n_pts, dtype=np.int32)
+
+    # Chunked KD-tree query — (chunk, K) candidate indices.
+    chunk = 16384
+    for cs in range(0, n_pts, chunk):
+        ce = min(cs + chunk, n_pts)
+        p = pts[cs:ce]
+        _, idx = tree.query(p[:, 1:], k=k)
+        if k == 1:
+            idx = idx[:, None]
+        v0_k = v0[idx]                                                       # (C, K, 3)
+        v1_k = v1[idx]
+        v2_k = v2[idx]
+        v0_yz = v0_k[..., 1:]
+        edge0_yz = v1_k[..., 1:] - v0_yz
+        edge1_yz = v2_k[..., 1:] - v0_yz
+        p_to_v0 = p[:, None, 1:] - v0_yz
+        denom = edge0_yz[..., 0] * edge1_yz[..., 1] - edge0_yz[..., 1] * edge1_yz[..., 0]
+        safe = np.where(np.abs(denom) < 1.0e-12, 1.0, denom)                 # noqa: PLR2004
+        s = (p_to_v0[..., 0] * edge1_yz[..., 1] - p_to_v0[..., 1] * edge1_yz[..., 0]) / safe
+        t = (edge0_yz[..., 0] * p_to_v0[..., 1] - edge0_yz[..., 1] * p_to_v0[..., 0]) / safe
+        inside_tri = (s > 0) & (t > 0) & (s + t < 1) & (np.abs(denom) > 1.0e-12)  # noqa: PLR2004
+        x_hit = v0_k[..., 0] + (v1_k[..., 0] - v0_k[..., 0]) * s + (v2_k[..., 0] - v0_k[..., 0]) * t
+        forward = x_hit > p[:, None, 0]
+        hits = inside_tri & forward
+        hit_counts[cs:ce] = hits.sum(axis=1)
+    return hit_counts % 2 == 1
 
 
 @dataclass
@@ -187,6 +513,21 @@ class ClothParams:
     # dynamics — e.g. to stop dress / hair / sleeve verts from clipping
     # into the torso during animation without re-rigging the asset.
     passive_skin_deform: bool = False
+    # Attract-to-surface: tuple of collider ``bone_tag`` strings whose
+    # surfaces this piece's verts should be pulled ONTO (not pushed
+    # AWAY from). Runs AFTER the existing collider push-out so the
+    # combined effect is "snap each vert to the nearest named surface
+    # within ``attract_max_distance``" — verts that were inside the
+    # body still get pushed out first, then attract pulls verts that
+    # are close-but-outside ONTO the surface. Smooths skirt / cape
+    # drape onto torso capsules without the spiky 'every vert kicked
+    # individually' look that pure push-out produces. Empty = off.
+    attract_to_bones: tuple[str, ...] = ()
+    # Maximum distance from vert to collider surface beyond which the
+    # attract pass does NOT pull. Keeps faraway colliders from yanking
+    # the cloth unrealistically. 0.10 m = 10 cm — typical reach for a
+    # skirt-on-hips scenario.
+    attract_max_distance: float = 0.10
 
 
 @dataclass
@@ -215,6 +556,14 @@ class ClothPiece:
     triangles: NDArray[np.uint32]               # (T, 3) — for normal recomputation
     params: ClothParams = field(default_factory=ClothParams)
     enabled: bool = True
+    # When ``True`` the solver SKIPS this piece (no integration, no
+    # constraint projection, no collider push) but the renderer keeps
+    # uploading the current ``positions`` to the GL VBO every frame.
+    # Lets a per-pose drape snapshot lock the cloth in place — like
+    # HoYoverse's "pose snapshot wins" cinematic cloth — without losing
+    # the visual. Use :attr:`enabled = False` to drop the piece from
+    # rendering as well (typical for permanent removal).
+    frozen: bool = False
     # Pre-converted ``np.intp`` views of the edge / bend index columns.
     # ``np.bincount`` and fancy indexing require ``intp`` weights, and the
     # implicit ``uint32 → intp`` copy used to happen inside the PBD inner
@@ -510,6 +859,13 @@ class ClothSolver:
     fixed_dt: float = _DEFAULT_FIXED_DT
     time: float = 0.0
     ground_y: float | None = None
+    # Soft-floor tolerance for passive_skin_deform pieces (metres). When
+    # > 0, skin verts can dip up to this far below ``ground_y`` before
+    # being clamped — trades a small amount of visible mesh-through-floor
+    # for skinning curvature preservation in horizontal poses (dog-crawl
+    # calf, prone elbow). Defaults to 0 (hard snap to floor) so existing
+    # animations keep their current behaviour.
+    ground_tolerance: float = 0.0
 
     def add_piece(self, piece: ClothPiece) -> None:
         self.pieces.append(piece)
@@ -530,6 +886,17 @@ class ClothSolver:
         """Set or clear the ground-plane Y clamp. ``None`` disables it."""
         self.ground_y = None if ground_y is None else float(ground_y)
 
+    def set_ground_tolerance(self, tolerance: float) -> None:
+        """Set the soft-floor tolerance for passive-skin-deform pieces.
+
+        Negative values are clamped to 0. With tolerance = 0 (default) the
+        floor clamp hard-snaps every below-floor vert to ``ground_y``,
+        producing the pancake silhouette that's visible on the calf / palm
+        in horizontal poses. Larger values let the mesh dip naturally and
+        preserve curvature.
+        """
+        self.ground_tolerance = max(float(tolerance), 0.0)
+
     def step(self, dt: float) -> None:
         """Advance every cloth piece by ``dt`` seconds."""
         if dt <= 0.0:
@@ -543,21 +910,25 @@ class ClothSolver:
 
     def _step_once(self, dt: float) -> None:
         for piece in self.pieces:
-            if piece.enabled:
+            if piece.enabled and not piece.frozen:
                 _integrate_piece(
                     piece, dt, self.time, self.forces, self.colliders,
                     ground_y=self.ground_y,
+                    ground_tolerance=(
+                        self.ground_tolerance if piece.params.passive_skin_deform else 0.0
+                    ),
                 )
         self.time += dt
 
 
-def _integrate_piece(
+def _integrate_piece(  # noqa: PLR0913
     piece: ClothPiece,
     dt: float,
     time: float,
     forces: Sequence[ClothForce],
     colliders: Sequence[object],
     ground_y: float | None = None,
+    ground_tolerance: float = 0.0,
 ) -> None:
     """One Verlet step + N constraint iterations + collider projection."""
     if piece.params.passive_skin_deform:
@@ -571,7 +942,8 @@ def _integrate_piece(
         np.copyto(piece.positions, piece.rest_positions)
         if ground_y is not None:
             _project_ground_plane(
-                piece.positions, piece.prev_positions, piece.inverse_masses, ground_y,
+                piece.positions, piece.prev_positions, piece.inverse_masses,
+                ground_y, ground_tolerance,
             )
         return
     inv_mass = piece.inverse_masses[:, None]
@@ -617,6 +989,19 @@ def _integrate_piece(
     bin_aabbs = _compute_bin_aabbs(piece)
     collider_aabbs = [_collider_aabb_tuple(c) for c in colliders] if colliders else None
     for _ in range(piece.params.iterations):
+        # Floor projection FIRST so distance/bend constraints in the
+        # same iteration see the floor-clamped positions and adjust
+        # neighbouring verts to satisfy edge length around the clamped
+        # ones. Reversing the order (floor last) made distance
+        # constraints pull clamped verts back below floor each
+        # iteration, then the late floor pass snapped them back up —
+        # repeating mid-substep produces the visible "ghosting" /
+        # "shimmering" the user reported at floor contact patches.
+        if ground_y is not None:
+            _project_ground_plane(
+                piece.positions, piece.prev_positions, piece.inverse_masses,
+                ground_y, ground_tolerance,
+            )
         _solve_distance_constraints(
             piece.positions,
             piece._edge_a_idx,
@@ -645,10 +1030,16 @@ def _integrate_piece(
             bin_aabbs=bin_aabbs,
             collider_aabbs=collider_aabbs,
         )
-        if ground_y is not None:
-            _project_ground_plane(
-                piece.positions, piece.prev_positions, piece.inverse_masses, ground_y,
-            )
+    # FINAL floor clamp after all PBD iterations so any constraint
+    # correction that pulled a vert back below floor in the last pass
+    # gets snapped + friction-locked one last time before the substep
+    # ends. This is the position that propagates to the next substep's
+    # Verlet integration, so it must be conflict-free.
+    if ground_y is not None:
+        _project_ground_plane(
+            piece.positions, piece.prev_positions, piece.inverse_masses,
+            ground_y, ground_tolerance,
+        )
 
 
 def _accumulate_force(
@@ -913,8 +1304,9 @@ def _project_ground_plane(
     prev_positions: NDArray[np.float32],
     inverse_masses: NDArray[np.float32],
     ground_y: float,
+    ground_tolerance: float = 0.0,
 ) -> None:
-    """Clamp movable vertex Y to stay at or above ``ground_y``.
+    """Clamp movable vertex Y to stay at or above ``ground_y - ground_tolerance``.
 
     Mirrors the projection into ``prev_positions`` so the next Verlet step
     doesn't read the lift as downward velocity — same pattern as the
@@ -922,20 +1314,50 @@ def _project_ground_plane(
     left alone; they're typically waistband / collar verts pinned to the
     rig and the rig is what should be moved if the anchors are below the
     floor, not the cloth's own correction pass.
+
+    ``ground_tolerance`` (>= 0) lets verts dip up to that distance below the
+    visible floor before being clamped, which preserves skinning curvature
+    in horizontal poses (dog-crawl calf, prone elbow) instead of pancaking
+    every below-floor vert into a single flat plane. Defaults to 0 (hard
+    snap to ``ground_y + clearance``) so existing call sites keep their
+    previous behaviour.
     """
     movable = inverse_masses > 0.0
     if not np.any(movable):
         return
-    floor_y = ground_y + _FLOOR_CLEARANCE
+    # ``soft_floor`` lets the vert dip up to ``ground_tolerance`` below the
+    # visible ground before being clamped. Tolerance = 0 is the hard snap
+    # (default). Tolerance > 0 trades a small amount of visible
+    # mesh-through-floor for skinning curvature preservation — verts no
+    # longer pancake to a single flat plane in horizontal poses.
+    floor_y = ground_y + _FLOOR_CLEARANCE - max(float(ground_tolerance), 0.0)
     y = positions[:, 1]
     below = movable & (y < floor_y)
     if not np.any(below):
         return
     lift = floor_y - y[below]
     positions[below, 1] = floor_y
-    # Carry the lift into prev_positions so velocity = pos - prev keeps the
-    # tangential component but zeroes the normal (vertical) component.
+    # Carry the lift into prev_positions so velocity = pos - prev zeroes the
+    # normal (vertical) velocity component. Without this the next Verlet
+    # step would read the lift as downward velocity and push the vert back
+    # below floor next frame — strobing.
     prev_positions[below, 1] = prev_positions[below, 1] + lift
+    # Apply STATIC FRICTION on the tangential (XZ) velocity for verts in
+    # contact with the floor. Without this, cloth tips slide along the
+    # floor frame-to-frame from any residual tangential momentum or PBD
+    # constraint correction — visible as cloth "shimmering" or fabric
+    # ghosting at the contact patch. Damping the tangential velocity to
+    # ``_FLOOR_FRICTION_RETENTION`` of its prior value mimics static
+    # friction strong enough to lock the contact in place but loose
+    # enough that a moving anchor can still drag the cloth.
+    prev_positions[below, 0] = (
+        positions[below, 0]
+        - (positions[below, 0] - prev_positions[below, 0]) * _FLOOR_FRICTION_RETENTION
+    )
+    prev_positions[below, 2] = (
+        positions[below, 2]
+        - (positions[below, 2] - prev_positions[below, 2]) * _FLOOR_FRICTION_RETENTION
+    )
 
 
 def _project_colliders(

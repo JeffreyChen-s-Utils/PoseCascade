@@ -460,6 +460,70 @@ JSON document can target rigs with different naming conventions
 (VRoid `J_Bip_*` vs Sketchfab `upper_arm_L` etc.) by remapping in one
 place.
 
+### floor_align
+
+```json
+"floor_align": ["hand_L", "hand_R", "foot_L", "foot_R"]
+```
+
+Locks each listed end-effector flat to the floor after IK has placed
+it. Two axes are aligned simultaneously:
+
+- The bone's rest "contact normal" (palm normal for `hand_*`, sole
+  normal for `foot_*` — detected from the rest-world rotation) is
+  rotated to point world `-Y`.
+- The bone's local "toward-first-child" direction (toward fingertip /
+  toe) is rotated to lie along the horizontal projection of the
+  parent-joint→bone direction (elbow→wrist for hands, knee→ankle for
+  feet).
+
+Result: palms / soles stay on the floor with fingers / toes
+pointing along the chain's extension, regardless of how deeply the
+upstream IK rotated the elbow / knee. Use this for poses with
+horizontal lower-arms or lower-legs (dog crawl, prone, push-up,
+kneeling) instead of trying to compose a manual ankle rotation in
+`bones_local` — the manual route composes on top of the bind-pose
+rest tilt and is rig-specific.
+
+You can also pass entries as `[bone_key, [toe_world_xyz], [sole_world_xyz]]`
+to pin the toe and sole world directions explicitly when the
+auto-derived chain extension lies near-vertical (rare).
+
+### hair_pose
+
+```json
+"hair_pose": {
+  "BackHairUpper": [
+    [0.0, -0.4, -0.92],
+    [0.0, -0.75, -0.66],
+    [0.0, -0.95, -0.31],
+    [0.0, -1.0,  0.0]
+  ],
+  "BackHair_L": [
+    [+0.35, -0.55, -0.76],
+    [+0.45, -0.75, -0.49],
+    [+0.40, -0.90, -0.17],
+    [+0.25, -0.95,  0.18],
+    [+0.15, -0.50,  0.85]
+  ]
+}
+```
+
+Scripted per-joint hair direction. Each entry is a list of 3-tuples,
+one per chain joint (root → tip). Each tuple is the WORLD direction
+that joint's bone should point. Chains listed here have their physics
+DISABLED — the runtime writes the authored direction directly as a
+local bone rotation every frame after IK + floor_align.
+
+Use this for extreme poses (dog crawl, prone, hand-stand) where the
+chain anchor sits inside a body capsule and pure physics can't route
+the chain around the body in the look you want. The pattern is the
+same one commercial anime engines use for cutscene hair: physics is
+the default, hand-authored FK overrides for specific poses ("animation
+wins").
+
+Vectors are normalised at runtime; magnitudes don't matter.
+
 ## Value curves
 
 A curve is one of:

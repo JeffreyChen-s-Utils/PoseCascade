@@ -23,6 +23,8 @@ uniform mat4 u_projMatrix;
 uniform vec3 u_lightDirection;
 uniform float u_groundY;
 
+out float v_height_above_ground;
+
 const float _MIN_LIGHT_Y = 0.05;
 const float _SHADOW_Y_OFFSET = 0.001;     // lifts the shadow a hair off the
                                           // ground so it wins the z-fight
@@ -40,5 +42,10 @@ void main() {
         u_groundY + _SHADOW_Y_OFFSET,
         world.z - t * u_lightDirection.z
     );
+    // Per-vertex height above the ground plane — the fragment shader
+    // fades the silhouette alpha by this so a horizontal body (dog
+    // crawl) only casts a strong shadow near its contact points
+    // (hands / knees / feet) instead of an unbroken full-body streak.
+    v_height_above_ground = max(world.y - u_groundY, 0.0);
     gl_Position = u_projMatrix * u_viewMatrix * vec4(projected, 1.0);
 }

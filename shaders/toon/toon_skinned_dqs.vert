@@ -29,6 +29,14 @@ uniform mat4 u_viewMatrix;
 uniform mat4 u_projMatrix;
 uniform vec4 u_boneDualQuatsReal[MAX_BONES];
 uniform vec4 u_boneDualQuatsDual[MAX_BONES];
+// Optional floor clamp — see forward/skinned.vert for full rationale.
+// Same uniforms / behaviour: when ``u_groundEnabled != 0``, skinned
+// world Y below ``u_groundY - u_groundTolerance`` is lifted to that
+// soft floor. Mirrors the forward DQS path so meshes rendered through
+// the toon pipeline don't sink under the floor either.
+uniform int u_groundEnabled;
+uniform float u_groundY;
+uniform float u_groundTolerance;
 
 out vec3 v_normal_world;
 out vec3 v_normal_view;
@@ -73,6 +81,13 @@ void main() {
         + cross(blend_r.xyz, blend_d.xyz)
     );
     vec3 world_pos = rotated_p + t;
+    if (u_groundEnabled != 0) {
+        // 1 mm z-fight epsilon — see forward/skinned.vert for rationale.
+        float soft_floor = u_groundY - u_groundTolerance + 0.001;
+        if (world_pos.y < soft_floor) {
+            world_pos.y = soft_floor;
+        }
+    }
 
     vec3 rotated_n = _rotate_by_quat(a_normal, blend_r);
     vec3 n_world = normalize(rotated_n);

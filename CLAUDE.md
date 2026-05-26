@@ -40,6 +40,28 @@ PoseCascade/
 └── .bandit                       # canonical bandit skip list
 ```
 
+## Subagents — consult BEFORE editing
+
+This project ships specialised subagents under `.claude/agents/` that
+encode load-bearing engine quirks. **READ the relevant subagent file
+before touching the code it covers** — these documents exist because
+each rule was paid for with a debug cycle on a real bug, and the
+gotchas are not visible from the source alone.
+
+Current subagents:
+
+- **`.claude/agents/animation-tuning.md`** — hair / spring chains,
+  leg-arm IK, `floor_align`, pose-specific drape JSON. Consult before
+  any edit to: `posecascade/animation/spring.py`, `posecascade/animation/ik.py`,
+  `posecascade/animation/cloth*.py`, `shaders/hair/*`, `posecascade/gl/compute_hair.py`,
+  `examples/scripts/*.json`, `posecascade/scripting/declarative.py` (IK or
+  pose blocks), or any task that mentions hair clipping, knees / feet,
+  drape, `gravity_override`, `static_drape`, `floor_align`, `bones_local`,
+  `dog_crawl` / `kneeling` / `prone` poses.
+
+The main agent should read these files itself (they're project docs,
+not spawn targets) — don't `Agent`-spawn unless the user asks.
+
 ## Definition of Done (HARD REQUIREMENT)
 
 Every feature, bug fix, refactor, or behaviour change MUST satisfy ALL of the following before it

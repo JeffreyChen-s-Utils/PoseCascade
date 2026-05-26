@@ -2525,6 +2525,222 @@ def test_projected_shadow_field_parses_false() -> None:
     assert parsed.projected_shadow is False
 
 
+def test_shadow_light_direction_defaults_to_none() -> None:
+    """Missing ``shadow_light_direction`` leaves the renderer on its main light."""
+    parsed = parse_animation(_minimal_doc())
+    assert parsed.shadow_light_direction is None
+
+
+def test_shadow_light_direction_parses_triple() -> None:
+    """A 3-element list parses into a float triple."""
+    doc = _minimal_doc()
+    doc["shadow_light_direction"] = [0.0, 1.0, 0.05]
+    parsed = parse_animation(doc)
+    assert parsed.shadow_light_direction == (0.0, 1.0, 0.05)
+
+
+def test_shadow_light_direction_rejects_wrong_length() -> None:
+    """A 2- or 4-element vector is an authoring error."""
+    doc = _minimal_doc()
+    doc["shadow_light_direction"] = [0.0, 1.0]
+    with pytest.raises(DeclarativeAnimationError, match="3-element"):
+        parse_animation(doc)
+
+
+def test_shadow_light_direction_rejects_non_numeric() -> None:
+    """Strings inside the vector raise rather than silently coercing."""
+    doc = _minimal_doc()
+    doc["shadow_light_direction"] = [0.0, "up", 0.0]
+    with pytest.raises(DeclarativeAnimationError, match="numeric"):
+        parse_animation(doc)
+
+
+def test_load_animation_forwards_shadow_light_direction_to_renderer() -> None:
+    """``load_animation`` plumbs the parsed override through ``api['renderer']``."""
+    from posecascade.scripting.declarative import load_animation  # noqa: PLC0415
+
+    class _FakeRenderer:
+        def __init__(self) -> None:
+            self.last_shadow_dir: tuple[float, float, float] | None = (
+                (9.9, 9.9, 9.9)
+            )
+            self.last_shadow_enabled: bool | None = None
+
+        def set_projected_shadow_enabled(self, enabled: bool) -> None:
+            self.last_shadow_enabled = bool(enabled)
+
+        def set_shadow_light_direction(
+            self, direction: tuple[float, float, float] | None,
+        ) -> None:
+            self.last_shadow_dir = direction
+
+    doc = _minimal_doc()
+    doc["shadow_light_direction"] = [0.0, 1.0, 0.0]
+    renderer = _FakeRenderer()
+    api: dict[str, object] = {
+        "scene": _build_minimal_scene(),
+        "time": lambda: 0.0,
+        "renderer": renderer,
+    }
+    load_animation(json.dumps(doc), "test.json", api)
+    assert renderer.last_shadow_dir == (0.0, 1.0, 0.0)
+
+
+def test_floor_align_string_entry_passes_through() -> None:
+    """A bare string in ``floor_align`` stays a string (auto-derived path)."""
+    doc = _minimal_doc()
+    doc["phases"][0]["floor_align"] = ["hand_L", "foot_L"]
+    parsed = parse_animation(doc)
+    assert parsed.phases[0].floor_align == ("hand_L", "foot_L")
+
+
+def test_floor_align_dict_entry_parses_to_tuple() -> None:
+    """``{bone, toe_world}`` becomes ``(name, (x, y, z))`` so the engine
+    can lock the secondary axis to an explicit world direction."""
+    doc = _minimal_doc()
+    doc["phases"][0]["floor_align"] = [
+        {"bone": "foot_L", "toe_world": [0.0, 0.0, -1.0]},
+    ]
+    parsed = parse_animation(doc)
+    assert parsed.phases[0].floor_align == (("foot_L", (0.0, 0.0, -1.0)),)
+
+
+def test_floor_align_dict_with_sole_world_parses_to_three_tuple() -> None:
+    """``sole_world`` makes the entry a 3-tuple so the engine can flip
+    the sole-up axis for prone / 趴伏 poses."""
+    doc = _minimal_doc()
+    doc["phases"][0]["floor_align"] = [
+        {
+            "bone": "foot_L",
+            "toe_world": [0.0, 0.0, -1.0],
+            "sole_world": [0.0, 1.0, 0.0],
+        },
+    ]
+    parsed = parse_animation(doc)
+    assert parsed.phases[0].floor_align == (
+        ("foot_L", (0.0, 0.0, -1.0), (0.0, 1.0, 0.0)),
+    )
+
+
+def test_floor_align_sequence_three_element_parses_with_sole() -> None:
+    """A 3-element list ``[name, toe, sole]`` parses to the same 3-tuple."""
+    doc = _minimal_doc()
+    doc["phases"][0]["floor_align"] = [
+        ["foot_L", [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]],
+    ]
+    parsed = parse_animation(doc)
+    assert parsed.phases[0].floor_align == (
+        ("foot_L", (0.0, 0.0, -1.0), (0.0, 1.0, 0.0)),
+    )
+
+
+def test_floor_align_dict_missing_bone_rejects() -> None:
+    """A dict entry without ``bone`` is an authoring error."""
+    doc = _minimal_doc()
+    doc["phases"][0]["floor_align"] = [{"toe_world": [0.0, 0.0, -1.0]}]
+    with pytest.raises(DeclarativeAnimationError, match="'bone'"):
+        parse_animation(doc)
+
+
+def test_floor_align_dict_missing_toe_world_rejects() -> None:
+    """A dict entry without ``toe_world`` is an authoring error."""
+    doc = _minimal_doc()
+    doc["phases"][0]["floor_align"] = [{"bone": "foot_L"}]
+    with pytest.raises(DeclarativeAnimationError, match="'toe_world'"):
+        parse_animation(doc)
+
+
+def test_floor_align_dict_toe_world_wrong_length_rejects() -> None:
+    """``toe_world`` must be a 3-element vector."""
+    doc = _minimal_doc()
+    doc["phases"][0]["floor_align"] = [
+        {"bone": "foot_L", "toe_world": [0.0, 0.0]},
+    ]
+    with pytest.raises(DeclarativeAnimationError, match="3-element"):
+        parse_animation(doc)
+
+
+def test_projected_shadow_max_height_defaults_none() -> None:
+    """Missing ``projected_shadow_max_height`` leaves the renderer on its default."""
+    parsed = parse_animation(_minimal_doc())
+    assert parsed.projected_shadow_max_height is None
+
+
+def test_projected_shadow_max_height_parses_float() -> None:
+    """Numeric values parse through to the dataclass."""
+    doc = _minimal_doc()
+    doc["projected_shadow_max_height"] = 0.25
+    parsed = parse_animation(doc)
+    assert parsed.projected_shadow_max_height == pytest.approx(0.25)
+
+
+def test_projected_shadow_max_height_rejects_string() -> None:
+    """Non-numeric values are an authoring error."""
+    doc = _minimal_doc()
+    doc["projected_shadow_max_height"] = "tall"
+    with pytest.raises(DeclarativeAnimationError, match="must be a number"):
+        parse_animation(doc)
+
+
+def test_load_animation_forwards_max_height_to_renderer() -> None:
+    """``load_animation`` plumbs ``projected_shadow_max_height`` through the renderer."""
+    from posecascade.scripting.declarative import load_animation  # noqa: PLC0415
+
+    class _FakeRenderer:
+        def __init__(self) -> None:
+            self.last_height: float | None = None
+
+        def set_projected_shadow_enabled(self, enabled: bool) -> None:
+            pass
+
+        def set_shadow_light_direction(
+            self, direction: tuple[float, float, float] | None,
+        ) -> None:
+            pass
+
+        def set_projected_shadow_max_height(self, height: float) -> None:
+            self.last_height = float(height)
+
+    doc = _minimal_doc()
+    doc["projected_shadow_max_height"] = 0.15
+    renderer = _FakeRenderer()
+    api: dict[str, object] = {
+        "scene": _build_minimal_scene(),
+        "time": lambda: 0.0,
+        "renderer": renderer,
+    }
+    load_animation(json.dumps(doc), "test.json", api)
+    assert renderer.last_height == pytest.approx(0.15)
+
+
+def test_load_animation_clears_shadow_light_direction_by_default() -> None:
+    """No override in the doc => the renderer is told to fall back to ``None``."""
+    from posecascade.scripting.declarative import load_animation  # noqa: PLC0415
+
+    class _FakeRenderer:
+        def __init__(self) -> None:
+            self.last_shadow_dir: tuple[float, float, float] | None = (
+                (1.0, 2.0, 3.0)
+            )
+
+        def set_projected_shadow_enabled(self, enabled: bool) -> None:
+            pass
+
+        def set_shadow_light_direction(
+            self, direction: tuple[float, float, float] | None,
+        ) -> None:
+            self.last_shadow_dir = direction
+
+    renderer = _FakeRenderer()
+    api: dict[str, object] = {
+        "scene": _build_minimal_scene(),
+        "time": lambda: 0.0,
+        "renderer": renderer,
+    }
+    load_animation(json.dumps(_minimal_doc()), "test.json", api)
+    assert renderer.last_shadow_dir is None
+
+
 def test_hidden_nodes_field_parses_from_phase() -> None:
     """``hidden_nodes`` parses into a tuple of node names."""
     doc = _minimal_doc()
@@ -2545,6 +2761,100 @@ def test_hidden_nodes_default_empty() -> None:
     """Missing ``hidden_nodes`` defaults to empty tuple."""
     parsed = parse_animation(_minimal_doc())
     assert parsed.phases[0].hidden_nodes == ()
+
+
+def test_hair_pose_parses_per_joint_directions() -> None:
+    """``hair_pose`` parses into ``{chain_name: ((x,y,z), ...)}``."""
+    doc = _minimal_doc()
+    doc["phases"][0]["hair_pose"] = {
+        "BackHairUpper": [[0.0, -1.0, 0.0], [0.0, -1.0, -0.3]],
+        "BackHair_L": [[0.3, -0.8, -0.5]],
+    }
+    parsed = parse_animation(doc)
+    hair_pose = parsed.phases[0].hair_pose
+    assert hair_pose["BackHairUpper"] == ((0.0, -1.0, 0.0), (0.0, -1.0, -0.3))
+    assert hair_pose["BackHair_L"] == ((0.3, -0.8, -0.5),)
+
+
+def test_hair_pose_rejects_non_dict() -> None:
+    """``hair_pose`` must be a dict; lists / strings raise."""
+    doc = _minimal_doc()
+    doc["phases"][0]["hair_pose"] = [["BackHair", [0, -1, 0]]]
+    with pytest.raises(DeclarativeAnimationError, match="hair_pose"):
+        parse_animation(doc)
+
+
+def test_hair_pose_rejects_non_3_vector() -> None:
+    """Each direction must be a 3-element vector."""
+    doc = _minimal_doc()
+    doc["phases"][0]["hair_pose"] = {"BackHair": [[0.0, -1.0]]}
+    with pytest.raises(DeclarativeAnimationError, match="hair_pose"):
+        parse_animation(doc)
+
+
+def test_hair_pose_rejects_empty_chain_list() -> None:
+    """Chain entry must have at least one direction."""
+    doc = _minimal_doc()
+    doc["phases"][0]["hair_pose"] = {"BackHair": []}
+    with pytest.raises(DeclarativeAnimationError, match="hair_pose"):
+        parse_animation(doc)
+
+
+def test_hair_pose_rejects_non_numeric_components() -> None:
+    """Direction components must be numbers."""
+    doc = _minimal_doc()
+    doc["phases"][0]["hair_pose"] = {"BackHair": [["x", "y", "z"]]}
+    with pytest.raises(DeclarativeAnimationError, match="hair_pose"):
+        parse_animation(doc)
+
+
+def test_hair_pose_default_empty_dict() -> None:
+    """Missing ``hair_pose`` defaults to empty dict."""
+    parsed = parse_animation(_minimal_doc())
+    assert parsed.phases[0].hair_pose == {}
+
+
+def test_hair_anchor_offset_parses_per_chain_offset() -> None:
+    """``hair_anchor_offset`` parses into ``{chain_name: (x,y,z)}``."""
+    doc = _minimal_doc()
+    doc["phases"][0]["hair_anchor_offset"] = {
+        "BackHair_L": [0.1, -0.2, -0.05],
+        "BackHair_R": [-0.1, -0.2, -0.05],
+    }
+    parsed = parse_animation(doc)
+    offsets = parsed.phases[0].hair_anchor_offset
+    assert offsets["BackHair_L"] == (0.1, -0.2, -0.05)
+    assert offsets["BackHair_R"] == (-0.1, -0.2, -0.05)
+
+
+def test_hair_anchor_offset_default_empty_dict() -> None:
+    """Missing ``hair_anchor_offset`` defaults to empty dict."""
+    parsed = parse_animation(_minimal_doc())
+    assert parsed.phases[0].hair_anchor_offset == {}
+
+
+def test_hair_anchor_offset_rejects_non_dict() -> None:
+    """``hair_anchor_offset`` must be a dict; lists / strings raise."""
+    doc = _minimal_doc()
+    doc["phases"][0]["hair_anchor_offset"] = [["BackHair", [0, -0.1, 0]]]
+    with pytest.raises(DeclarativeAnimationError, match="hair_anchor_offset"):
+        parse_animation(doc)
+
+
+def test_hair_anchor_offset_rejects_non_3_vector() -> None:
+    """Each offset must be a 3-element vector."""
+    doc = _minimal_doc()
+    doc["phases"][0]["hair_anchor_offset"] = {"BackHair": [0.0, -0.1]}
+    with pytest.raises(DeclarativeAnimationError, match="hair_anchor_offset"):
+        parse_animation(doc)
+
+
+def test_hair_anchor_offset_rejects_non_numeric() -> None:
+    """Offset components must be numbers."""
+    doc = _minimal_doc()
+    doc["phases"][0]["hair_anchor_offset"] = {"BackHair": ["x", "y", "z"]}
+    with pytest.raises(DeclarativeAnimationError, match="hair_anchor_offset"):
+        parse_animation(doc)
 
 
 def test_apply_node_visibility_flips_and_restores() -> None:

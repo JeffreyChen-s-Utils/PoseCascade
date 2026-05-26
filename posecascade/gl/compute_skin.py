@@ -86,7 +86,7 @@ _log = get_logger(__name__)
 # Must match BONE_WORDS in the shader and _MAX_BONES (384) in the renderer.
 _BONE_WORDS = 16
 _MAX_BONES = _BONE_WORDS * 32  # 384
-_MAX_COLLIDERS = 16
+_MAX_COLLIDERS = 32
 # Matches ``layout(local_size_x = 64)`` in passive_skin_push.comp.
 _WORKGROUP_SIZE = 64
 # std140 layout: 16-byte header (count + 3 uint pad) + N * 48-byte GpuCollider.
@@ -131,13 +131,14 @@ class PassiveSkinDispatcher:
     piece via :meth:`register_piece` and call :meth:`dispatch` per frame.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         program: int,
         loc_vert_count: int,
         loc_world_to_local: int,
         loc_ground_enabled: int,
         loc_ground_y: int,
+        loc_ground_tolerance: int,
         bone_matrices_ssbo: int,
         colliders_ubo: int,
     ) -> None:
@@ -146,6 +147,7 @@ class PassiveSkinDispatcher:
         self._loc_world_to_local = loc_world_to_local
         self._loc_ground_enabled = loc_ground_enabled
         self._loc_ground_y = loc_ground_y
+        self._loc_ground_tolerance = loc_ground_tolerance
         self._bone_matrices_ssbo = bone_matrices_ssbo
         self._colliders_ubo = colliders_ubo
         self._slots: dict[int, PassiveSkinSlot] = {}
@@ -198,12 +200,14 @@ class PassiveSkinDispatcher:
         loc_world_to_local = int(glGetUniformLocation(program, "u_worldToLocal"))
         loc_ground_enabled = int(glGetUniformLocation(program, "u_groundEnabled"))
         loc_ground_y = int(glGetUniformLocation(program, "u_groundY"))
+        loc_ground_tolerance = int(glGetUniformLocation(program, "u_groundTolerance"))
         return cls(
             program=program,
             loc_vert_count=loc_vert_count,
             loc_world_to_local=loc_world_to_local,
             loc_ground_enabled=loc_ground_enabled,
             loc_ground_y=loc_ground_y,
+            loc_ground_tolerance=loc_ground_tolerance,
             bone_matrices_ssbo=bone_ssbo,
             colliders_ubo=ubo,
         )
@@ -282,7 +286,7 @@ class PassiveSkinDispatcher:
             return
         glDeleteBuffers(len(slot.owned_buffers), list(slot.owned_buffers))
 
-    def dispatch(
+    def dispatch(  # noqa: PLR0913
         self,
         piece_id: int,
         bone_matrices: NDArray[np.float32],
@@ -290,6 +294,7 @@ class PassiveSkinDispatcher:
         colliders: list[object],
         exclude_bits: NDArray[np.uint32],
         ground_y: float | None = None,
+        ground_tolerance: float = 0.0,
     ) -> bool:
         """Run the compute shader for one piece. Returns ``True`` if dispatched.
 
@@ -331,7 +336,7 @@ class PassiveSkinDispatcher:
         # GLSL is column-major; numpy mat4 is row-major. Pass transpose=GL_TRUE.
         contig = np.ascontiguousarray(world_to_local, dtype=np.float32)
         glUniformMatrix4fv(self._loc_world_to_local, 1, GL_TRUE, contig)
-        # Ground clamp gate. Both uniforms always written so a previous
+        # Ground clamp gate. All three uniforms always written so a previous
         # frame's enabled state can't leak in when the host turns ground off.
         if ground_y is None or self._loc_ground_enabled < 0 or self._loc_ground_y < 0:
             glUniform1ui(self._loc_ground_enabled, 0)
@@ -339,6 +344,8 @@ class PassiveSkinDispatcher:
         else:
             glUniform1ui(self._loc_ground_enabled, 1)
             glUniform1f(self._loc_ground_y, float(ground_y))
+        if self._loc_ground_tolerance >= 0:
+            glUniform1f(self._loc_ground_tolerance, max(float(ground_tolerance), 0.0))
 
         # SSBO bindings. Outputs (bindings 4, 8) reuse the mesh's existing
         # position + normal VBOs; the compute shader writes to them in
@@ -379,11 +386,23 @@ class PassiveSkinDispatcher:
             self._program = 0
 
     def _upload_bone_matrices(self, bone_matrices: NDArray[np.float32]) -> None:
-        """Stream ``(J, 4, 4)`` joint matrices into the shared SSBO."""
-        # GLSL std430 mat4 layout is column-major; numpy stores row-major.
-        # Transpose per-matrix so the shader reads correct columns.
-        transposed = np.transpose(bone_matrices, (0, 2, 1))
-        contig = np.ascontiguousarray(transposed, dtype=np.float32)
+        """Stream ``(J, 4, 4)`` joint matrices into the shared SSBO as DQs.
+
+        The compute shader skins with dual-quaternion blending (matching the
+        renderer's toon DQS shader), not LBS. We still accept matrices from
+        the caller because ``cloth_host`` computes joint matrices anyway
+        for the renderer's bone matrix cache — converting here keeps the
+        upload path single-source instead of duplicating per-frame work.
+        Each bone is laid out as two consecutive vec4 in the SSBO:
+        ``bone_dual_quats[2*j]`` is the real (rotation) quaternion,
+        ``bone_dual_quats[2*j + 1]`` is the dual (translation) quaternion.
+        """
+        from posecascade.utils.dual_quaternion import (  # noqa: PLC0415
+            matrices_to_dual_quaternions,
+        )
+
+        dual_quats = matrices_to_dual_quaternions(bone_matrices)  # (J, 8)
+        contig = np.ascontiguousarray(dual_quats, dtype=np.float32)
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, self._bone_matrices_ssbo)
         glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, contig.nbytes, contig)
 

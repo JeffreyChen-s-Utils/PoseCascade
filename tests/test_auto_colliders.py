@@ -108,6 +108,6 @@ def test_radii_match_documented_defaults() -> None:
     by_kind: dict[tuple[str, str], float] = {
         (s.kind, s.follow_bone): s.radius for s in specs
     }
-    assert by_kind[("sphere", "H")] == pytest.approx(0.13)
-    assert by_kind[("capsule", "UL")] == pytest.approx(0.11)
-    assert by_kind[("capsule", "LL")] == pytest.approx(0.05)
+    assert by_kind[("sphere", "H")] == pytest.approx(0.16)
+    assert by_kind[("capsule", "UL")] == pytest.approx(0.14)
+    assert by_kind[("capsule", "LL")] == pytest.approx(0.08)

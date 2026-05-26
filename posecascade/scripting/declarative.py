@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -85,6 +85,9 @@ _TAU = math.tau
 _TWO = 2.0
 _HALF = 0.5
 _DECLARATIVE_SCHEMA_VERSION = 1
+# Lower bound for per-joint mass; avoids div-by-zero in the integrator
+# when a user accidentally writes 0 or a negative value in the JSON.
+_NUMERIC_MASS_EPS = 1.0e-4
 _VEC3_LEN = 3
 _YAW_NEGLIGIBLE = 1e-4
 # Quaternion components below this magnitude count as "no rotation".
@@ -467,13 +470,45 @@ class Phase:
     # ``{ik: {foot_l_target: [x, y, z], foot_r_target: [...]}}``.
     foot_l_target: tuple[Any, Any, Any] | None = None
     foot_r_target: tuple[Any, Any, Any] | None = None
-    # Bone-name list whose end of frame world rotation should be aligned
-    # so the bone's local +Y axis points world -Y — i.e. the bone's
-    # 'top face' is up, 'bottom face' (sole / palm) is down. Useful for
-    # planting feet flat on the floor without authoring per-axis foot
-    # rotations by hand. Parsed from a phase ``floor_align`` array:
-    # ``"floor_align": ["foot_L", "foot_R"]``. Empty list = no aligner.
-    floor_align: tuple[str, ...] = ()
+    # Optional world-space direction the leg IK should bend the knee
+    # toward. Default ``None`` -> the engine derives a bend hint from
+    # the body's forward direction (mirror of the arm bend so legs
+    # fold forward while elbows fold backward). Authors override this
+    # for poses where the default perpendicular projection sends the
+    # knee laterally splayed or below the floor — e.g. dog_crawl
+    # benefits from a bend hint with a +Y component so the knee stays
+    # above the ground plane while still bending forward.
+    leg_bend_world: tuple[float, float, float] | None = None
+    # Optional knee floor-clearance Y. When set, the leg IK clamps the
+    # knee onto this Y plane after the natural 2-bone solve if the
+    # natural bend would drop it below. Useful for deeply folded
+    # poses where the natural solution buries the knee under the
+    # floor. ``None`` (default) keeps the original closed-form result
+    # untouched — important because the floor clamp can produce
+    # laterally splayed knees for some geometries, so the author has
+    # to opt in case by case.
+    leg_floor_clearance_y: float | None = None
+    # Optional stretchy-IK max_stretch per chain. Default 1.10 (10%
+    # stretch) is enough for most poses; very deep crawl-style targets
+    # may need 1.30 so the arms reach the floor without forcing a
+    # heavy spine bend on the torso.
+    arm_max_stretch: float | None = None
+    leg_max_stretch: float | None = None
+    # Floor-align entries. Each entry is either:
+    #
+    #   * a bone-name string (``"foot_L"``) — auto-derives the toe / fingertip
+    #     direction from the chain extension (knee -> ankle, elbow -> wrist);
+    #     OR
+    #   * a ``(bone_name, toe_world)`` tuple where ``toe_world`` is the
+    #     EXPLICIT world-space direction the bone's tip should point
+    #     (e.g. ``(0.0, 0.0, -1.0)`` for "toes face the back of the body").
+    #     This is the escape hatch when auto-detection produces a flipped
+    #     orientation — common for deeply folded poses where the chain
+    #     extension lands in a near-vertical direction that the floor
+    #     projection then resolves backwards.
+    #
+    # Parsed from a phase ``floor_align`` array. Empty list = no aligner.
+    floor_align: tuple[Any, ...] = ()
     # Scene node names whose mesh draws should be SKIPPED during this
     # phase. Useful for hiding accessories (shoes / props / hat) per
     # pose without modifying the underlying asset. Parsed from a
@@ -481,6 +516,47 @@ class Phase:
     # The node's visibility flips back to True on phase exit so
     # subsequent phases (or the rest pose) get the full character.
     hidden_nodes: tuple[str, ...] = ()
+    # Scripted hair pose — per-joint world-space direction vectors for
+    # a spring chain that DISABLE physics for that chain. Use this for
+    # extreme poses (dog_crawl, prone, hand-stand) where the chain
+    # anchor sits inside a body capsule and pure physics can't route
+    # the chain around the body in the author's intended look. Same
+    # principle the commercial anime engines apply for cutscenes:
+    # "Animation wins" — physics is a default, scripted FK overrides
+    # it pose-by-pose.
+    #
+    # Schema: ``{chain_name: [[x, y, z], [x, y, z], ...]}``. The list
+    # has one 3-tuple per chain joint, ordered root → tip. Each tuple
+    # is the WORLD direction the bone should point in this pose; the
+    # solver computes the local rotation that satisfies that
+    # constraint relative to the joint's parent. Vectors don't have
+    # to be unit length — they get normalised. Chains not listed here
+    # continue to run normal physics.
+    hair_pose: dict[str, tuple[tuple[float, float, float], ...]] = field(
+        default_factory=dict,
+    )
+    # Optional per-chain WORLD-space offset added to the chain's anchor
+    # position when ``hair_pose`` applies the authored directions. Use
+    # this when the rig's ``rest_local_position`` for joint 0 puts the
+    # chain start in an awkward place under the current head rotation
+    # — e.g. dog-crawl's head-tilt makes back-hair bones start far above
+    # the head instead of behind it. ``[0, -0.1, 0]`` shifts the chain
+    # start 10 cm down in world space, regardless of head orientation.
+    # Empty entry = no offset (default).
+    hair_anchor_offset: dict[str, tuple[float, float, float]] = field(
+        default_factory=dict,
+    )
+    # Optional path (project-relative) to a pre-baked
+    # :class:`~posecascade.animation.drape_snapshot.PoseDrapeSnapshot` JSON.
+    # Loaded at phase ``start`` and applied to the live physics + cloth
+    # hosts, locking spring chains and PBD cloth into the authored
+    # drape. Use for extreme poses where physics cannot reliably reach
+    # the desired shape (dog-crawl, prone, hand-stand). Empty string =
+    # no snapshot. Resolved through
+    # :func:`posecascade.assets.path_safety.resolve_safe` against the
+    # script's directory, so absolute paths and ``..`` traversal are
+    # rejected.
+    drape_snapshot: str = ""
 
 
 @dataclass(frozen=True)
@@ -532,18 +608,39 @@ class ClothPieceSpec:
     iterations: int = 8
     substeps: int = 2
     track_bone: str | None = None
+    # Attract-to-surface (see ``ClothParams.attract_to_bones``): tuple of
+    # collider bone names whose surfaces this piece's verts should be
+    # pulled onto after collider push-out. Empty = off.
+    attract_to_bones: tuple[str, ...] = ()
+    attract_max_distance: float = 0.10
+    # When True the piece is registered as passive_skin_deform (skinning +
+    # collider push, optional attract). No PBD integration, no anchors —
+    # the piece just snaps to the skinned position each tick. Pair with
+    # ``attract_to_bones`` to make a skirt / cape lay cleanly on the body
+    # surface instead of clipping through it. Same trick a passive entry
+    # in ``collision_deform_meshes`` produces but with full attract config.
+    passive_skin_deform: bool = False
 
 
 @dataclass(frozen=True)
 class ColliderSpec:
     """Bone-following collider that pushes cloth vertices outside.
 
-    ``kind`` is ``"sphere"`` or ``"capsule"``. Sphere colliders track
-    one bone (``follow_bone``) — the collider's centre is mutated to
-    the bone's world position each frame. Capsule colliders need
-    ``end_bone`` too; the capsule spans the two bones' world
-    positions. ``radius`` plus the cloth's per-piece skin offset
-    determine the keep-out distance.
+    ``kind`` is ``"sphere"``, ``"capsule"``, or ``"mesh"``.
+
+    Sphere colliders track one bone (``follow_bone``) — the collider's
+    centre is mutated to the bone's world position each frame.
+    Capsule colliders need ``end_bone`` too; the capsule spans the
+    two bones' world positions. ``radius`` plus the cloth's per-piece
+    skin offset determine the keep-out distance.
+
+    Mesh colliders track an entire skinned mesh NODE (``follow_node``
+    instead of ``follow_bone``). The triangle world positions update
+    each frame from the bind-pose mesh + current bone palette. Hair
+    or cloth joints inside the mesh get pushed to the nearest face
+    along its outward normal. Use when sphere/capsule primitives
+    can't approximate a concave body region (hat brim, shoulder
+    slope, jaw line).
     """
 
     kind: str
@@ -577,7 +674,7 @@ class DeclarativeAnimation:
     rig: RigBindings
     ground: GroundSpec | None
     phases: tuple[Phase, ...]
-    physics_chains: dict[str, dict[str, float]]
+    physics_chains: dict[str, dict[str, Any]]
     wind: dict[str, Any] | None
     # Beats per minute. Used for the ``beat`` / ``phase_beat`` expression-DSL
     # variables and for resolving any phase that declared ``duration_beats``
@@ -630,6 +727,15 @@ class DeclarativeAnimation:
     # opt out (e.g. for non-humanoid rigs or when the explicit list is
     # already comprehensive).
     auto_body_colliders: bool = True
+    # When ``True``, hand spring chains over to the renderer's GPU
+    # compute dispatcher (``shaders/hair/hair_spring.comp``). Each
+    # chain runs its integration + collider push-out on the GPU
+    # workgroup that owns it, and the CPU simulator skips it. The
+    # renderer reads back world rotations to the scene graph each
+    # frame so other systems (skinning, animation blending) see the
+    # GPU result. Falls back gracefully to CPU when the active GL
+    # context lacks 4.3 compute support.
+    gpu_hair_compute: bool = False
     # Mesh nodes to register for post-skin collision push-out. Each
     # listed mesh is driven by its bone skinning every tick and then
     # projected against the registered body colliders — stops dress /
@@ -656,6 +762,45 @@ class DeclarativeAnimation:
     # reads as a 'deformed shadow' to the eye. Defaults to ``True``
     # so existing scripts keep their shadow.
     projected_shadow: bool = True
+    # Toggle the renderer's depth-map self-shadow pass. When False,
+    # characters cast no shadow on themselves or on the ground from
+    # the directional light. Useful for flat-lit poses where shadow
+    # acne on simulated cloth or hair distracts more than it helps.
+    self_shadow: bool = True
+    # Optional override for the projected-shadow light direction. When set,
+    # the renderer projects floor shadows along ``-shadow_light_direction``
+    # while the toon pass continues to use the scene's main light for
+    # shading. Lets a horizontal pose keep its shadow turned on but cast
+    # a compact silhouette (overhead direction) instead of an elongated
+    # streak (side-angled direction). ``None`` = use the main light.
+    shadow_light_direction: tuple[float, float, float] | None = None
+    # Optional override for the projected-shadow contact-fade height
+    # (metres). The renderer fades shadow alpha to zero as a vertex
+    # rises this far above the ground plane, so a horizontal body
+    # (dog_crawl) only casts shadow where it actually touches the floor.
+    # ``None`` keeps the engine default (~0.30 m).
+    projected_shadow_max_height: float | None = None
+    # Optional soft-floor tolerance (metres) for the cloth-host's
+    # passive-skin-deform clamp. With the default ``None`` the engine
+    # hard-snaps every below-floor vertex to ``floor_y + 1 mm``,
+    # producing the pancake silhouette visible on the calf / palm in
+    # horizontal poses (dog-crawl). Setting a positive value (e.g.
+    # 0.04 = 4 cm) lets skin verts dip up to that far below the visible
+    # floor before being clamped, which preserves natural skinning
+    # curvature in prone poses at the cost of a small amount of visible
+    # mesh-through-floor. Wired into ``cloth_host.floor_clamp_tolerance``.
+    floor_clamp_tolerance: float | None = None
+    # Optional number of seconds of physics warmup to run inside
+    # ``_start`` so spring chains (hair, accessories) and cloth pieces
+    # are already settled when the user sees frame 1. Without this,
+    # the chain starts at REST position relative to the parent bone —
+    # which for a non-rest pose (e.g. dog_crawl with head bent forward)
+    # means hair sticks forward initially and then visibly swings down
+    # under gravity over a few seconds. Setting ``warmup_seconds: 3.0``
+    # advances the spring / cloth sim by 3 s inside ``_start`` so the
+    # transient swing has decayed before any frame is rendered. Defaults
+    # to 0 (no warmup) for backwards compatibility.
+    warmup_seconds: float = 0.0
 
 
 @dataclass
@@ -861,21 +1006,55 @@ def _parse_phase(raw: dict[str, Any], bpm: float) -> Phase:
     pose, pose_weight = _parse_pose(raw.get("pose"))
     hand_l = _parse_hand_field(raw.get("hand_L"), "hand_L")
     hand_r = _parse_hand_field(raw.get("hand_R"), "hand_R")
+    ik_block = raw.get("ik") or {}
     hand_l_target, hand_r_target, foot_l_target, foot_r_target = _parse_ik_block(
-        raw.get("ik"),
+        ik_block,
+    )
+    leg_bend_world: tuple[float, float, float] | None = None
+    if isinstance(ik_block, dict) and ik_block.get("leg_bend_world") is not None:
+        leg_bend_world = _coerce_vec3(
+            ik_block["leg_bend_world"], "ik.leg_bend_world",
+        )
+    leg_floor_clearance_y = (
+        _parse_optional_float(
+            ik_block.get("leg_floor_clearance_y"), "ik.leg_floor_clearance_y",
+        )
+        if isinstance(ik_block, dict)
+        else None
+    )
+    arm_max_stretch = (
+        _parse_optional_float(
+            ik_block.get("arm_max_stretch"), "ik.arm_max_stretch",
+        )
+        if isinstance(ik_block, dict)
+        else None
+    )
+    leg_max_stretch = (
+        _parse_optional_float(
+            ik_block.get("leg_max_stretch"), "ik.leg_max_stretch",
+        )
+        if isinstance(ik_block, dict)
+        else None
     )
     floor_align_raw = raw.get("floor_align", ())
     if not isinstance(floor_align_raw, (list, tuple)):
         raise DeclarativeAnimationError(
             "phase 'floor_align' must be a list of bone names",
         )
-    floor_align = tuple(str(b) for b in floor_align_raw)
+    floor_align = _parse_floor_align_entries(floor_align_raw)
     hidden_nodes_raw = raw.get("hidden_nodes", ())
     if not isinstance(hidden_nodes_raw, (list, tuple)):
         raise DeclarativeAnimationError(
             "phase 'hidden_nodes' must be a list of node names",
         )
     hidden_nodes = tuple(str(b) for b in hidden_nodes_raw)
+    hair_pose = _parse_hair_pose(raw.get("hair_pose"))
+    hair_anchor_offset = _parse_hair_anchor_offset(raw.get("hair_anchor_offset"))
+    drape_snapshot_raw = raw.get("drape_snapshot", "")
+    if drape_snapshot_raw and not isinstance(drape_snapshot_raw, str):
+        raise DeclarativeAnimationError(
+            "phase 'drape_snapshot' must be a project-relative string path",
+        )
     return Phase(
         name=str(raw.get("name", "")),
         duration_sec=_resolve_phase_duration(raw, bpm),
@@ -896,9 +1075,106 @@ def _parse_phase(raw: dict[str, Any], bpm: float) -> Phase:
         hand_r_target=hand_r_target,
         foot_l_target=foot_l_target,
         foot_r_target=foot_r_target,
+        leg_bend_world=leg_bend_world,
+        leg_floor_clearance_y=leg_floor_clearance_y,
+        arm_max_stretch=arm_max_stretch,
+        leg_max_stretch=leg_max_stretch,
         floor_align=floor_align,
         hidden_nodes=hidden_nodes,
+        hair_pose=hair_pose,
+        hair_anchor_offset=hair_anchor_offset,
+        drape_snapshot=str(drape_snapshot_raw),
     )
+
+
+def _parse_hair_pose(
+    raw: Any,
+) -> dict[str, tuple[tuple[float, float, float], ...]]:
+    """Parse the optional per-phase ``hair_pose`` block.
+
+    Schema: ``{chain_name: [[x, y, z], [x, y, z], ...]}``. Each chain
+    maps to a list of 3-tuples (one per joint, root → tip). Each
+    tuple is the WORLD direction the bone should point. Validates
+    the shape eagerly so authoring mistakes surface at load time
+    instead of as silent no-ops at runtime.
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise DeclarativeAnimationError(
+            "phase 'hair_pose' must be a dict of chain_name → [[x,y,z], ...]",
+        )
+    out: dict[str, tuple[tuple[float, float, float], ...]] = {}
+    for chain_name, joint_dirs in raw.items():
+        if not isinstance(joint_dirs, (list, tuple)):
+            raise DeclarativeAnimationError(
+                f"hair_pose[{chain_name!r}] must be a list of [x,y,z] triples",
+            )
+        if not joint_dirs:
+            raise DeclarativeAnimationError(
+                f"hair_pose[{chain_name!r}] must have at least one joint direction",
+            )
+        joints_parsed: list[tuple[float, float, float]] = []
+        for idx, entry in enumerate(joint_dirs):
+            if (
+                not isinstance(entry, (list, tuple))
+                or len(entry) != 3                                       # noqa: PLR2004
+            ):
+                raise DeclarativeAnimationError(
+                    f"hair_pose[{chain_name!r}][{idx}] must be a 3-element [x,y,z] "
+                    f"vector, got {entry!r}",
+                )
+            try:
+                joints_parsed.append(
+                    (float(entry[0]), float(entry[1]), float(entry[2])),
+                )
+            except (TypeError, ValueError) as err:
+                raise DeclarativeAnimationError(
+                    f"hair_pose[{chain_name!r}][{idx}] components must be numbers: "
+                    f"{err}",
+                ) from err
+        out[str(chain_name)] = tuple(joints_parsed)
+    return out
+
+
+def _parse_hair_anchor_offset(
+    raw: Any,
+) -> dict[str, tuple[float, float, float]]:
+    """Parse the optional per-phase ``hair_anchor_offset`` block.
+
+    Schema: ``{chain_name: [x, y, z]}`` — world-space offset added to
+    the chain anchor's world position when ``hair_pose`` is applied.
+    Used to shift the chain's effective start point so it doesn't sit
+    where the rig's ``rest_local_position`` + parent rotation would
+    normally place it (e.g. dog-crawl head-tilt putting back-hair
+    above the head).
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise DeclarativeAnimationError(
+            "phase 'hair_anchor_offset' must be a dict of chain_name → [x,y,z]",
+        )
+    out: dict[str, tuple[float, float, float]] = {}
+    for chain_name, entry in raw.items():
+        if (
+            not isinstance(entry, (list, tuple))
+            or len(entry) != 3                                            # noqa: PLR2004
+        ):
+            raise DeclarativeAnimationError(
+                f"hair_anchor_offset[{chain_name!r}] must be a 3-element "
+                f"[x,y,z] vector, got {entry!r}",
+            )
+        try:
+            out[str(chain_name)] = (
+                float(entry[0]), float(entry[1]), float(entry[2]),
+            )
+        except (TypeError, ValueError) as err:
+            raise DeclarativeAnimationError(
+                f"hair_anchor_offset[{chain_name!r}] components must be numbers: "
+                f"{err}",
+            ) from err
+    return out
 
 
 def _parse_ik_block(raw: Any) -> tuple[
@@ -1197,14 +1473,169 @@ def parse_animation(document: dict[str, Any]) -> DeclarativeAnimation:
         cloth_pieces=_parse_cloth(document.get("cloth")),
         colliders=_parse_colliders(document.get("colliders")),
         auto_body_colliders=bool(document.get("auto_body_colliders", True)),
+        gpu_hair_compute=bool(document.get("gpu_hair_compute", False)),
         auto_clamp_skinned_to_ground=bool(
             document.get("auto_clamp_skinned_to_ground", True),
         ),
         projected_shadow=bool(document.get("projected_shadow", True)),
+        self_shadow=bool(document.get("self_shadow", True)),
+        shadow_light_direction=_parse_shadow_light_direction(
+            document.get("shadow_light_direction"),
+        ),
+        projected_shadow_max_height=_parse_optional_float(
+            document.get("projected_shadow_max_height"),
+            "projected_shadow_max_height",
+        ),
+        floor_clamp_tolerance=_parse_optional_float(
+            document.get("floor_clamp_tolerance"),
+            "floor_clamp_tolerance",
+        ),
+        warmup_seconds=float(document.get("warmup_seconds", 0.0)),
         collision_deform_meshes=_parse_collision_deform_meshes(
             document.get("collision_deform_meshes"),
         ),
     )
+
+
+def _parse_shadow_light_direction(
+    raw: Any,
+) -> tuple[float, float, float] | None:
+    """Validate the document-level ``shadow_light_direction`` triple.
+
+    Accepts a 3-element list / tuple of numbers, or ``None`` for "use the
+    scene's main light." Rejects anything else with a clear error so a
+    typo doesn't silently leave the shadow on the main light direction.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, (list, tuple)) or len(raw) != _VEC3_LEN:
+        raise DeclarativeAnimationError(
+            "shadow_light_direction must be a 3-element list of numbers, "
+            f"got {raw!r}",
+        )
+    try:
+        return (float(raw[0]), float(raw[1]), float(raw[2]))
+    except (TypeError, ValueError) as err:
+        raise DeclarativeAnimationError(
+            f"shadow_light_direction components must be numeric: {raw!r}",
+        ) from err
+
+
+def _parse_floor_align_entries(
+    raw: Iterable[Any],
+) -> tuple[Any, ...]:
+    """Parse the phase ``floor_align`` list into mixed string / tuple entries.
+
+    Accepts:
+      * a bone-name string -> stays a string (engine auto-derives the
+        toe direction from chain extension; sole points world -Y);
+      * a dict ``{"bone": "<name>", "toe_world": [x, y, z],
+        "sole_world": [x, y, z]}`` -> becomes
+        ``("<name>", (toe_xyz), (sole_xyz))``. ``sole_world`` defaults
+        to ``(0, -1, 0)`` (sole faces down — normal standing pose). Set
+        to ``(0, 1, 0)`` to flip the foot for prone / "趴伏" poses
+        where the TOP of the foot lies on the floor and the sole
+        points up.
+      * a 2- or 3-element list / tuple — same.
+
+    Rejects everything else with a descriptive error so a typo can't
+    silently fall through to the auto-derived path.
+    """
+    out: list[Any] = []
+    for entry in raw:
+        if isinstance(entry, str):
+            out.append(entry)
+            continue
+        if isinstance(entry, dict):
+            out.append(_parse_floor_align_dict_entry(entry))
+            continue
+        if isinstance(entry, (list, tuple)) and len(entry) in (2, 3):
+            out.append(_parse_floor_align_sequence_entry(entry))
+            continue
+        raise DeclarativeAnimationError(
+            "floor_align entries must be bone-name strings or "
+            f"(name, toe_world[, sole_world]) tuples, got {entry!r}",
+        )
+    return tuple(out)
+
+
+def _parse_floor_align_dict_entry(entry: dict[str, Any]) -> tuple[Any, ...]:
+    """Parse a single dict-form floor_align entry."""
+    name = entry.get("bone")
+    toe = entry.get("toe_world")
+    if not isinstance(name, str) or toe is None:
+        raise DeclarativeAnimationError(
+            "floor_align dict entry must have 'bone' (string) and "
+            f"'toe_world' (3-element list), got {entry!r}",
+        )
+    toe_vec = _coerce_vec3(toe, "floor_align.toe_world")
+    sole = entry.get("sole_world")
+    if sole is None:
+        return (name, toe_vec)
+    sole_vec = _coerce_vec3(sole, "floor_align.sole_world")
+    return (name, toe_vec, sole_vec)
+
+
+def _parse_floor_align_sequence_entry(entry: tuple[Any, ...]) -> tuple[Any, ...]:
+    """Parse a 2- or 3-element sequence-form floor_align entry."""
+    name = entry[0]
+    if not isinstance(name, str):
+        raise DeclarativeAnimationError(
+            f"floor_align tuple entry must start with a name string, got {entry!r}",
+        )
+    toe_vec = _coerce_vec3(entry[1], "floor_align.toe_world")
+    if len(entry) == 2:  # noqa: PLR2004
+        return (name, toe_vec)
+    sole_vec = _coerce_vec3(entry[2], "floor_align.sole_world")
+    return (name, toe_vec, sole_vec)
+
+
+def _coerce_vec3(raw: Any, field_name: str) -> tuple[float, float, float]:
+    """Coerce ``raw`` into a 3-tuple of floats or raise a clear error."""
+    if not isinstance(raw, (list, tuple)) or len(raw) != _VEC3_LEN:
+        raise DeclarativeAnimationError(
+            f"{field_name} must be a 3-element list of numbers, got {raw!r}",
+        )
+    try:
+        return (float(raw[0]), float(raw[1]), float(raw[2]))
+    except (TypeError, ValueError) as err:
+        raise DeclarativeAnimationError(
+            f"{field_name} components must be numeric: {raw!r}",
+        ) from err
+
+
+def _unpack_floor_align_entry(
+    entry: Any,
+) -> tuple[str, tuple[float, float, float] | None, tuple[float, float, float]]:
+    """Pull ``(bone_key, explicit_toe_world, sole_world)`` out of a parsed entry.
+
+    Defaults the sole direction to ``(0, -1, 0)`` (sole down — normal
+    standing pose). 3-tuple entries override it for prone / "趴伏"
+    poses where the top of the foot lies on the floor.
+    """
+    if isinstance(entry, tuple):
+        bone_key = entry[0]
+        explicit_toe_world = entry[1] if len(entry) >= 2 else None  # noqa: PLR2004
+        explicit_sole_world = entry[2] if len(entry) >= 3 else None  # noqa: PLR2004
+    else:
+        bone_key, explicit_toe_world, explicit_sole_world = entry, None, None
+    sole_world = (
+        tuple(explicit_sole_world) if explicit_sole_world is not None
+        else (0.0, -1.0, 0.0)
+    )
+    return bone_key, explicit_toe_world, sole_world
+
+
+def _parse_optional_float(raw: Any, field_name: str) -> float | None:
+    """Coerce ``raw`` to a float, treating ``None`` as 'use the default'."""
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError) as err:
+        raise DeclarativeAnimationError(
+            f"{field_name} must be a number or null, got {raw!r}",
+        ) from err
 
 
 def _parse_collision_deform_meshes(raw: Any) -> tuple[Any, ...]:
@@ -1235,16 +1666,35 @@ def _parse_collision_deform_meshes(raw: Any) -> tuple[Any, ...]:
     return tuple(parsed)
 
 
-def _parse_physics_chains(raw: Any) -> dict[str, dict[str, float]]:
+# Per-chain JSON keys whose values are lists of bone-name strings rather
+# than lists of numeric scalars. Bypasses ``_resolve_scalar`` (which would
+# reject a bone name like ``"Chest_0179"`` as not a number / not pi-style).
+_CHAIN_STRING_LIST_KEYS: frozenset[str] = frozenset({"attract_to_bones"})
+
+
+def _parse_physics_chains(raw: Any) -> dict[str, dict[str, Any]]:
     if not isinstance(raw, dict):
         raise DeclarativeAnimationError("'physics_chains' must be an object")
-    out: dict[str, dict[str, float]] = {}
+    out: dict[str, dict[str, Any]] = {}
     for chain_name, params in raw.items():
         if not isinstance(params, dict):
             raise DeclarativeAnimationError(
                 f"physics_chains[{chain_name!r}] must be an object",
             )
-        out[str(chain_name)] = {k: _resolve_scalar(v) for k, v in params.items()}
+        # Scalars route through ``_resolve_scalar`` so expressions like
+        # ``"tau * 2"`` work. Lists of numbers pass through verbatim (e.g.
+        # ``gravity_override: [0, 0, -9.8]``). String-list keys
+        # (``attract_to_bones: ["Chest_0179", ...]``) bypass scalar
+        # resolution entirely — bone names are not numbers.
+        resolved: dict[str, Any] = {}
+        for k, v in params.items():
+            if k in _CHAIN_STRING_LIST_KEYS and isinstance(v, (list, tuple)):  # noqa: UP038
+                resolved[k] = [str(c) for c in v]
+            elif isinstance(v, (list, tuple)):                                  # noqa: UP038
+                resolved[k] = [_resolve_scalar(c) for c in v]
+            else:
+                resolved[k] = _resolve_scalar(v)
+        out[str(chain_name)] = resolved
     return out
 
 
@@ -1444,7 +1894,7 @@ def _resolve_time_field(
     return float(entry[sec_key])
 
 
-_VALID_COLLIDER_KINDS = ("sphere", "capsule")
+_VALID_COLLIDER_KINDS = ("sphere", "capsule", "mesh", "sdf")
 
 
 def _parse_cloth(raw: Any) -> tuple[ClothPieceSpec, ...]:
@@ -1469,6 +1919,11 @@ def _parse_cloth(raw: Any) -> tuple[ClothPieceSpec, ...]:
             raise DeclarativeAnimationError(
                 "cloth.track_bone must be a non-empty string when set",
             )
+        attract_raw = entry.get("attract_to_bones", ())
+        if attract_raw and not isinstance(attract_raw, (list, tuple)):          # noqa: UP038
+            raise DeclarativeAnimationError(
+                "cloth.attract_to_bones must be a list of bone-name strings",
+            )
         out.append(ClothPieceSpec(
             mesh_node=node,
             structural_stiffness=float(entry.get("structural_stiffness", 0.85)),
@@ -1481,11 +1936,14 @@ def _parse_cloth(raw: Any) -> tuple[ClothPieceSpec, ...]:
             iterations=int(entry.get("iterations", 8)),
             substeps=int(entry.get("substeps", 2)),
             track_bone=str(track) if track else None,
+            attract_to_bones=tuple(str(b) for b in attract_raw),
+            attract_max_distance=float(entry.get("attract_max_distance", 0.10)),
+            passive_skin_deform=bool(entry.get("passive_skin_deform", False)),
         ))
     return tuple(out)
 
 
-def _parse_colliders(raw: Any) -> tuple[ColliderSpec, ...]:
+def _parse_colliders(raw: Any) -> tuple[ColliderSpec, ...]:                  # noqa: PLR0912
     """Validate the optional document-level ``colliders`` array."""
     if raw is None:
         return ()
@@ -1503,6 +1961,58 @@ def _parse_colliders(raw: Any) -> tuple[ColliderSpec, ...]:
                 f"collider kind {kind!r} not supported; expected one of "
                 f"{list(_VALID_COLLIDER_KINDS)}",
             )
+        if kind == "sdf":
+            follow = entry.get("follow_node") or entry.get("follow_bone")
+            if not isinstance(follow, str) or not follow:
+                raise DeclarativeAnimationError(
+                    "sdf collider entry needs a non-empty string "
+                    "'follow_node' (the skinned mesh node name)",
+                )
+            spec = ColliderSpec(
+                kind="sdf",
+                follow_bone=follow,
+                radius=0.0,
+                end_bone=None,
+                skin_offset=float(entry.get("skin_offset", 0.02)),
+            )
+            object.__setattr__(spec, "_sdf_extras", {
+                "voxel_size": float(entry.get("voxel_size", 0.02)),
+                "padding": float(entry.get("padding", 0.05)),
+                "y_min": entry.get("y_min"),
+                "y_max": entry.get("y_max"),
+            })
+            out.append(spec)
+            continue
+        if kind == "mesh":
+            follow = entry.get("follow_node") or entry.get("follow_bone")
+            if not isinstance(follow, str) or not follow:
+                raise DeclarativeAnimationError(
+                    "mesh collider entry needs a non-empty string "
+                    "'follow_node' (the skinned mesh node name)",
+                )
+            # Optional Y-band filter — keep only triangles whose bind-pose
+            # centroid lies in the [y_min, y_max] interval. Cuts the
+            # collision triangle count proportionally (e.g. dog_crawl
+            # hair can only reach the upper body, so filtering Y < 0.4
+            # drops legs+skirt+feet for a ~50% speedup with no visible
+            # change in collision behaviour).
+            radius_field = entry.get("y_min")
+            extras: dict[str, float] = {}
+            if isinstance(radius_field, (int, float)):
+                extras["y_min"] = float(radius_field)
+            ymax_field = entry.get("y_max")
+            if isinstance(ymax_field, (int, float)):
+                extras["y_max"] = float(ymax_field)
+            spec = ColliderSpec(
+                kind="mesh",
+                follow_bone=follow,
+                radius=0.0,
+                end_bone=None,
+                skin_offset=float(entry.get("skin_offset", 0.01)),
+            )
+            object.__setattr__(spec, "_mesh_extras", extras)
+            out.append(spec)
+            continue
         follow = entry.get("follow_bone")
         if not isinstance(follow, str) or not follow:
             raise DeclarativeAnimationError(
@@ -1600,6 +2110,9 @@ class DeclarativeRuntime:
     # string when no lyric is active). Bootstrap wires this to
     # ``viewport.set_overlay_text``; tests pass a list-collecting stub.
     overlay_api: Callable[[str], None] | None = None
+    # Imported mesh list — required for resolving mesh colliders' bind-pose
+    # vertex / index / bone-weight data. Tuple by convention (immutable).
+    meshes: Any = ()
     # Resolution root for paths declared in the JSON (currently just
     # ``audio.path``). Defaults to None → paths resolve relative to
     # CWD; the loader sets this to the .json file's parent so audio
@@ -1618,6 +2131,19 @@ class DeclarativeRuntime:
     # Bone-tracking colliders: list of (collider_obj, kind, head_node, tail_node).
     # ``tail_node`` is None for spheres, a Node for capsules.
     _bone_colliders: list[tuple[Any, str, Any, Any]] = field(default_factory=list)
+    # Mesh colliders: each tuple is (MeshCollider, joint_nodes, inverse_bind).
+    # ``_update_mesh_colliders`` walks each joint's world transform, builds
+    # the bone matrix palette, applies LBS to the collider's bind verts,
+    # and refreshes the triangle world positions / normals / AABB. Done
+    # once per frame (not per substep) since per-vert skinning is the
+    # heaviest part — 30 k verts × Python overhead adds up fast.
+    _mesh_colliders: list[tuple[Any, tuple[Any, ...], Any]] = field(
+        default_factory=list,
+    )
+    # Cache of the per-collider joint-matrix palette from the previous
+    # update. When the current frame's palette matches within tolerance,
+    # skip re-skinning entirely (static-pose fast path).
+    _mesh_collider_palette_cache: dict[int, Any] = field(default_factory=dict)
     _root_drive: _BoneDrive | None = None
     _bone_drives: dict[str, _BoneDrive] = field(default_factory=dict)
     _phase_starts: list[float] = field(default_factory=list)
@@ -1655,6 +2181,12 @@ class DeclarativeRuntime:
     # every phase apply so a phase that drops a node from its list
     # restores it to visible automatically.
     _previously_hidden_nodes: list[Any] = field(default_factory=list)
+    # Last phase index whose ``drape_snapshot`` we applied. Snapshot loading
+    # is one-shot per phase entry — we don't want to re-load the same
+    # JSON file every frame, and re-applying the same drape every tick
+    # would also clobber any motion the user added on top. Reset to -1
+    # in ``_start``; updated each time ``_apply_drape_snapshot`` runs.
+    _drape_snapshot_applied_phase: int = -1
     # Arm chain cache for hand-IK. Same shape as ``_leg_chain_nodes``:
     # ``{"L": (shoulder, elbow, wrist), "R": (...)}``. Populated at
     # ``_start`` from ``rig.arm_chain_l/r`` (resolved through the
@@ -1681,6 +2213,10 @@ class DeclarativeRuntime:
 
     # ----- start ------------------------------------------------------------
     def _start(self) -> None:
+        # Reset the drape-snapshot tracker so the first phase entry
+        # triggers a fresh load (the very first ``_update`` call after
+        # start sees phase_idx 0 and we want it to apply, not skip).
+        self._drape_snapshot_applied_phase = -1
         # Detach any nodes the document asked us to hide BEFORE caching
         # bones so the cache reflects what's actually in the tree. The
         # bundled character.glb ships with a Stairs prop; a clean dance
@@ -1746,6 +2282,11 @@ class DeclarativeRuntime:
             self._bind_foot_planter()
         # Apply physics chain tunings + wind setup if declared.
         self._apply_physics_setup()
+        # Disable physics for chains controlled by hair_pose. Done here
+        # so warmup skips them and they stay at the authored direction
+        # throughout the phase. See ``_apply_hair_pose`` for the
+        # per-frame direction application.
+        self._disable_hair_pose_chains()
         # Audio: load + start playback, optionally swap the time
         # provider so phases progress with the music's clock.
         self._setup_audio()
@@ -1755,6 +2296,86 @@ class DeclarativeRuntime:
         # clear of arms / hands as the dance moves them.
         self._setup_cloth_and_colliders()
         self._cache_ik_chains()
+        # Warmup pass — settles spring/cloth simulation before frame 1
+        # so hair / accessories don't start at rest pose (which for a
+        # non-rest scene pose looks visibly wrong) and visibly swing
+        # to equilibrium during the first second of the animation.
+        # Runs on the CPU spring solver; chains migrate to GPU AFTER.
+        self._warmup_physics()
+        # Now migrate to GPU compute (CPU has finished settling chains).
+        # The GPU dispatcher picks up the joints' world_rotation /
+        # world_position / angular_velocity from the CPU's settled
+        # state on first ``register_chains`` call.
+        if self.animation.gpu_hair_compute:
+            self._migrate_chains_to_gpu()
+
+    def _warmup_physics(self) -> None:
+        """Run ``warmup_seconds`` of physics+cloth simulation to settle chains.
+
+        Called once at the end of ``_start`` so hair / accessory spring
+        chains (and any cloth pieces) reach their gravity-settled
+        equilibrium before any frame is shown. Without this, when the
+        scene's pose is far from the rig's rest pose (dog_crawl bends
+        the head forward), spring chains initialise at REST relative
+        to the bent parent — which puts hair sticking forward instead
+        of hanging down — and visibly swing to equilibrium over the
+        first 1-2 seconds. The warmup absorbs that transient.
+
+        Critically, this also runs IK and refreshes bone-following
+        colliders BEFORE the physics step so the spring solver sees
+        collider geometry that matches the current pose. Without that,
+        capsules stayed at bind-pose positions (where they were created)
+        while bones had moved to e.g. dog_crawl positions — the chains
+        would then settle into a body shape that doesn't exist anymore,
+        ending up "inside" the visible body in the actual pose.
+        """
+        warmup = float(self.animation.warmup_seconds)
+        if warmup <= 0.0:
+            return
+        # First evaluate phase 0 so all bone rotations are in place
+        # before physics samples them.
+        phase = self.animation.phases[0]
+        scope = self._build_scope(0.0, 0.0, 0.0)
+        output = self._compute_phase_output(phase, scope, 0.0)
+        self._reset_idle_bones()
+        self._apply_root(output.translation, output.yaw, output.lean)
+        for bone_key, basis_quat in output.bones_local.items():
+            if _is_identity_quat(basis_quat):
+                continue
+            self._set_bone_local(bone_key, basis_quat)
+        # Resolve arm + leg IK and lock floor-aligned hands / feet so
+        # the leg / arm bones land at their target world positions
+        # before the bone-following capsules sample them. Without this,
+        # the leg capsules track unsolved bind-pose ankles and the hair
+        # collides with bones that aren't where the visible body is.
+        self._apply_hand_ik(phase, scope, 0.0)
+        if phase.floor_align:
+            self._apply_floor_align(phase.floor_align)
+        # Refresh bone-following colliders so the spring solver's
+        # collision is against the POSED body, not the bind pose.
+        if self._bone_colliders:
+            self._update_bone_colliders()
+        if self._mesh_colliders:
+            self._update_mesh_colliders()
+        # Apply scripted hair pose during warmup too so chains visible
+        # on the first frame are already at their authored direction
+        # (physics is disabled for them; warmup wouldn't move them
+        # anyway, but the rotations have to be written ONCE).
+        if phase.hair_pose:
+            self._apply_hair_pose(phase)
+        # Step physics + cloth at fixed 60 Hz for ``warmup`` seconds.
+        dt = 1.0 / 60.0
+        steps = int(round(warmup / dt))
+        physics_host = (
+            getattr(self.physics_lite, "_host", None)
+            if self.physics_lite is not None
+            else None
+        )
+        for _ in range(steps):
+            if physics_host is not None:
+                physics_host.tick(dt)
+            if self.cloth_host is not None:
+                self.cloth_host.tick(dt)
 
     def _cache_ik_chains(self) -> None:
         """Resolve leg + arm chains from the rig into scene-node tuples.
@@ -1763,16 +2384,18 @@ class DeclarativeRuntime:
         branch limit — the four (leg L, leg R, arm L, arm R) chain lookups
         each add a branch and tipped ``_start`` over the line.
         """
+        aliases = self.animation.rig.body_bones
         for side, chain_names in (
             ("L", self.animation.rig.leg_chain_l),
             ("R", self.animation.rig.leg_chain_r),
         ):
             if chain_names is None:
                 continue
-            nodes = tuple(self.scene.find(n) for n in chain_names)
+            resolved_names = tuple(aliases.get(n, n) for n in chain_names)
+            nodes = tuple(self.scene.find(n) for n in resolved_names)
             if all(n is not None for n in nodes):
                 self._leg_chain_nodes[side] = nodes
-        aliases = self.animation.rig.body_bones
+                self._register_chain_bone_drives(resolved_names, nodes)
         for side, chain_names in (
             ("L", self.animation.rig.arm_chain_l),
             ("R", self.animation.rig.arm_chain_r),
@@ -1783,6 +2406,7 @@ class DeclarativeRuntime:
             nodes = tuple(self.scene.find(n) for n in resolved_names)
             if all(n is not None for n in nodes):
                 self._arm_chain_nodes[side] = nodes
+                self._register_chain_bone_drives(resolved_names, nodes)
             else:
                 _log.warning(
                     "declarative: arm chain %s missing bone — IK disabled "
@@ -1791,6 +2415,33 @@ class DeclarativeRuntime:
                     tuple(n.name if n is not None else None for n in nodes),
                 )
         self._capture_floor_align_rest_world(aliases)
+
+    def _register_chain_bone_drives(
+        self,
+        resolved_names: tuple[str, ...],
+        nodes: tuple[Any, ...],
+    ) -> None:
+        """Snapshot each IK-chain bone's rest rotation into ``_bone_drives``.
+
+        Without this, ``_reset_idle_bones`` (which only iterates
+        ``_bone_drives``) skips upper_arm / lower_arm / upper_leg /
+        lower_leg, so the IK pass's ``_add_world_delta`` calls keep
+        accumulating rotation across frames — visible as slow drift
+        (knee Y creeping upward over hundreds of ticks, the calf mesh
+        gradually deforming more, etc.). Registering the chain bones
+        here lets the per-frame reset put them back at rest before the
+        IK adds the current frame's delta.
+        """
+        for name, node in zip(resolved_names, nodes, strict=False):
+            if name in self._bone_drives or node is None:
+                continue
+            node.transform._hydrate_trs_from_override()  # noqa: SLF001
+            self._bone_drives[name] = _BoneDrive(
+                node=node,
+                rest_rotation=np.asarray(
+                    node.transform.rotation, dtype=np.float32,
+                ).copy(),
+            )
 
     def _capture_floor_align_rest_world(self, aliases: dict[str, str]) -> None:
         """For each floor_align bone, capture the LOCAL DIRECTION pointing world -Y in rest.
@@ -1815,12 +2466,19 @@ class DeclarativeRuntime:
         """
         bone_keys: set[str] = set()
         for phase in self.animation.phases:
-            bone_keys.update(phase.floor_align)
+            for entry in phase.floor_align:
+                if isinstance(entry, tuple):
+                    bone_keys.add(entry[0])
+                else:
+                    bone_keys.add(entry)
         if not bone_keys:
             return
-        # Map bone_key -> the IK chain whose END is that bone, so we can
-        # find the chain's 'previous joint' (knee for foot, elbow for
-        # hand) to derive the natural foot/hand extension direction.
+        end_to_parent = self._build_floor_align_end_to_parent()
+        for bone_key in bone_keys:
+            self._capture_floor_align_bone(bone_key, aliases, end_to_parent)
+
+    def _build_floor_align_end_to_parent(self) -> dict[str, Any]:
+        """Map ``end_bone_key`` -> the parent joint node (knee / elbow)."""
         end_to_parent: dict[str, Any] = {}
         empty_chain = (None, None, None)
         for side, chain_def, chain_nodes in (
@@ -1832,38 +2490,43 @@ class DeclarativeRuntime:
             if not chain_def:
                 continue
             end_to_parent[chain_def[2]] = chain_nodes.get(side, empty_chain)[1]
-        for bone_key in bone_keys:
-            bone_name = aliases.get(bone_key, bone_key)
-            node = self.scene.find(bone_name)
-            if node is None:
-                continue
-            matrix = node.transform.to_matrix()
-            parent = node.parent
-            while parent is not None:
-                matrix = parent.transform.to_matrix() @ matrix
-                parent = parent.parent
-            rot = matrix[:3, :3].astype(np.float32, copy=False)
-            contact_local = -rot[1, :].astype(np.float32, copy=True)
-            norm = float(np.linalg.norm(contact_local))
-            if norm > 1.0e-6:  # noqa: PLR2004  # degenerate rest-pose guard
-                contact_local = contact_local / norm
-            self._floor_align_rest_world[id(node)] = contact_local
-            # Bone direction in local frame = first child's REST translation,
-            # normalised. Captures the rig's 'down the bone' direction
-            # (toward fingertips / toe tip).
-            bone_dir_local: np.ndarray | None = None
-            if node.children:
-                offset = np.asarray(
-                    node.children[0].transform.translation, dtype=np.float32,
-                ).reshape(3)
-                offset_norm = float(np.linalg.norm(offset))
-                if offset_norm > 1.0e-6:  # noqa: PLR2004
-                    bone_dir_local = offset / offset_norm
-            if bone_dir_local is not None:
-                self._floor_align_bone_dir_local[id(node)] = bone_dir_local
-            parent_chain = end_to_parent.get(bone_key)
-            if parent_chain is not None:
-                self._floor_align_chain_parent[id(node)] = parent_chain
+        return end_to_parent
+
+    def _capture_floor_align_bone(
+        self,
+        bone_key: str,
+        aliases: dict[str, str],
+        end_to_parent: dict[str, Any],
+    ) -> None:
+        """Capture rest-time data for one floor_align bone."""
+        bone_name = aliases.get(bone_key, bone_key)
+        node = self.scene.find(bone_name)
+        if node is None:
+            return
+        matrix = node.transform.to_matrix()
+        parent = node.parent
+        while parent is not None:
+            matrix = parent.transform.to_matrix() @ matrix
+            parent = parent.parent
+        rot = matrix[:3, :3].astype(np.float32, copy=False)
+        contact_local = -rot[1, :].astype(np.float32, copy=True)
+        norm = float(np.linalg.norm(contact_local))
+        if norm > 1.0e-6:  # noqa: PLR2004  # degenerate rest-pose guard
+            contact_local = contact_local / norm
+        self._floor_align_rest_world[id(node)] = contact_local
+        # Bone direction in local frame = first child's REST translation,
+        # normalised. Captures the rig's 'down the bone' direction
+        # (toward fingertips / toe tip).
+        if node.children:
+            offset = np.asarray(
+                node.children[0].transform.translation, dtype=np.float32,
+            ).reshape(3)
+            offset_norm = float(np.linalg.norm(offset))
+            if offset_norm > 1.0e-6:  # noqa: PLR2004
+                self._floor_align_bone_dir_local[id(node)] = offset / offset_norm
+        parent_chain = end_to_parent.get(bone_key)
+        if parent_chain is not None:
+            self._floor_align_chain_parent[id(node)] = parent_chain
 
     def _apply_pose_blends(
         self,
@@ -1980,7 +2643,7 @@ class DeclarativeRuntime:
                 continue
             parent.remove_child(node)
 
-    def _setup_cloth_and_colliders(self) -> None:
+    def _setup_cloth_and_colliders(self) -> None:                       # noqa: PLR0912
         """Bind cloth pieces + create bone-tracking colliders at start.
 
         Both halves are gated on ``cloth_host`` being wired in (it
@@ -2041,9 +2704,20 @@ class DeclarativeRuntime:
                 iterations=piece.iterations,
                 substeps=piece.substeps,
                 rest_pull=piece.rest_pull,
+                attract_to_bones=piece.attract_to_bones,
+                attract_max_distance=piece.attract_max_distance,
             )
+            if cloth_piece is not None and piece.passive_skin_deform:
+                cloth_piece.params.passive_skin_deform = True
+                self.cloth_host.register_skin_target_follower(cloth_piece, node)
             self._maybe_register_anchor_follower(piece, cloth_piece)
         for spec in self._resolve_collider_specs():
+            if spec.kind == "mesh":
+                self._register_mesh_collider(spec)
+                continue
+            if spec.kind == "sdf":
+                self._register_sdf_collider(spec)
+                continue
             head_node = self.scene.find(spec.follow_bone)
             if head_node is None:
                 _log.warning(
@@ -2067,6 +2741,7 @@ class DeclarativeRuntime:
                     center=head_pos.copy(),
                     radius=spec.radius,
                     skin_offset=spec.skin_offset,
+                    bone_tag=spec.follow_bone or "",
                 )
             else:
                 tail_pos = _world_position(tail_node).astype(np.float32)
@@ -2075,12 +2750,195 @@ class DeclarativeRuntime:
                     b=tail_pos.copy(),
                     radius=spec.radius,
                     skin_offset=spec.skin_offset,
+                    bone_tag=spec.follow_bone or "",
                 )
             self.cloth_host.add_collider(collider)
             self._bone_colliders.append(
                 (collider, spec.kind, head_node, tail_node),
             )
             self._register_collider_bone_filter(collider, head_node, tail_node)
+
+    def _register_mesh_collider(self, spec: ColliderSpec) -> None:
+        """Resolve a ``"mesh"`` collider spec to a MeshCollider and register it.
+
+        Walks the named scene node, finds its mesh + skin reference, decodes
+        the bind-pose vertex / joint / weight / index arrays, and registers a
+        MeshCollider with the cloth host. The collider's per-frame world
+        triangle positions get refreshed by :meth:`_update_mesh_colliders`
+        (called from the same tick step that already refreshes sphere /
+        capsule collider geometry).
+        """
+        from posecascade.animation.cloth import MeshCollider  # noqa: PLC0415
+        from posecascade.scene.component import (  # noqa: PLC0415
+            MeshRefComponent,
+            SkinRefComponent,
+        )
+
+        node = self.scene.find(spec.follow_bone)
+        if node is None:
+            _log.warning(
+                "declarative: mesh collider node %r not in scene; skipping",
+                spec.follow_bone,
+            )
+            return
+        mesh_ref: Any = None
+        skin_component: Any = None
+        for component in node.components:
+            if isinstance(component, MeshRefComponent):
+                mesh_ref = component
+            elif isinstance(component, SkinRefComponent):
+                skin_component = component
+        if mesh_ref is None or skin_component is None or not self.meshes:
+            _log.warning(
+                "declarative: mesh collider node %r missing mesh/skin "
+                "component or meshes list; skipping",
+                spec.follow_bone,
+            )
+            return
+        skin = skin_component.skin
+        if not mesh_ref.mesh_indices:
+            return
+        mesh = self.meshes[mesh_ref.mesh_indices[0]]
+        if (
+            mesh.positions is None
+            or mesh.indices is None
+            or mesh.joints_0 is None
+            or mesh.weights_0 is None
+        ):
+            _log.warning(
+                "declarative: mesh collider %r missing required attributes; "
+                "skipping",
+                spec.follow_bone,
+            )
+            return
+        bind_positions = np.asarray(mesh.positions, dtype=np.float32)
+        bind_normals = (
+            np.asarray(mesh.normals, dtype=np.float32)
+            if mesh.normals is not None
+            else np.zeros_like(bind_positions)
+        )
+        joints = np.asarray(mesh.joints_0, dtype=np.uint16)
+        weights = np.asarray(mesh.weights_0, dtype=np.float32)
+        raw_indices = np.asarray(mesh.indices, dtype=np.uint32)
+        if raw_indices.ndim == 1:
+            raw_indices = raw_indices.reshape(-1, 3)
+        # Optional Y-band subset: keep only triangles whose bind-pose
+        # centroid is within the requested vertical band. Lets a script
+        # restrict the collision surface to the part the hair actually
+        # reaches (head + torso) and skip skirt / legs / feet — cuts
+        # per-query cost roughly in half.
+        extras = getattr(spec, "_mesh_extras", {})
+        y_min = extras.get("y_min")
+        y_max = extras.get("y_max")
+        if y_min is not None or y_max is not None:
+            centroids_y = bind_positions[raw_indices].mean(axis=1)[:, 1]
+            keep = np.ones(len(raw_indices), dtype=bool)
+            if y_min is not None:
+                keep &= centroids_y >= y_min
+            if y_max is not None:
+                keep &= centroids_y <= y_max
+            raw_indices = raw_indices[keep]
+            _log.info(
+                "declarative: mesh collider %r y-band filtered "
+                "(%d → %d triangles)",
+                spec.follow_bone, len(centroids_y), len(raw_indices),
+            )
+        collider = MeshCollider(
+            bind_positions=bind_positions,
+            bind_normals=bind_normals,
+            joints=joints,
+            weights=weights,
+            indices=raw_indices.astype(np.int32, copy=False),
+            skin_offset=spec.skin_offset,
+        )
+        self._mesh_colliders.append(
+            (collider, tuple(skin.joints), np.asarray(
+                skin.inverse_bind_matrices, dtype=np.float32,
+            )),
+        )
+        self.cloth_host.add_collider(collider)
+        _log.info(
+            "declarative: mesh collider %r registered "
+            "(%d verts, %d triangles, %d joints)",
+            spec.follow_bone, len(bind_positions),
+            len(raw_indices), len(skin.joints),
+        )
+
+    def _register_sdf_collider(self, spec: ColliderSpec) -> None:                # noqa: PLR0912
+        """Bake a signed-distance-field collider from a skinned mesh.
+
+        Uses the BIND pose (no per-frame re-bake) — the SDF is generated
+        once at start from bind-pose triangle positions. The bake cost
+        scales with voxel count × triangle count (typical 50³ × 30k =
+        ~3 seconds at startup, then negligible per-frame lookup cost).
+        For posed bodies, the bake-once approach means the collision
+        surface matches the bind, not the current pose; combine with
+        a separate ``mesh`` collider if you need pose-tracking.
+        """
+        import time  # noqa: PLC0415
+
+        from posecascade.animation.cloth import (  # noqa: PLC0415
+            bake_sdf_from_triangles,
+        )
+        from posecascade.scene.component import (  # noqa: PLC0415
+            MeshRefComponent,
+            SkinRefComponent,
+        )
+
+        node = self.scene.find(spec.follow_bone)
+        if node is None or not self.meshes:
+            _log.warning(
+                "declarative: sdf collider node %r missing; skipping",
+                spec.follow_bone,
+            )
+            return
+        mesh_ref = next(
+            (c for c in node.components if isinstance(c, MeshRefComponent)), None,
+        )
+        skin_component = next(
+            (c for c in node.components if isinstance(c, SkinRefComponent)), None,
+        )
+        if mesh_ref is None or skin_component is None or not mesh_ref.mesh_indices:
+            _log.warning(
+                "declarative: sdf collider %r missing mesh/skin components; skipping",
+                spec.follow_bone,
+            )
+            return
+        mesh = self.meshes[mesh_ref.mesh_indices[0]]
+        if mesh.positions is None or mesh.indices is None:
+            return
+        extras = getattr(spec, "_sdf_extras", {})
+        voxel = extras.get("voxel_size", 0.02)
+        padding = extras.get("padding", 0.05)
+        y_min = extras.get("y_min")
+        y_max = extras.get("y_max")
+        bind_positions = np.asarray(mesh.positions, dtype=np.float32)
+        raw_indices = np.asarray(mesh.indices, dtype=np.uint32).reshape(-1, 3)
+        if y_min is not None or y_max is not None:
+            centroids = bind_positions[raw_indices].mean(axis=1)
+            keep = np.ones(len(raw_indices), dtype=bool)
+            if y_min is not None:
+                keep &= centroids[:, 1] >= y_min
+            if y_max is not None:
+                keep &= centroids[:, 1] <= y_max
+            raw_indices = raw_indices[keep]
+        triangles_world = bind_positions[raw_indices].astype(np.float32)
+        t0 = time.perf_counter()
+        sdf = bake_sdf_from_triangles(
+            triangles_world,
+            voxel_size=voxel,
+            padding=padding,
+            skin_offset=spec.skin_offset,
+        )
+        bake_ms = (time.perf_counter() - t0) * 1000.0
+        self.cloth_host.add_collider(sdf)
+        _log.info(
+            "declarative: sdf collider %r baked in %.0f ms "
+            "(%d×%d×%d voxels, %d triangles)",
+            spec.follow_bone, bake_ms,
+            sdf.grid.shape[0], sdf.grid.shape[1], sdf.grid.shape[2],
+            len(triangles_world),
+        )
 
     def _register_collider_bone_filter(
         self, collider: object, head_node: Any, tail_node: Any | None,
@@ -2110,8 +2968,18 @@ class DeclarativeRuntime:
         """
         ground = self.animation.ground
         flat_ground = ground is not None and ground.kind == "flat"
+        ground_y = (
+            _resolve_scalar(ground.params.get("y", 0.0)) if flat_ground else None
+        )
         if flat_ground and hasattr(self.cloth_host, "floor_y"):
-            self.cloth_host.floor_y = _resolve_scalar(ground.params.get("y", 0.0))
+            self.cloth_host.floor_y = ground_y
+        if (
+            self.animation.floor_clamp_tolerance is not None
+            and hasattr(self.cloth_host, "floor_clamp_tolerance")
+        ):
+            self.cloth_host.floor_clamp_tolerance = float(
+                self.animation.floor_clamp_tolerance,
+            )
         if flat_ground and self.animation.auto_clamp_skinned_to_ground:
             return self._discover_skinned_collision_deform_meshes()
         return []
@@ -2236,15 +3104,20 @@ class DeclarativeRuntime:
         Explicit specs from ``animation.colliders`` always win on the
         ``(follow_bone, end_bone, kind)`` key, so a document that wants
         a custom hip-sphere radius gets exactly that without the engine
-        appending its default one too. Auto-emit only fires when cloth
-        pieces are registered AND the document didn't opt out via
-        ``auto_body_colliders: false`` — keeps non-humanoid rigs out of
-        the humanoid leg-collider machinery.
+        appending its default one too. Auto-emit fires when ANY of cloth
+        pieces / collision-deform meshes / physics chains are registered
+        AND the document didn't opt out via ``auto_body_colliders:
+        false`` — keeps non-humanoid rigs out of the humanoid collider
+        machinery, but covers every consumer that wants body colliders
+        (skirt cloth, passive-deform meshes, hair springs).
         """
         explicit = list(self.animation.colliders)
-        if not (
-            self.animation.cloth_pieces and self.animation.auto_body_colliders
-        ):
+        wants_auto_geometry = (
+            self.animation.cloth_pieces
+            or self.animation.collision_deform_meshes
+            or self.animation.physics_chains
+        )
+        if not (wants_auto_geometry and self.animation.auto_body_colliders):
             return explicit
         from posecascade.animation.auto_colliders import (  # noqa: PLC0415
             emit_humanoid_body_colliders,
@@ -2288,6 +3161,202 @@ class DeclarativeRuntime:
             return
         self.cloth_host.register_anchor_follower(cloth_piece, bone_node)
 
+    def _update_mesh_colliders(self) -> None:                              # noqa: PLR0915
+        """Refresh each mesh collider's world triangle positions / normals
+        / AABB from the current bone world transforms.
+
+        Per-frame cost: O(V + T). Uses a per-call cache so each bone's
+        world matrix walk happens once, not once per skinned mesh AND
+        once per recursive parent lookup. Without the cache, a 354-bone
+        rig was eating ~50 ms / frame on parent-chain re-walks alone.
+        """
+        if not self._mesh_colliders:
+            return
+        world_cache: dict[int, np.ndarray] = {}
+
+        def _cached_world(node: Any) -> np.ndarray:
+            cached = world_cache.get(id(node))
+            if cached is not None:
+                return cached
+            local = node.transform.to_matrix().astype(np.float32, copy=False)
+            parent = node.parent
+            result = local if parent is None else _cached_world(parent) @ local
+            world_cache[id(node)] = result
+            return result
+
+        for collider, joint_nodes, inverse_bind in self._mesh_colliders:
+            # Quick pose-fingerprint check BEFORE walking the whole bone tree.
+            # Sample a few "anchor" body bones (hip + chest + head) by reading
+            # their local rotation/translation directly (no parent walk).
+            # If those haven't changed since the last update AND we've already
+            # built the collider once, skip the whole expensive re-skin path.
+            # 354 bone walks × compose_trs costs ~4 ms / frame even on a
+            # cache-hit; this fingerprint check is ~3 µs.
+            fingerprint_key = (id(collider), "_pose_fp")
+            fingerprint = _pose_fingerprint(joint_nodes)
+            last_fp = self._mesh_collider_palette_cache.get(fingerprint_key)
+            if (
+                last_fp is not None
+                and id(collider) in self._mesh_collider_palette_cache
+                and np.allclose(fingerprint, last_fp, atol=2.0e-3)
+            ):
+                continue
+            self._mesh_collider_palette_cache[fingerprint_key] = fingerprint
+            num_joints = len(joint_nodes)
+            bone_worlds = np.empty((num_joints, 4, 4), dtype=np.float32)
+            for j, bone_node in enumerate(joint_nodes):
+                bone_worlds[j] = _cached_world(bone_node)
+            joint_matrices = np.matmul(bone_worlds, inverse_bind)  # (J, 4, 4)
+            # Static-pose fast path: when the joint matrix palette hasn't
+            # changed since the last update (within 0.5 mm tolerance), the
+            # mesh's world positions don't need re-skinning. For an idle
+            # or fixed-pose scene like ``dog_crawl`` this drops the per-
+            # frame mesh-collider cost from ~15 ms to ~0.1 ms while still
+            # tracking actual pose changes via the L1 norm threshold.
+            # Cache check: only re-skin when bones that AFFECT this mesh's
+            # COLLISION SURFACE have moved.
+            #
+            # Hair / chain bones (BackHair*, FrontHair*, SideHair*, ribbon,
+            # tail, etc.) are updated every tick by the spring solver but
+            # in practice they only weight a handful of scalp-anchor verts
+            # — the collision-surface bone palette (chest, hips, head,
+            # arms, legs) is what determines where the body is. Filtering
+            # those wiggle-only joints out of the cache key lets the
+            # static body pose hit cache every frame even while hair is
+            # physically simulating.
+            cache_key = id(collider)
+            last_matrices = self._mesh_collider_palette_cache.get(cache_key)
+            mask = getattr(collider, "_relevant_joint_mask", None)
+            if mask is None:
+                mask = _collider_static_joint_mask(collider, joint_nodes)
+                collider._relevant_joint_mask = mask                          # noqa: SLF001
+            if (
+                last_matrices is not None
+                and last_matrices.shape == joint_matrices.shape
+            ):
+                diffs = np.abs(last_matrices[mask] - joint_matrices[mask])
+                max_per_joint = diffs.reshape(len(mask), -1).max(axis=1)
+                if max_per_joint.max() < 2.0e-3:                              # noqa: PLR2004
+                    continue
+                import os  # noqa: PLC0415
+                if os.environ.get("PC_DEBUG_CACHE"):
+                    worst = int(np.argmax(max_per_joint))
+                    bi = int(mask[worst])
+                    n = joint_nodes[bi]
+                    print(f"[cache miss] {n.name} delta={max_per_joint[worst]:.4f}")
+            self._mesh_collider_palette_cache[cache_key] = joint_matrices.copy()
+            bind_positions = collider.bind_positions
+            joints = collider.joints                # (V, 4)
+            weights = collider.weights              # (V, 4) float32
+            # Vectorised LBS — fully numpy, no per-slot Python loop.
+            # Skin via translation-only application:
+            #   world_pos[v] = sum_k weights[v,k] * (M[joints[v,k]] @ [bind[v], 1])
+            # Apply each slot's full matrix to the bind position then weight-sum.
+            # m: (V, 4, 4, 4)  - matrix per vert per slot
+            m = joint_matrices[joints]
+            bind_h = np.concatenate(
+                [bind_positions, np.ones((len(bind_positions), 1), dtype=np.float32)],
+                axis=1,
+            )
+            # per-vert per-slot position: einsum over (V, 4_slot, 4_row, 4_col) × (V, 4_col)
+            slot_positions = np.einsum("vkij,vj->vki", m, bind_h)
+            # Weighted sum across slots: (V, 4_slot) × (V, 4_slot, 4) → (V, 4)
+            world_positions = np.einsum("vk,vki->vi", weights, slot_positions)[:, :3]
+            # Triangle vertex positions: gather via indices.
+            tris = world_positions[collider.indices]  # (T, 3, 3)
+            collider.triangle_world_positions = tris
+            # Face normals: cross product of two edges, normalise.
+            edge0 = tris[:, 1] - tris[:, 0]
+            edge1 = tris[:, 2] - tris[:, 0]
+            normals = np.cross(edge0, edge1)
+            lengths = np.linalg.norm(normals, axis=1, keepdims=True)
+            normals = normals / np.maximum(lengths, 1.0e-6)
+            collider.triangle_world_normals = normals.astype(np.float32, copy=False)
+            collider.aabb_min = world_positions.min(axis=0)
+            collider.aabb_max = world_positions.max(axis=0)
+            tri_min = tris.min(axis=1)
+            tri_max = tris.max(axis=1)
+            collider.triangle_aabb_min = tri_min
+            collider.triangle_aabb_max = tri_max
+            # Spatial grid: bucket each triangle into every cell its AABB
+            # overlaps. ``_project_mesh`` hashes the query point into a cell
+            # and reads only that cell's (+1 neighbour) triangles instead
+            # of all 30 k. Cell size = 4 × skin_offset so push-out tests
+            # against one cell typically catches the surface; min 5 cm
+            # avoids hash explosion on tiny offsets.
+            self._build_mesh_grid(collider, tri_min, tri_max)
+            # Bump version so any per-joint temporal cache keyed off the
+            # previous mesh state knows to invalidate.
+            collider.update_version += 1
+
+    def _build_mesh_grid(
+        self, collider: Any, tri_min: Any, tri_max: Any,
+    ) -> None:
+        """Bucket triangles into a uniform grid for ``_project_mesh``.
+
+        Vectorised triangle→cell assignment. The python loop over T triangles
+        and nested cell ranges previously took ~10 ms on a 30 k-triangle
+        body mesh — hot enough to swamp the rest of the per-frame budget on
+        every pose change. Switching to a flat numpy gather over precomputed
+        per-axis cell ranges drops it to <1 ms.
+
+        Cell size matches ``skin_offset`` so a single-cell neighbour walk
+        (3³ cells = 27 lookups) covers exactly the push-out search radius.
+        Floor 5 cm to avoid sub-cell triangle explosion on tiny offsets,
+        ceil 15 cm to keep candidate count bounded on thick margins.
+        """
+        cell_size = max(0.05, min(0.15, float(collider.skin_offset)))         # noqa: PLR2004
+        collider.grid_cell_size = cell_size
+        origin = collider.aabb_min.astype(np.float32, copy=False)
+        collider.grid_origin = origin
+        cmin = np.floor((tri_min - origin) / cell_size).astype(np.int32)
+        cmax = np.floor((tri_max - origin) / cell_size).astype(np.int32)
+        # Most triangles span a single cell because the cell size is ~4×
+        # skin_offset while triangles are usually much smaller. Take the
+        # fast path: bucket each triangle into its (cmin == cmax) cell
+        # only, and a fallback list collects the few oversized triangles
+        # that span multiple cells. This avoids a Python loop over T.
+        same = (cmin == cmax).all(axis=1)
+        cells = cmin[same]
+        tri_ids = np.where(same)[0]
+        # Group: dict from (i, j, k) → list of triangle indices.
+        grid: dict[tuple[int, int, int], list[int]] = {}
+        # Pack the (i, j, k) cell key as a single int for fast hashing.
+        keys = (
+            cells[:, 0].astype(np.int64) * 1_000_003
+            + cells[:, 1].astype(np.int64) * 1009
+            + cells[:, 2].astype(np.int64)
+        )
+        order = np.argsort(keys)
+        sorted_keys = keys[order]
+        sorted_tri_ids = tri_ids[order]
+        sorted_cells = cells[order]
+        # Find run boundaries where the packed key changes.
+        change = np.empty(len(sorted_keys), dtype=bool)
+        change[0] = True
+        change[1:] = sorted_keys[1:] != sorted_keys[:-1]
+        boundaries = np.where(change)[0]
+        for i, start in enumerate(boundaries):
+            end = boundaries[i + 1] if i + 1 < len(boundaries) else len(sorted_keys)
+            cell = sorted_cells[start]
+            grid[(int(cell[0]), int(cell[1]), int(cell[2]))] = sorted_tri_ids[
+                start:end
+            ].astype(np.int32, copy=False)
+        # Multi-cell triangles — fall back to the per-triangle Python loop
+        # but only for the (rare) triangles that span multiple cells.
+        multi_indices = np.where(~same)[0]
+        for t in multi_indices:
+            for ix in range(int(cmin[t, 0]), int(cmax[t, 0]) + 1):
+                for iy in range(int(cmin[t, 1]), int(cmax[t, 1]) + 1):
+                    for iz in range(int(cmin[t, 2]), int(cmax[t, 2]) + 1):
+                        key = (ix, iy, iz)
+                        existing = grid.get(key)
+                        if existing is None:
+                            grid[key] = np.asarray([t], dtype=np.int32)
+                        else:
+                            grid[key] = np.append(existing, np.int32(t))
+        collider.grid_cells = grid
+
     def _update_bone_colliders(self) -> None:
         """Refresh each bone-following collider's geometry from its bones.
 
@@ -2311,12 +3380,29 @@ class DeclarativeRuntime:
             if kind == "sphere":
                 collider.prev_center = collider.center.copy()
                 collider.center = head_pos
+                # Cache axis-aligned bounding box as a 6-float tuple so
+                # the hair spring solver's per-sample early-out can
+                # short-circuit far colliders in pure Python (no numpy).
+                # See ``_push_tip_out_of_colliders`` in spring.py.
+                thresh = float(collider.radius) + float(collider.skin_offset)
+                cx, cy, cz = float(head_pos[0]), float(head_pos[1]), float(head_pos[2])
+                collider._cached_aabb = (                                    # noqa: SLF001
+                    cx - thresh, cy - thresh, cz - thresh,
+                    cx + thresh, cy + thresh, cz + thresh,
+                )
             else:
                 tail_pos = _world_position(tail_node).astype(np.float32)
                 collider.prev_a = collider.a.copy()
                 collider.prev_b = collider.b.copy()
                 collider.a = head_pos
                 collider.b = tail_pos
+                thresh = float(collider.radius) + float(collider.skin_offset)
+                ax, ay, az = float(head_pos[0]), float(head_pos[1]), float(head_pos[2])
+                bx, by, bz = float(tail_pos[0]), float(tail_pos[1]), float(tail_pos[2])
+                collider._cached_aabb = (                                    # noqa: SLF001
+                    min(ax, bx) - thresh, min(ay, by) - thresh, min(az, bz) - thresh,
+                    max(ax, bx) + thresh, max(ay, by) + thresh, max(az, bz) + thresh,
+                )
 
     def _setup_audio(self) -> None:
         """Optional audio-player attach + clock swap.
@@ -2369,7 +3455,193 @@ class DeclarativeRuntime:
 
             self.time = _audio_clock
 
-    def _apply_physics_setup(self) -> None:
+    def _migrate_chains_to_gpu(self) -> None:
+        """Flag every registered spring chain ``gpu_managed`` so the
+        CPU simulator skips it and the renderer's hair-compute
+        dispatcher takes over.
+
+        Looks the host up via ``self.physics_lite._host`` — same
+        indirection :meth:`_warmup_physics` already uses. Quietly
+        no-ops when the host is missing or the GPU dispatcher
+        wasn't compiled (renderer falls back to CPU and the
+        chains keep working).
+        """
+        host = getattr(self.physics_lite, "_host", None)
+        if host is None or not hasattr(host, "mark_gpu_managed"):
+            return
+        count = 0
+        for chain in host.chains():
+            host.mark_gpu_managed(chain)
+            count += 1
+        _log.info(
+            "declarative: %d spring chains migrated to GPU compute path",
+            count,
+        )
+
+    def _disable_hair_pose_chains(self) -> None:
+        """Turn off physics for any chain referenced by ``hair_pose`` in
+        any phase. Scripted hair pose drives those chains directly via
+        :meth:`_apply_hair_pose`; physics would just fight the authored
+        directions. Idempotent — re-running is safe.
+        """
+        if self.physics_lite is None:
+            return
+        controlled: set[str] = set()
+        for phase in self.animation.phases:
+            controlled.update(phase.hair_pose.keys())
+        if not controlled:
+            return
+        host = getattr(self.physics_lite, "_host", None)
+        if host is None:
+            return
+        for name in controlled:
+            chain = host.find_chain(name)
+            if chain is None:
+                _log.warning(
+                    "declarative: hair_pose references unknown chain %r — skipping",
+                    name,
+                )
+                continue
+            chain.enabled = False
+
+    def _apply_hair_pose(self, phase: Phase) -> None:  # noqa: PLR0912, PLR0915  # FK walk + floor clamp + anchor offset are intrinsically branchy
+        """Write per-joint local rotations for chains in ``phase.hair_pose``.
+
+        For each chain, walks joints root → tip. Each joint's WORLD
+        rotation is the shortest-arc rotation that maps the joint's
+        local bone vector to the authored world direction; the local
+        rotation written to the bone is ``inv(parent_world) × world``.
+        Parent world for joint[0] is the chain anchor; for later
+        joints it's the previously-set joint's world (so direction
+        changes compose along the chain like FK).
+
+        Skips silently when the JSON direction count doesn't match the
+        chain's joint count — flagged once at start via a warning log.
+        """
+        if self.physics_lite is None or not phase.hair_pose:
+            return
+        from posecascade.animation.spring import (  # noqa: PLC0415
+            _shortest_arc_quat,
+            node_world_pose,
+        )
+        from posecascade.utils.math3d import (  # noqa: PLC0415
+            quat_inverse,
+            quat_mul,
+            quat_normalize,
+            quat_rotate_vec,
+            vec3,
+        )
+
+        host = getattr(self.physics_lite, "_host", None)
+        if host is None:
+            return
+        # Floor clamp DISABLED for hair_pose by using a deep-below-
+        # ground sentinel. Any positive floor_y caused the authored
+        # direction to be redirected horizontally once the chain
+        # crossed it, producing visible "ghost" hair laying along the
+        # floor surface (and its directional-light shadow visible on
+        # the floor in front of the character). Setting floor_y far
+        # below ground lets the chain extend in the authored direction
+        # straight through the floor plane — the floor renderer hides
+        # everything below Y=0, so the visible hair just terminates
+        # cleanly at the floor surface. No horizontal floor extension,
+        # no projected ghost. Reserve the floor-clamp logic for cases
+        # where authors WANT chain to lay flat (then they set a
+        # positive floor_y per-chain, future feature).
+        floor_y = -10.0
+        for chain_name, joint_dirs in phase.hair_pose.items():
+            chain = host.find_chain(chain_name)
+            if chain is None or not chain.joints:
+                continue
+            if len(joint_dirs) != len(chain.joints):
+                _log.warning(
+                    "declarative: hair_pose[%r] has %d directions but the chain "
+                    "has %d joints — applying min(N) and skipping the rest",
+                    chain_name, len(joint_dirs), len(chain.joints),
+                )
+            parent_pos, parent_rot = node_world_pose(chain.anchor)
+            parent_pos = np.asarray(parent_pos, dtype=np.float32)
+            # Optional world-space offset for the FIRST joint's pivot —
+            # used when the rig's ``rest_local_position`` puts the chain
+            # start in an awkward place under the current head rotation.
+            # When set we override j0's pivot entirely (skipping the
+            # parent_rot × rest_local product) so the offset has the
+            # straightforward "chain starts here in world" meaning.
+            anchor_offset = phase.hair_anchor_offset.get(chain_name)
+            anchor_offset_vec = (
+                np.asarray(anchor_offset, dtype=np.float32)
+                if anchor_offset is not None else None
+            )
+            for joint_idx, (joint, dir_tuple) in enumerate(
+                zip(chain.joints, joint_dirs, strict=False),
+            ):
+                bone_local = np.asarray(joint.bone_vector_local, dtype=np.float32)
+                bone_len = float(np.linalg.norm(bone_local))
+                if bone_len < 1.0e-6:                                        # noqa: PLR2004
+                    continue
+                world_dir = np.asarray(dir_tuple, dtype=np.float32)
+                dir_norm = float(np.linalg.norm(world_dir))
+                if dir_norm < 1.0e-6:                                        # noqa: PLR2004
+                    continue
+                # Pivot in world = current chain-walk position + parent
+                # rotation × this joint's rest-local offset. For a
+                # static authored chain the pivot is just the previous
+                # joint's tip (parent_rot was set so the tip lands on
+                # the authored direction at the previous step).
+                # j0's pivot can be overridden via ``hair_anchor_offset``
+                # — used when the rig's rest_local for joint 0 lands in
+                # an unwanted spot under the current head rotation.
+                if joint_idx == 0 and anchor_offset_vec is not None:
+                    pivot = parent_pos + anchor_offset_vec
+                else:
+                    pivot = parent_pos + quat_rotate_vec(
+                        parent_rot, joint.rest_local_position,
+                    )
+                effective_dir = world_dir / dir_norm
+                projected_tip_y = float(pivot[1]) + float(effective_dir[1]) * bone_len
+                if projected_tip_y < floor_y:
+                    # Floor-bend: tilt the effective direction so the
+                    # tip lands at floor_y, preserving the XZ
+                    # projection (same trick as _apply_static_drape's
+                    # implicit floor clamp). Stops scripted hair from
+                    # extending below the ground plane the way the
+                    # straight-line authored direction would.
+                    dy = floor_y - float(pivot[1])
+                    dy_clamped = max(-bone_len, min(bone_len, dy))
+                    horiz_sq = bone_len * bone_len - dy_clamped * dy_clamped
+                    horiz_extent = float(np.sqrt(max(horiz_sq, 0.0)))
+                    horiz_xz = np.array(
+                        [float(effective_dir[0]), 0.0, float(effective_dir[2])],
+                        dtype=np.float32,
+                    )
+                    horiz_norm = float(np.linalg.norm(horiz_xz))
+                    if horiz_norm > 1.0e-6 and bone_len > 1.0e-6:          # noqa: PLR2004
+                        horiz_xz = horiz_xz * (horiz_extent / horiz_norm / bone_len)
+                        candidate = np.array(
+                            [horiz_xz[0], dy_clamped / bone_len, horiz_xz[2]],
+                            dtype=np.float32,
+                        )
+                        cand_norm = float(np.linalg.norm(candidate))
+                        if cand_norm > 1.0e-6:                             # noqa: PLR2004
+                            effective_dir = candidate / cand_norm
+                bone_local_dir = bone_local / bone_len
+                world_rot = _shortest_arc_quat(bone_local_dir, effective_dir)
+                local_rot = quat_normalize(
+                    quat_mul(quat_inverse(parent_rot), world_rot),
+                )
+                joint.node.transform.set_rotation(local_rot)
+                joint.world_rotation = world_rot
+                joint.world_position = pivot
+                joint.angular_velocity = vec3(0.0, 0.0, 0.0)
+                joint.initialized = True
+                # Next joint hangs from THIS joint's pivot via the
+                # next joint's rest_local_position offset (rotated
+                # by this joint's world rotation). Matches the chain
+                # walk in :func:`_apply_static_drape`.
+                parent_rot = world_rot
+                parent_pos = pivot
+
+    def _apply_physics_setup(self) -> None:  # noqa: PLR0912, PLR0915  # per-chain param dispatch — each Magica feature adds an if-block
         if self.physics_lite is None:
             return
         for chain_name, params in self.animation.physics_chains.items():
@@ -2383,6 +3655,97 @@ class DeclarativeRuntime:
                 chain.damping = params["damping"]
             if "inertia" in params:
                 chain.set_inertia(params["inertia"])
+            # Angular-cone constraint. Authors specify the cone half-angle
+            # in degrees (more intuitive than radians for hair behaviour).
+            # 45° = very stiff hair-spine that barely tilts off rest;
+            # 75° = looser hair that swings more before hitting the wall;
+            # omit (or set >= 180°) for no limit (legacy behaviour).
+            if "max_swing_deg" in params:
+                chain.max_swing_rad = math.radians(float(params["max_swing_deg"]))
+            # Per-chain world-space gravity override (3-tuple of numbers).
+            # Used by extreme poses where world-down gravity would push
+            # the chain into the body. E.g. dog-crawl back-hair gets
+            # ``[0, 0, -9.8]`` so hair drapes BEHIND the character
+            # rather than down through the back.
+            if "gravity_override" in params:
+                vec = params["gravity_override"]
+                if isinstance(vec, (list, tuple)) and len(vec) == 3:               # noqa: UP038, PLR2004
+                    chain.set_gravity_override(
+                        [float(c) for c in vec],
+                    )
+            # Static-drape: hand-authored direction, no physics. Used
+            # for poses where simulation can't reliably route the chain
+            # around the body (dog-crawl, prone, hand-stand). Requires
+            # ``gravity_override`` to be set too (provides the direction).
+            if "static_drape" in params:
+                chain.set_static_drape(bool(params["static_drape"]))
+            # Hard-disable a chain so it stays at REST local rotation —
+            # bones simply inherit the head bone's pose through the
+            # hierarchy, no spring, no override. Used when the rig's
+            # natural bind-pose drape direction is the desired look in
+            # an extreme pose (e.g. let head-forward dog-crawl just
+            # carry the chain forward via head rotation, no override).
+            if "enabled" in params:
+                chain.enabled = bool(params["enabled"])
+            # Magica-Cloth-style extended params. All optional; absent =>
+            # legacy behaviour. Validation: floats clamped to >= 0
+            # except stiffness_tip which inherits chain.stiffness when
+            # omitted. See SpringChain dataclass docstrings for semantics.
+            if "self_collision_radius" in params:
+                chain.self_collision_radius = max(0.0, float(params["self_collision_radius"]))
+            if "tether_max_stretch" in params:
+                chain.tether_max_stretch = max(0.0, float(params["tether_max_stretch"]))
+            if "stiffness_tip" in params:
+                chain.stiffness_tip = float(params["stiffness_tip"])
+            if "air_drag" in params:
+                chain.air_drag = max(0.0, float(params["air_drag"]))
+            if "inertia_carry" in params:
+                chain.inertia_carry = max(0.0, min(1.0, float(params["inertia_carry"])))
+            if "local_space" in params:
+                chain.local_space = bool(params["local_space"])
+            if "attract_to_bones" in params:
+                raw = params["attract_to_bones"]
+                if isinstance(raw, (list, tuple)):                              # noqa: UP038
+                    chain.attract_to_bones = tuple(str(b) for b in raw)
+                else:
+                    _log.warning(
+                        "declarative: attract_to_bones for chain %r must be a list of "
+                        "bone names — got %r; skipping",
+                        chain_name, raw,
+                    )
+            if "attract_max_distance" in params:
+                chain.attract_max_distance = max(0.0, float(params["attract_max_distance"]))
+            if "mass" in params:
+                # Scalar mass applies to every joint in the chain.
+                m = max(_NUMERIC_MASS_EPS, float(params["mass"]))
+                for j in chain.joints:
+                    j.mass = m
+            if "mass_per_joint" in params:
+                # Per-joint list. Length must match the chain length;
+                # silently ignored otherwise (warning logged).
+                m_list = params["mass_per_joint"]
+                if (
+                    isinstance(m_list, (list, tuple))                        # noqa: UP038
+                    and len(m_list) == len(chain.joints)
+                ):
+                    for j, m in zip(chain.joints, m_list, strict=True):
+                        j.mass = max(_NUMERIC_MASS_EPS, float(m))
+                else:
+                    _log.warning(
+                        "declarative: mass_per_joint for chain %r must be a list of"
+                        " %d numbers — got %r; skipping",
+                        chain_name, len(chain.joints), m_list,
+                    )
+        # GPU migration is INTENTIONALLY deferred to after
+        # ``_warmup_physics`` (see ``_start``). If we migrated here, the
+        # CPU spring solver would skip every chain during warmup —
+        # ``gpu_managed`` chains short-circuit the CPU step — and the
+        # renderer's ``apply_hair_compute`` isn't reachable from the
+        # declarative loader, so GPU-managed chains would stay at REST
+        # POSE through warmup. Result: the first viewport frame shows
+        # bind-pose hair rotating to gravity_override target ("flying
+        # up first then falling"). Running warmup on CPU first lets the
+        # chains settle, then GPU takes over with the settled state.
         if self.animation.wind is not None:
             wind = self.animation.wind
             self.physics_lite.add_wind(
@@ -2438,6 +3801,7 @@ class DeclarativeRuntime:
         elapsed = self.time() % self.animation.loop_sec
         phase_idx, phase_t, phase_elapsed = self._phase_index_at(elapsed)
         phase = self.animation.phases[phase_idx]
+        self._apply_drape_snapshot_if_phase_changed(phase_idx, phase)
         scope = self._build_scope(elapsed, phase_t, phase_elapsed)
         output = self._compute_phase_output(phase, scope, phase_t)
         # Cross-fade with the next phase if both phases consent. The
@@ -2514,7 +3878,64 @@ class DeclarativeRuntime:
         if phase.floor_align:
             self._apply_floor_align(phase.floor_align)
         self._apply_node_visibility(phase.hidden_nodes)
+        # Scripted hair pose AFTER IK + floor_align so the chain
+        # rotations land on top of the final upper-body pose. Physics
+        # for these chains was disabled at start; this is what actually
+        # drives their bone rotations each frame. Inner method
+        # short-circuits when phase.hair_pose is empty so we don't
+        # need a branch here (keeps cyclomatic complexity inside the
+        # rule limit).
+        self._apply_hair_pose(phase)
         self._post_bone_writes(output, elapsed)
+
+    def _apply_drape_snapshot_if_phase_changed(self, phase_idx: int, phase: Phase) -> None:
+        """Load + apply ``phase.drape_snapshot`` once on phase entry.
+
+        No-op when the phase has no snapshot declared or when this phase
+        was already the active one last tick. Missing files log a warning
+        and let physics continue normally — a drape snapshot is an
+        enhancement, not a hard requirement.
+        """
+        if phase_idx == self._drape_snapshot_applied_phase:
+            return
+        self._drape_snapshot_applied_phase = phase_idx
+        if not phase.drape_snapshot:
+            return
+        from posecascade.animation import drape_snapshot as _ds  # noqa: PLC0415
+        from posecascade.assets.path_safety import resolve_safe  # noqa: PLC0415
+        script_dir = (
+            Path(self.source_dir) if self.source_dir is not None else Path.cwd()
+        )
+        try:
+            resolved = resolve_safe(script_dir, phase.drape_snapshot)
+        except UnsafePathError as err:
+            _log.warning("declarative: drape_snapshot path rejected: %s", err)
+            return
+        if not resolved.exists():
+            _log.warning(
+                "declarative: drape_snapshot %s not found; physics will run normally",
+                resolved,
+            )
+            return
+        try:
+            snap = _ds.load(resolved)
+        except (_ds.DrapeSnapshotError, PoseCascadeError) as err:
+            _log.warning(
+                "declarative: drape_snapshot %s failed to load: %s", resolved, err,
+            )
+            return
+        physics_host = (
+            getattr(self.physics_lite, "_host", None)
+            if self.physics_lite is not None
+            else None
+        )
+        if physics_host is None or self.cloth_host is None:
+            return
+        _ds.apply(snap, physics_host, self.cloth_host)
+        _log.info(
+            "declarative: applied drape snapshot %r (settled at %.2fs)",
+            snap.name, snap.settled_at_seconds,
+        )
 
     def _apply_node_visibility(self, hidden_nodes: tuple[str, ...]) -> None:
         """Toggle ``Node.visible`` so the renderer skips listed mesh nodes.
@@ -2559,6 +3980,8 @@ class DeclarativeRuntime:
             self._apply_lyrics(elapsed)
         if self._bone_colliders:
             self._update_bone_colliders()
+        if self._mesh_colliders:
+            self._update_mesh_colliders()
 
     def _apply_camera(self, elapsed: float) -> None:
         """Lerp between bracketing camera keyframes and write to ``camera_api``.
@@ -2919,14 +4342,28 @@ class DeclarativeRuntime:
             )
         except ImportError:
             return
-        bend_hint = vec3(0.0, 0.0, -1.0)
+        bend_hint = self._resolve_bend_hint()
+        self._solve_arm_ik(phase, scope, phase_t, bend_hint, solve_two_bone_analytic)
+        self._solve_leg_ik(phase, scope, phase_t, bend_hint, solve_two_bone_analytic)
+        return
+
+    def _resolve_bend_hint(self) -> np.ndarray:
+        """Pick the IK bend hint — planter's body forward when available, else -Z."""
         if self.floor_api is not None:
             planter = getattr(self.floor_api, "_planter", None)
             if planter is not None:
-                bend_hint = np.asarray(
-                    planter.body_forward_world, dtype=np.float32,
-                )
-        # Arms.
+                return np.asarray(planter.body_forward_world, dtype=np.float32)
+        return vec3(0.0, 0.0, -1.0)
+
+    def _solve_arm_ik(  # noqa: PLR0913
+        self,
+        phase: Phase,
+        scope: dict[str, float],
+        phase_t: float,
+        bend_hint: np.ndarray,
+        solver: Callable[..., None],
+    ) -> None:
+        """Run analytical 2-bone IK on each arm chain with a hand target."""
         for side, target_spec in (
             ("L", phase.hand_l_target), ("R", phase.hand_r_target),
         ):
@@ -2943,17 +4380,40 @@ class DeclarativeRuntime:
             root, mid, end = chain
             # max_stretch=1.10 lets the arm reach a hand-plant target
             # that's a couple of centimetres past the rig's natural
-            # reach (Herta's arm is 0.37 m from shoulder; dog_crawl's
-            # floor target is ~0.40 m away). The visible stretch is
-            # under one finger-knuckle long; without it the wrist
-            # floats above the floor and the user keeps reporting
-            # 'hand not touching ground'.
-            solve_two_bone_analytic(
-                root, mid, end, target, bend_hint=bend_hint, max_stretch=1.10,
+            # reach without the wrist floating above the floor. JSON
+            # may override with ``ik.arm_max_stretch`` when a deeper
+            # crawl pose needs the arms to stretch further before the
+            # torso has to bend hard.
+            arm_max_stretch = (
+                phase.arm_max_stretch if phase.arm_max_stretch is not None else 1.10
             )
-        # Legs. Knees fold the OTHER way relative to elbows; flip the
-        # bend hint Z so a body facing -Z gets knee bend in +Z (forward).
-        leg_bend = (-bend_hint).astype(np.float32, copy=False)
+            solver(
+                root, mid, end, target,
+                bend_hint=bend_hint, max_stretch=arm_max_stretch,
+            )
+
+    def _solve_leg_ik(  # noqa: PLR0913
+        self,
+        phase: Phase,
+        scope: dict[str, float],
+        phase_t: float,
+        bend_hint: np.ndarray,
+        solver: Callable[..., None],
+    ) -> None:
+        """Run analytical 2-bone IK on each leg chain with a foot target.
+
+        Knees fold the OTHER way relative to elbows; flip the bend hint
+        Z so a body facing -Z gets knee bend in +Z (forward). Per-phase
+        ``ik.leg_bend_world`` overrides the default for poses where the
+        natural perpendicular projection drops the knee below the floor.
+        ``ik.leg_floor_clearance_y`` further constrains the knee to a
+        floor plane when set.
+        """
+        if phase.leg_bend_world is not None:
+            leg_bend = np.asarray(phase.leg_bend_world, dtype=np.float32)
+        else:
+            leg_bend = (-bend_hint).astype(np.float32, copy=False)
+        leg_floor_y = self._leg_floor_clearance_y(phase)
         for side, target_spec in (
             ("L", phase.foot_l_target), ("R", phase.foot_r_target),
         ):
@@ -2970,9 +4430,28 @@ class DeclarativeRuntime:
             root, mid, end = chain
             # Legs use stretchy too — never compounds because
             # _scale_bone_translation caches rest and re-applies absolute.
-            solve_two_bone_analytic(
-                root, mid, end, target, bend_hint=leg_bend, max_stretch=1.10,
+            leg_max_stretch = (
+                phase.leg_max_stretch if phase.leg_max_stretch is not None else 1.10
             )
+            solver(
+                root, mid, end, target,
+                bend_hint=leg_bend, max_stretch=leg_max_stretch,
+                floor_y=leg_floor_y,
+            )
+
+    def _leg_floor_clearance_y(self, phase: Phase) -> float | None:
+        """Per-phase opt-in: keep the knee at / above this Y after the IK solve.
+
+        Returns ``phase.leg_floor_clearance_y`` when the phase set it
+        explicitly, falling back to ``None`` (no clamp) otherwise. Even
+        on flat ground we don't default this on, because for some
+        target geometries the only knee positions on the floor plane
+        are laterally splayed — the author should opt in only when
+        the natural bend would visibly pancake the shin.
+        """
+        del self  # static-style helper; keep the method on the runtime
+                  # for symmetry with other phase-level lookups.
+        return phase.leg_floor_clearance_y
 
     def _resolve_ik_target(
         self,
@@ -2993,7 +4472,7 @@ class DeclarativeRuntime:
             return None
         return np.array((tx, ty, tz), dtype=np.float32)
 
-    def _apply_floor_align(self, bone_keys: tuple[str, ...]) -> None:
+    def _apply_floor_align(self, bone_keys: tuple[Any, ...]) -> None:
         """Full 2-axis orientation lock: contact-normal down + bone-axis horizontal.
 
         Each bone's rotation is set so that:
@@ -3021,31 +4500,100 @@ class DeclarativeRuntime:
         except ImportError:
             return
         aliases = self.animation.rig.body_bones
-        for bone_key in bone_keys:
-            bone_name = aliases.get(bone_key, bone_key)
-            node = self.scene.find(bone_name)
-            if node is None:
-                _log.warning(
-                    "declarative: floor_align bone %r not in scene; skipping",
-                    bone_key,
-                )
-                continue
-            contact_local = self._floor_align_rest_world.get(id(node))
-            if contact_local is None:
-                continue
-            bone_dir_local = self._floor_align_bone_dir_local.get(id(node))
-            parent_joint = self._floor_align_chain_parent.get(id(node))
-            if bone_dir_local is None or parent_joint is None:
-                align_bone_axis_to_world(node, tuple(contact_local), (0.0, -1.0, 0.0))
-                continue
-            # Secondary axis: flatten the bone's CURRENT world direction
-            # to the horizontal plane. Preserves the heel-to-toe (or
-            # forearm-to-fingertip) direction the chain naturally
-            # produced after IK, just removes the Y component so the
-            # bone lies horizontal instead of tilted up/down. This is
-            # what makes 'heel + toe both on the floor' work without
-            # forcing a >90 deg flip (which is what the chain-extension
-            # secondary used to require for dog_crawl's folded shin).
+        for entry in bone_keys:
+            self._apply_floor_align_one(
+                entry, aliases,
+                align_bone_axis_to_world, align_bone_two_axes_to_world,
+            )
+
+    def _apply_floor_align_one(  # noqa: PLR0913
+        self,
+        entry: Any,
+        aliases: dict[str, str],
+        align_axis: Callable[..., None],
+        align_two_axes: Callable[..., None],
+    ) -> None:
+        """Resolve and apply floor_align for a single entry."""
+        bone_key, explicit_toe_world, sole_world = _unpack_floor_align_entry(entry)
+        bone_name = aliases.get(bone_key, bone_key)
+        node = self.scene.find(bone_name)
+        if node is None:
+            _log.warning(
+                "declarative: floor_align bone %r not in scene; skipping",
+                bone_key,
+            )
+            return
+        contact_local = self._floor_align_rest_world.get(id(node))
+        if contact_local is None:
+            return
+        bone_dir_local = self._floor_align_bone_dir_local.get(id(node))
+        parent_joint = self._floor_align_chain_parent.get(id(node))
+        # Explicit world toe direction (from JSON) wins over every
+        # auto-derived heuristic. Lets the author pin "toes face -Z"
+        # for a horizontal-body pose where the chain extension is
+        # near-vertical (and the projection then flips).
+        if explicit_toe_world is not None and bone_dir_local is not None:
+            self._floor_align_with_explicit_toe(
+                node, contact_local, bone_dir_local,
+                explicit_toe_world, sole_world,
+                align_axis, align_two_axes,
+            )
+            return
+        if bone_dir_local is None or parent_joint is None:
+            align_axis(node, tuple(contact_local), sole_world)
+            return
+        self._floor_align_auto(
+            node, contact_local, bone_dir_local, parent_joint, sole_world,
+            align_axis, align_two_axes,
+        )
+
+    def _floor_align_with_explicit_toe(  # noqa: PLR0913
+        self,
+        node: Any,
+        contact_local: np.ndarray,
+        bone_dir_local: np.ndarray,
+        explicit_toe_world: tuple[float, float, float],
+        sole_world: tuple[float, float, float],
+        align_axis: Callable[..., None],
+        align_two_axes: Callable[..., None],
+    ) -> None:
+        """Apply 2-axis floor_align using an explicit world-space toe direction."""
+        cur_bone_horiz = np.asarray(explicit_toe_world, dtype=np.float64)
+        cur_bone_horiz[1] = 0.0
+        horiz_norm = float(np.linalg.norm(cur_bone_horiz))
+        if horiz_norm < 1.0e-6:  # noqa: PLR2004
+            align_axis(node, tuple(contact_local), sole_world)
+            return
+        cur_bone_horiz = cur_bone_horiz / horiz_norm
+        align_two_axes(
+            node,
+            tuple(bone_dir_local), tuple(cur_bone_horiz),
+            tuple(contact_local), sole_world,
+        )
+
+    def _floor_align_auto(  # noqa: PLR0913
+        self,
+        node: Any,
+        contact_local: np.ndarray,
+        bone_dir_local: np.ndarray,
+        parent_joint: Any,
+        sole_world: tuple[float, float, float],
+        align_axis: Callable[..., None],
+        align_two_axes: Callable[..., None],
+    ) -> None:
+        """Apply 2-axis floor_align with toe direction auto-derived from the chain.
+
+        Secondary axis is parent_joint -> bone direction (knee -> ankle,
+        elbow -> wrist), flattened to horizontal. Falls back to the
+        bone's currently-rotated toe direction if the chain is
+        near-vertical, and to single-axis alignment if THAT is too.
+        """
+        bone_pos = _world_position(node)
+        parent_pos = _world_position(parent_joint)
+        cur_bone_horiz = bone_pos - parent_pos
+        cur_bone_horiz[1] = 0.0
+        horiz_norm = float(np.linalg.norm(cur_bone_horiz))
+        if horiz_norm < 1.0e-6:  # noqa: PLR2004
             from posecascade.animation.ik import (  # noqa: PLC0415
                 _rotate_vec_by_quat,
                 _world_rotation,
@@ -3058,30 +4606,14 @@ class DeclarativeRuntime:
             cur_bone_horiz[1] = 0.0
             horiz_norm = float(np.linalg.norm(cur_bone_horiz))
             if horiz_norm < 1.0e-6:  # noqa: PLR2004
-                # Bone is straight up/down — no horizontal direction to
-                # preserve. Use parent-to-bone extension as fallback if
-                # available, else single-axis.
-                if parent_joint is None:
-                    align_bone_axis_to_world(
-                        node, tuple(contact_local), (0.0, -1.0, 0.0),
-                    )
-                    continue
-                bone_pos = _world_position(node)
-                parent_pos = _world_position(parent_joint)
-                cur_bone_horiz = bone_pos - parent_pos
-                cur_bone_horiz[1] = 0.0
-                horiz_norm = float(np.linalg.norm(cur_bone_horiz))
-                if horiz_norm < 1.0e-6:  # noqa: PLR2004
-                    align_bone_axis_to_world(
-                        node, tuple(contact_local), (0.0, -1.0, 0.0),
-                    )
-                    continue
-            cur_bone_horiz = cur_bone_horiz / horiz_norm
-            align_bone_two_axes_to_world(
-                node,
-                tuple(bone_dir_local), tuple(cur_bone_horiz),
-                tuple(contact_local), (0.0, -1.0, 0.0),
-            )
+                align_axis(node, tuple(contact_local), sole_world)
+                return
+        cur_bone_horiz = cur_bone_horiz / horiz_norm
+        align_two_axes(
+            node,
+            tuple(bone_dir_local), tuple(cur_bone_horiz),
+            tuple(contact_local), sole_world,
+        )
 
     def _apply_lock_targets(self) -> None:
         """Run CCD 2-bone IK on each foot with an active lock or release.
@@ -3475,6 +5007,67 @@ def _yaw_to_world(body_delta: np.ndarray, yaw: float) -> np.ndarray:
     return quat_mul(yaw_q, quat_mul(body_delta, yaw_inv))
 
 
+_POSE_FINGERPRINT_BONE_NAMES: tuple[str, ...] = (
+    "Hips_04", "Chest_0179", "Head_0201",
+    "Left arm_0306", "Right arm_0269",
+    "Left leg_09", "Right leg_05",
+)
+
+
+def _pose_fingerprint(joint_nodes: tuple[Any, ...]) -> np.ndarray:
+    """Cheap pose-change fingerprint: pack a few anchor bones' LOCAL
+    transforms into a flat float vector.
+
+    Cheaper than walking the full bone tree by ~100× (just reads each
+    sample bone's translation + rotation_quat directly). Bones picked
+    so the fingerprint covers torso pitch, limb swing, head turn —
+    any visible pose change moves at least one of them past the
+    tolerance threshold.
+    """
+    samples = []
+    for bone_node in joint_nodes:
+        if bone_node.name in _POSE_FINGERPRINT_BONE_NAMES:
+            samples.append(np.asarray(bone_node.transform.translation, dtype=np.float32))
+            samples.append(np.asarray(bone_node.transform.rotation, dtype=np.float32))
+    if not samples:
+        # Fallback — first 4 bones' translation is still cheaper than
+        # the full walk.
+        for bone_node in joint_nodes[:4]:
+            samples.append(np.asarray(bone_node.transform.translation, dtype=np.float32))
+    return np.concatenate(samples)
+
+
+_DYNAMIC_BONE_PREFIXES: tuple[str, ...] = (
+    "BackHair", "FrontHair", "SideHair", "Hair", "ribbon", "Sleeve",
+    "UpperSleeve", "Breast", "Skirt", "skirt", "Tail", "尻尾", "前髪",
+    "後髪", "横髪", "髪", "リボン",
+)
+
+
+def _collider_static_joint_mask(
+    collider: Any, joint_nodes: tuple[Any, ...],
+) -> np.ndarray:
+    """Return the mask of joint indices that gate mesh-collider re-skinning.
+
+    Filters out joints whose name matches a known spring-chain prefix
+    (hair, ribbon, sleeve, tail, ...) — those are physics-driven and
+    fire every tick. Keeping them in the cache check would force a
+    re-skin every frame even when the BODY (static during the pose)
+    hasn't moved. Net effect: identical visual output for static
+    body, ~10× faster per-frame for static-pose scripts.
+    """
+    referenced = np.unique(collider.joints.ravel())
+    dynamic = []
+    for joint_idx in referenced:
+        node = joint_nodes[int(joint_idx)]
+        name = node.name or ""
+        if any(name.startswith(prefix) for prefix in _DYNAMIC_BONE_PREFIXES):
+            dynamic.append(joint_idx)
+    if not dynamic:
+        return referenced
+    return np.setdiff1d(referenced, np.asarray(dynamic, dtype=np.int32))
+
+
 def _world_matrix(node: Any) -> np.ndarray:
     """Compose ``node``'s full parent chain into a 4x4 world matrix.
 
@@ -3615,6 +5208,7 @@ def load_animation(
         camera_api=api.get("camera"),
         overlay_api=api.get("overlay"),
         cloth_host=api.get("cloth_host"),
+        meshes=api.get("meshes", ()),
         source_dir=source_dir,
     )
     # Apply renderer toggles that live at the animation top level. The
@@ -3624,6 +5218,30 @@ def load_animation(
     renderer = api.get("renderer")
     if renderer is not None and hasattr(renderer, "set_projected_shadow_enabled"):
         renderer.set_projected_shadow_enabled(parsed.projected_shadow)
+    if renderer is not None and hasattr(renderer, "set_self_shadow_enabled"):
+        renderer.set_self_shadow_enabled(parsed.self_shadow)
+    if renderer is not None and hasattr(renderer, "set_shadow_light_direction"):
+        renderer.set_shadow_light_direction(parsed.shadow_light_direction)
+    if (
+        renderer is not None
+        and parsed.projected_shadow_max_height is not None
+        and hasattr(renderer, "set_projected_shadow_max_height")
+    ):
+        renderer.set_projected_shadow_max_height(
+            parsed.projected_shadow_max_height,
+        )
+    # Forward-skinned floor clamp: drive the renderer's shader-side clamp
+    # from the script's ground + floor_clamp_tolerance values, so meshes
+    # rendered via the forward DQS path (cloth_host not owning them)
+    # still stop at the floor instead of clipping through.
+    if renderer is not None and hasattr(renderer, "set_forward_floor_clamp"):
+        ground = parsed.ground
+        if ground is not None and ground.kind == "flat":
+            ground_y = _resolve_scalar(ground.params.get("y", 0.0))
+            tolerance = float(parsed.floor_clamp_tolerance or 0.0)
+            renderer.set_forward_floor_clamp(ground_y, tolerance)
+        else:
+            renderer.set_forward_floor_clamp(None)
     return runtime.hooks()
 
 

@@ -24,12 +24,15 @@ def _bundled_animations() -> list[Path]:
     Files whose name starts with ``_`` are treated as inheritable
     profiles (loaded only via ``extends`` from a sibling JSON) and
     skipped — they intentionally omit fields like ``phases`` that
-    every standalone animation must provide.
+    every standalone animation must provide. Files ending in
+    ``.drape.json`` are baked pose-drape snapshots, not animation
+    scripts, and are also skipped.
     """
     if not _EXAMPLES_DIR.is_dir():
         return []
     return sorted(
-        p for p in _EXAMPLES_DIR.glob("*.json") if not p.name.startswith("_")
+        p for p in _EXAMPLES_DIR.glob("*.json")
+        if not p.name.startswith("_") and not p.name.endswith(".drape.json")
     )
 
 

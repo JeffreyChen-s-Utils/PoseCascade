@@ -118,6 +118,20 @@ class PhysicsHost:
     def chains(self) -> tuple[SpringChain, ...]:
         return tuple(self._sim.chains)
 
+    def mark_gpu_managed(self, chain: SpringChain) -> None:
+        """Hand a chain over to the renderer's GPU compute path.
+
+        Sets ``chain.gpu_managed = True`` so the CPU simulator skips it
+        each ``tick``. The renderer is then expected to call its
+        :class:`HairComputeDispatcher` to integrate + write back rotations
+        every frame. Idempotent.
+        """
+        self._sim.mark_gpu_managed(chain)
+
+    def gpu_managed_chains(self) -> list[SpringChain]:
+        """Chains currently owned by the GPU compute path."""
+        return self._sim.gpu_managed_chains()
+
     def reset(self) -> None:
         """Rebuild from scratch: drop all chains/forces and forget registered anchors."""
         self._sim = SpringSimulator()

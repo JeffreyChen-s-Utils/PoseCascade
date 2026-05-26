@@ -76,10 +76,55 @@ class ChainHandle:
     def damping(self, value: float) -> None:
         self._chain.damping = float(value)
 
+    @property
+    def max_swing_rad(self) -> float:
+        return self._chain.max_swing_rad
+
+    @max_swing_rad.setter
+    def max_swing_rad(self, value: float) -> None:
+        """Hard angular-cone limit; see :class:`SpringParams.max_swing_rad`."""
+        self._chain.max_swing_rad = float(value)
+
+    def set_gravity_override(self, vec: object | None) -> None:
+        """Per-chain world-space gravity override (or clear with ``None``).
+
+        Used by pose-specific animation where world-down gravity would
+        drape the chain into the body (e.g. dog-crawl, lying poses).
+        """
+        if vec is None:
+            self._chain.gravity_override = None
+        else:
+            self._chain.gravity_override = _to_vec3(vec)
+
+    def set_static_drape(self, enabled: bool) -> None:
+        """Toggle scripted-pose drape mode (see ``SpringChain.static_drape``)."""
+        self._chain.static_drape = bool(enabled)
+
     def set_inertia(self, value: float) -> None:
         """Set the moment of inertia on every joint in this chain."""
         for joint in self._chain.joints:
             joint.inertia = float(value)
+
+    @property
+    def attract_to_bones(self) -> tuple[str, ...]:
+        """Names of collider bones this chain's joint tips drape ONTO.
+
+        See :attr:`posecascade.animation.spring.SpringChain.attract_to_bones`
+        for the full attract-to-surface contract.
+        """
+        return self._chain.attract_to_bones
+
+    @attract_to_bones.setter
+    def attract_to_bones(self, value: tuple[str, ...]) -> None:
+        self._chain.attract_to_bones = tuple(str(b) for b in value)
+
+    @property
+    def attract_max_distance(self) -> float:
+        return self._chain.attract_max_distance
+
+    @attract_max_distance.setter
+    def attract_max_distance(self, value: float) -> None:
+        self._chain.attract_max_distance = max(0.0, float(value))
 
     def apply_impulse(self, axis: object, magnitude: float, joint_index: int = -1) -> None:
         """Add an angular-velocity impulse (rad/s) along ``axis`` to one joint.

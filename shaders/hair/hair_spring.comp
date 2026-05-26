@@ -1,0 +1,453 @@
+#version 430 core
+//
+// pass: hair / spring chain physics + collider push (compute)
+//
+// One workgroup per spring chain. Workgroup-internal sequential pass walks
+// the chain root → tip, integrating one joint per "frame" of execution
+// using barriers + shared memory to make sure each child sees its parent's
+// just-computed world transform. Per-joint collider push-out runs after
+// the integrate step, then writes the new local rotation back to the joint
+// SSBO so the next frame starts from the correct state.
+//
+// Why a compute shader for chain physics:
+//   - Per-joint cost on the CPU path is ~50 µs (Python + numpy overhead).
+//     Over a 500-joint character (long hair + ribbons + cape strands) at
+//     2 substeps × 60 Hz that's 6 ms / frame — eats the whole budget.
+//   - GPU compute is bandwidth-bound, not compute-bound, on this workload.
+//     SSBOs hold per-joint state (~80 bytes), and parallelism is bounded
+//     by chain count, not joint count. Workgroups should be sized to the
+//     longest chain length so the sequential pass fits one dispatch.
+//   - Collider push-out is the heaviest per-joint operation. Even at
+//     ~64 colliders it's ~50 sphere/capsule tests per joint, trivially
+//     vectorizable on GPU.
+//
+// Bindings (mirror CPU SpringJoint / Chain layout):
+//   SSBO 0: JointState     (read+write)  per joint: vec4 world_quat,
+//                                        vec3 world_pos, vec3 angular_vel,
+//                                        vec3 rest_local_pos, vec4 rest_local_quat,
+//                                        vec3 bone_vector_local, float bone_len
+//   SSBO 1: ChainInfo      (read)        per chain: joint_start, joint_count,
+//                                        anchor_idx, stiffness, damping, inertia
+//   SSBO 2: AnchorTransforms (read)      per chain anchor: vec4 quat, vec3 pos
+//   SSBO 3: SphereColliders  (read)      per sphere: vec3 center, float radius,
+//                                        float skin_offset (padded vec4)
+//   SSBO 4: CapsuleColliders (read)      per capsule: vec3 a, vec3 b, float radius,
+//                                        float skin_offset (padded)
+//
+//   UBO 0: SimConstants    (read)        dt, gravity (vec3), wind (vec3),
+//                                        sphere_count, capsule_count
+//
+// Status: SHADER WRITTEN, Python dispatcher pending. The .comp file
+// defines the contract; future engine work loads + dispatches this
+// shader from a Python wrapper analogous to ``posecascade.gl.compute_skin``.
+
+layout(local_size_x = 64) in;
+
+// Joint state struct — 32 floats / 128 bytes, aligned for SSBO std430.
+// 7 used vec4 + 1 reserved padding so the per-joint stride stays at a
+// power of 2 (PyOpenGL multi-dim upload on AMD ships odd-stride 2D
+// arrays as if they were row-padded; padding sidesteps that path).
+struct Joint {
+    vec4  world_rotation;       // 16 bytes
+    vec4  world_position;       // 16 bytes (w = padding)
+    vec4  angular_velocity;     // 16 bytes (w = padding)
+    vec4  rest_local_position;  // 16 bytes (w = padding)
+    vec4  rest_local_rotation;  // 16 bytes
+    vec4  bone_vector_local;    // 16 bytes (w = bone length)
+    vec4  rest_in_anchor_frame; // 16 bytes — cumulative product of ancestor
+                                //          rest_local_rotations × this joint's,
+                                //          for the anchor-frame cone clamp.
+    vec4  _reserved;            // 16 bytes — pad to 128 / 32 floats.
+};
+
+layout(std430, binding = 0) buffer JointStateBuffer {
+    Joint joints[];
+};
+
+struct ChainInfo {
+    uint  joint_start;
+    uint  joint_count;
+    uint  anchor_idx;
+    float stiffness;
+    float damping;
+    float inertia;
+    float max_swing_rad;     // angular-cone half-angle (>= π disables)
+    float static_drape;      // non-zero = scripted drape, no physics
+    // World-space gravity override for this chain. ``xyz`` is the
+    // replacement gravity vector, ``w`` is the "use override" flag
+    // (0 = use global ``u_gravity``, non-zero = use ``xyz``). Used by
+    // pose-specific animations where world-down gravity would push
+    // hair into the body (dog-crawl, lying poses).
+    vec4  gravity_override;
+};
+
+layout(std430, binding = 1) readonly buffer ChainInfoBuffer {
+    ChainInfo chains[];
+};
+
+struct AnchorXform {
+    vec4 rotation;
+    vec4 position;  // w = padding
+};
+
+layout(std430, binding = 2) readonly buffer AnchorBuffer {
+    AnchorXform anchors[];
+};
+
+struct SphereC {
+    vec4 center_radius;  // xyz = center, w = radius
+    vec4 skin_pad;       // x = skin_offset
+};
+
+layout(std430, binding = 3) readonly buffer SphereBuffer {
+    SphereC spheres[];
+};
+
+struct CapsuleC {
+    vec4 a_radius;   // xyz = endpoint a, w = radius
+    vec4 b_skin;     // xyz = endpoint b, w = skin_offset
+};
+
+layout(std430, binding = 4) readonly buffer CapsuleBuffer {
+    CapsuleC capsules[];
+};
+
+layout(std140, binding = 0) uniform SimConstants {
+    float u_dt;
+    float u_pad0;
+    vec3  u_gravity;
+    vec3  u_wind;
+    uint  u_sphere_count;
+    uint  u_capsule_count;
+};
+
+// Quaternion helpers (xyzw layout, matching CPU code).
+vec4 quat_mul(vec4 a, vec4 b) {
+    return vec4(
+        a.w * b.xyz + b.w * a.xyz + cross(a.xyz, b.xyz),
+        a.w * b.w - dot(a.xyz, b.xyz)
+    );
+}
+
+vec3 quat_rotate(vec4 q, vec3 v) {
+    return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+}
+
+vec4 quat_normalize(vec4 q) {
+    float n = length(q);
+    return n > 1e-6 ? q / n : vec4(0, 0, 0, 1);
+}
+
+vec4 quat_inverse(vec4 q) {
+    return vec4(-q.xyz, q.w);
+}
+
+vec4 quat_exp_map(vec3 omega) {
+    float angle = length(omega);
+    if (angle < 1e-6) {
+        return vec4(omega * 0.5, 1.0);
+    }
+    float half_angle = angle * 0.5;
+    return vec4(omega * (sin(half_angle) / angle), cos(half_angle));
+}
+
+vec4 quat_from_axis_angle(vec3 axis, float angle) {
+    float half_angle = angle * 0.5;
+    return vec4(axis * sin(half_angle), cos(half_angle));
+}
+
+// Decompose a quaternion into (axis, angle). Returns canonical short-arc
+// form with angle in [0, π]. Mirrors CPU quat_to_axis_angle.
+void quat_to_axis_angle(vec4 q, out vec3 axis, out float angle) {
+    if (q.w < 0.0) q = -q;
+    float sin_half_sq = dot(q.xyz, q.xyz);
+    if (sin_half_sq < 1e-12) {
+        axis = vec3(1, 0, 0);
+        angle = 0.0;
+        return;
+    }
+    float sin_half = sqrt(sin_half_sq);
+    angle = 2.0 * atan(sin_half, q.w);
+    axis = q.xyz / sin_half;
+}
+
+vec4 shortest_arc_quat(vec3 from_dir, vec3 to_dir) {
+    float d = clamp(dot(from_dir, to_dir), -1.0, 1.0);
+    if (d > 1.0 - 1e-6) {
+        return vec4(0, 0, 0, 1);
+    }
+    if (d < -1.0 + 1e-6) {
+        vec3 axis = cross(from_dir, vec3(1, 0, 0));
+        if (length(axis) < 1e-6) {
+            axis = cross(from_dir, vec3(0, 1, 0));
+        }
+        axis = normalize(axis);
+        return vec4(axis, 0.0);
+    }
+    vec3 axis = cross(from_dir, to_dir);
+    float s = sqrt((1.0 + d) * 2.0);
+    return quat_normalize(vec4(axis / s, s * 0.5));
+}
+
+// Per-joint integration + collider push-out — mirrors the CPU
+// ``_step_joint`` + ``_project_joint_against_colliders`` flow.
+//
+// Shared memory holds parent's (position, rotation) for the next joint
+// to read after the workgroup barrier.
+shared vec4 s_parent_quat;
+shared vec3 s_parent_pos;
+
+void main() {
+    uint chain_idx = gl_WorkGroupID.x;
+    if (chain_idx >= chains.length()) return;
+    ChainInfo chain = chains[chain_idx];
+    uint tid = gl_LocalInvocationID.x;
+
+    // Thread 0 seeds the parent with the chain anchor.
+    if (tid == 0) {
+        AnchorXform anchor = anchors[chain.anchor_idx];
+        s_parent_quat = anchor.rotation;
+        s_parent_pos  = anchor.position.xyz;
+    }
+    barrier();
+
+    // Sequential pass: each iteration integrates one joint, the next
+    // iteration's parent state is this joint's world transform.
+    bool is_static_drape = chain.static_drape != 0.0 && chain.gravity_override.w != 0.0;
+    for (uint i = 0; i < chain.joint_count; ++i) {
+        if (tid == 0) {
+            uint jid = chain.joint_start + i;
+            Joint j = joints[jid];
+
+            // Compute pivot in world space from parent.
+            vec3 pivot = s_parent_pos + quat_rotate(
+                s_parent_quat, j.rest_local_position.xyz
+            );
+
+            // Static-drape fast path: align bone with gravity-override
+            // direction, skip physics, spring, cone, colliders. Used
+            // for poses where physics can't route the chain around the
+            // body (HSR / Genshin cutscene hair).
+            if (is_static_drape) {
+                vec3 g = chain.gravity_override.xyz;
+                float gn = length(g);
+                vec3 bone_local = j.bone_vector_local.xyz;
+                float bn = length(bone_local);
+                if (gn > 1e-6 && bn > 1e-6) {
+                    j.world_rotation = shortest_arc_quat(bone_local / bn, g / gn);
+                }
+                j.angular_velocity = vec4(0.0);
+                j.world_position = vec4(pivot, 0.0);
+                joints[chain.joint_start + i] = j;
+                s_parent_quat = j.world_rotation;
+                s_parent_pos = pivot;
+            } else {
+            vec4 rest_world;
+            if (chain.gravity_override.w != 0.0) {
+                // Drape-aligned rest: every joint's rest world rotation
+                // maps its local bone axis to the normalised gravity-
+                // override direction. Spring restoring + cone clamp both
+                // center on this so the whole chain settles in a clean
+                // line along the drape vector (no rest-pose S-curve).
+                vec3 grav = chain.gravity_override.xyz;
+                float gn = length(grav);
+                vec3 bone_local = j.bone_vector_local.xyz;
+                float bn = length(bone_local);
+                if (gn > 1e-6 && bn > 1e-6) {
+                    rest_world = shortest_arc_quat(bone_local / bn, grav / gn);
+                } else {
+                    rest_world = quat_normalize(
+                        quat_mul(s_parent_quat, j.rest_local_rotation)
+                    );
+                }
+            } else {
+                rest_world = quat_normalize(
+                    quat_mul(s_parent_quat, j.rest_local_rotation)
+                );
+            }
+
+            // Spring restoring torque toward rest_world.
+            vec4 delta = quat_mul(rest_world, quat_inverse(j.world_rotation));
+            float half_angle = clamp(delta.w, -1.0, 1.0);
+            float angle = 2.0 * acos(half_angle);
+            float s = sqrt(max(1.0 - half_angle * half_angle, 1e-12));
+            vec3 axis = angle > 1e-6 ? delta.xyz / s : vec3(0);
+            vec3 spring_torque = axis * angle * chain.stiffness;
+
+            // Gravity torque about pivot. Per-chain override replaces
+            // the global gravity vector when ``chain.gravity_override.w``
+            // is non-zero (see ChainInfo doc).
+            //
+            // Force applied at the bone's MIDPOINT, not the tip — matches
+            // ``_force_torque`` in spring.py:1077 which uses
+            // ``cross(bone_world * 0.5, total_force)``. Without the 0.5
+            // factor the GPU integrator received twice the CPU gravity
+            // torque and the GPU equilibrium drifted away from the
+            // CPU-settled warmup state — visible as the chain "flying
+            // up" over the first second of viewport playback after a
+            // perfect warmup.
+            vec3 bone_world = quat_rotate(j.world_rotation, j.bone_vector_local.xyz);
+            vec3 effective_gravity = chain.gravity_override.w != 0.0
+                ? chain.gravity_override.xyz
+                : u_gravity;
+            vec3 gravity_torque = cross(bone_world * 0.5, effective_gravity);
+
+            // Implicit damping integration.
+            vec3 omega = j.angular_velocity.xyz;
+            float c = chain.damping * u_dt;
+            omega = (chain.inertia * omega + (spring_torque + gravity_torque) * u_dt)
+                  / (chain.inertia + c);
+
+            vec4 rot_step = quat_exp_map(omega * u_dt);
+            j.world_rotation = quat_normalize(quat_mul(rot_step, j.world_rotation));
+            j.angular_velocity = vec4(omega, 0.0);
+            j.world_position = vec4(pivot, 0.0);
+
+            // Anchor-frame angular-cone clamp: hard limit on how far this
+            // joint's world rotation can deviate from its rest world pose
+            // (the rest pose driven by the anchor's CURRENT rotation +
+            // the joint's stored ``rest_in_anchor_frame``). This is the
+            // same Magica-Cloth / HSR-style "Angle Limit" the CPU path
+            // applies; without it, GPU-managed chains have no hard
+            // boundary at all and drift freely through the body in
+            // extreme poses. Disabled by sentinel ``max_swing_rad >= π``.
+            // Anchor-frame angular-cone clamp: hard limit on how far this
+            // joint's world rotation can deviate from its rest world pose
+            // (the rest pose driven by the anchor's CURRENT rotation +
+            // the joint's stored ``rest_in_anchor_frame``). This is the
+            // same Magica-Cloth / HSR-style "Angle Limit" the CPU path
+            // applies; without it, GPU-managed chains have no hard
+            // boundary at all and drift freely through the body in
+            // extreme poses. Disabled by sentinel ``max_swing_rad >= π``.
+            if (chain.max_swing_rad < 3.14159265) {
+                vec4 cone_center;
+                if (chain.gravity_override.w != 0.0) {
+                    cone_center = rest_world;
+                } else {
+                    AnchorXform anchor = anchors[chain.anchor_idx];
+                    cone_center = quat_normalize(
+                        quat_mul(anchor.rotation, j.rest_in_anchor_frame)
+                    );
+                }
+                vec4 swing = quat_normalize(
+                    quat_mul(j.world_rotation, quat_inverse(cone_center))
+                );
+                vec3 cone_axis;
+                float cone_angle;
+                quat_to_axis_angle(swing, cone_axis, cone_angle);
+                if (cone_angle > chain.max_swing_rad) {
+                    vec4 clamped = quat_from_axis_angle(cone_axis, chain.max_swing_rad);
+                    j.world_rotation = quat_normalize(quat_mul(clamped, cone_center));
+                    float omega_along = dot(j.angular_velocity.xyz, cone_axis);
+                    if (omega_along > 0.0) {
+                        j.angular_velocity.xyz -= cone_axis * omega_along;
+                    }
+                }
+            }
+
+            // Collider push-out — multi-point sampling along the bone.
+            // Tip-only testing misses the common "bone passes through a
+            // body capsule with tip past its lower edge" case (back-hair
+            // anchored above the chest, tip below it). Sample at 25% /
+            // 50% / 75% / 100% of bone length each pass; the first
+            // sample with any collider hit drives the swing rotation,
+            // then the pass restarts with the new direction. Order is
+            // pivot-first so the closer-to-anchor sample (likeliest to
+            // be inside body geometry) gets pushed first.
+            //
+            // CRITICAL: recompute bone_world from the JUST-INTEGRATED
+            // j.world_rotation. The ``bone_world`` variable used by the
+            // gravity-torque step above was captured BEFORE the
+            // integration's rotation update — using it here would test
+            // collisions against a stale direction and let the chain
+            // diverge from the CPU integration. Symptom of the stale
+            // read: chain visibly "flies up" over the first second of
+            // viewport playback even with a fully-settled CPU warmup,
+            // because each GPU substep over-corrects against the
+            // pre-step direction.
+            float bone_len = j.bone_vector_local.w;
+            vec3 bone_world_post = quat_rotate(j.world_rotation, j.bone_vector_local.xyz);
+            vec3 bone_dir = bone_world_post / max(length(bone_world_post), 1e-6);
+            float sample_fracs[4] = float[4](0.25, 0.5, 0.75, 1.0);
+            for (int p = 0; p < 2; ++p) {
+                bool any_hit = false;
+                for (int s = 0; s < 4; ++s) {
+                    float frac = sample_fracs[s];
+                    vec3 sample_pt = pivot + bone_dir * (bone_len * frac);
+                    vec3 corrected = sample_pt;
+                    bool hit = false;
+                    // Spheres.
+                    for (uint si = 0; si < u_sphere_count; ++si) {
+                        SphereC sp = spheres[si];
+                        vec3 d = corrected - sp.center_radius.xyz;
+                        float dist = length(d);
+                        float thresh = sp.center_radius.w + sp.skin_pad.x;
+                        if (dist < thresh && dist > 1e-6) {
+                            corrected = sp.center_radius.xyz + d * (thresh / dist);
+                            hit = true;
+                        }
+                    }
+                    // Capsules.
+                    for (uint ci = 0; ci < u_capsule_count; ++ci) {
+                        CapsuleC cap = capsules[ci];
+                        vec3 seg = cap.b_skin.xyz - cap.a_radius.xyz;
+                        float seg_len_sq = dot(seg, seg);
+                        if (seg_len_sq < 1e-6) continue;
+                        float t = clamp(
+                            dot(corrected - cap.a_radius.xyz, seg) / seg_len_sq,
+                            0.0, 1.0
+                        );
+                        vec3 closest = cap.a_radius.xyz + seg * t;
+                        vec3 d = corrected - closest;
+                        float dist = length(d);
+                        float thresh = cap.a_radius.w + cap.b_skin.w;
+                        if (dist < thresh && dist > 1e-6) {
+                            corrected = closest + d * (thresh / dist);
+                            hit = true;
+                        }
+                    }
+                    if (!hit) continue;
+                    // Bone swings around pivot — the sample at ``frac``
+                    // moves with the rotation, so the new bone direction
+                    // is just (corrected - pivot) normalised.
+                    vec3 target_offset = corrected - pivot;
+                    float tl = length(target_offset);
+                    if (tl < 1e-6) continue;
+                    vec3 target_dir = target_offset / tl;
+                    vec4 swing = shortest_arc_quat(bone_dir, target_dir);
+                    j.world_rotation = quat_normalize(quat_mul(swing, j.world_rotation));
+                    // Project out velocity pointing INTO the collider —
+                    // mirrors the cone-clamp's omega_along trick above
+                    // and the CPU's matching code in spring.py
+                    // _project_joint_against_colliders. Without this,
+                    // velocity keeps driving the bone into the collider
+                    // each substep so the chain oscillates around the
+                    // contact (visible as "hair flies up first then
+                    // falls" on viewport frame 1 even with a clean
+                    // CPU-warmup settle).
+                    vec3 swing_axis;
+                    float swing_angle;
+                    quat_to_axis_angle(swing, swing_axis, swing_angle);
+                    if (swing_angle > 1e-6) {
+                        float omega_along = dot(j.angular_velocity.xyz, swing_axis);
+                        if (omega_along < 0.0) {
+                            j.angular_velocity.xyz -= swing_axis * omega_along;
+                        }
+                    }
+                    bone_dir = target_dir;
+                    any_hit = true;
+                    break;  // restart pass with updated bone_dir
+                }
+                if (!any_hit) break;
+            }
+
+            joints[chain.joint_start + i] = j;
+
+            // Stash this joint's transforms as the next parent.
+            s_parent_quat = j.world_rotation;
+            s_parent_pos  = j.world_position.xyz;
+            }  // end of !is_static_drape branch
+        }
+        barrier();
+    }
+}

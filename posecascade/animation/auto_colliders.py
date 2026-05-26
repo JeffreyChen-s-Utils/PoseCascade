@@ -30,21 +30,57 @@ from typing import Any, Protocol
 # rotation without the inner thigh or knee poking through the cloth.
 # The hip sphere + thigh capsules together form a continuous shell
 # around the pelvis-to-knee region that the cloth solver pushes against.
+#
+# Torso + arm + head set added so spring-chain hair pushed by wind / pose
+# changes doesn't pass through the chest, back, shoulders, or skull when
+# the head tilts. Without it, a forward-bent crawl pose drops the hair into
+# the chest mesh because the spring solver only sees leg geometry.
 _HUMANOID_BODY_COLLIDERS: tuple[tuple[str, str | None, str, float], ...] = (
-    # Pelvis sphere — wider than just the hip joint so the skirt
-    # waistband has room to drape without grazing the underwear mesh.
-    ("hip",         None,          "sphere",  0.13),
-    # Thigh capsules — wider than a literal anatomical thigh (~6 cm)
-    # so the skirt's inner panel rides outside the visible leg silhouette
-    # even at peak step-cycle leg-lift. Without this margin, the skirt
-    # solver settles AT the leg surface and any minor mesh wobble
-    # produces visible z-fight / inside-lining flicker.
-    ("upper_leg_L", "lower_leg_L", "capsule", 0.11),
-    ("upper_leg_R", "lower_leg_R", "capsule", 0.11),
-    # Shin capsules — below skirt hemline on a mini-skirt, so kept
-    # tighter (no need to displace a cloth that isn't there).
-    ("lower_leg_L", "foot_L",      "capsule", 0.05),
-    ("lower_leg_R", "foot_R",      "capsule", 0.05),
+    # HSR/Genshin-style fine-grained capsule set — 18 colliders covering
+    # every body region hair could swing into. Each radius oversized
+    # (+2-4 cm over anatomical) so the cloth/spring solver pushes BONES
+    # to a position whose VISIBLE MESH still leaves margin. Industry
+    # convention: animators hand-add 15-30 of these per character.
+    #
+    # Pelvis + legs (skirt drape):
+    ("hip",         None,          "sphere",  0.16),
+    ("upper_leg_L", "lower_leg_L", "capsule", 0.14),
+    ("upper_leg_R", "lower_leg_R", "capsule", 0.14),
+    ("lower_leg_L", "foot_L",      "capsule", 0.08),
+    ("lower_leg_R", "foot_R",      "capsule", 0.08),
+    # Torso (back-hair drape + cape):
+    ("spine",       "chest",       "capsule", 0.16),
+    ("hip",         "spine",       "capsule", 0.16),
+    # Chest → neck bridge — closes the gap at the collar where back-hair
+    # swinging forward in bent-over poses would otherwise sneak between
+    # the chest cap and the throat cylinder.
+    ("chest",       "neck",        "capsule", 0.13),
+    # Neck → head — 0.13 is the safe radius: thicker (0.18) pushes
+    # back-hair anchors UP because they sit within the cylinder when
+    # the head tilts, then the per-frame push-out fights the chain's
+    # dynamics. 0.13 hugs the actual throat surface while leaving room
+    # for the chain's first joint above the back of the skull.
+    ("neck",        "head",        "capsule", 0.13),
+    # Head sphere — covers skull mass (not the hat which has its own
+    # Hat_Root collider attached separately in scripts). Kept tight
+    # (~7 cm) so spring-chain hair anchored at the back of the skull
+    # (BackHairUpper, ponytails) isn't trapped INSIDE the sphere at
+    # construction time — that triggers per-frame collision push-out
+    # that fights against the chain's own dynamics.
+    ("head",        None,          "sphere",  0.07),
+    # Shoulder spheres — close the gap at the upper-arm root where
+    # plain chest→upper-arm transitions miss the deltoid bulge.
+    ("upper_arm_L", None,          "sphere",  0.09),
+    ("upper_arm_R", None,          "sphere",  0.09),
+    # Upper + lower arm chain — radii inflated to catch hair brushing
+    # past extended arms in crawl / forward-reach poses.
+    ("upper_arm_L", "lower_arm_L", "capsule", 0.08),
+    ("upper_arm_R", "lower_arm_R", "capsule", 0.08),
+    ("lower_arm_L", "hand_L",      "capsule", 0.08),
+    ("lower_arm_R", "hand_R",      "capsule", 0.08),
+    # Hand spheres — back-of-hand bulge that thin lower-arm caps miss.
+    ("hand_L",      None,          "sphere",  0.07),
+    ("hand_R",      None,          "sphere",  0.07),
 )
 
 

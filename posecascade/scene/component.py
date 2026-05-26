@@ -104,3 +104,8 @@ class ClothComponent(Component):
     # anchored — keeps the upper-body decorations on a multi-piece sleeve mesh
     # rigid while only the lower hanging flaps actually swing.
     simulate_top_below: float | None = None
+    # Attract-to-surface (forwarded to :class:`ClothParams`): list of
+    # collider bone names whose surfaces this piece's verts should be
+    # pulled onto after collider push-out. Empty = disabled.
+    attract_to_bones: tuple[str, ...] = ()
+    attract_max_distance: float = 0.10

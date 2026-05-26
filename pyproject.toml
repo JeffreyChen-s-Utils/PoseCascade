@@ -109,7 +109,7 @@ before-build = 'pip install "numpy>=1.26" "Cython>=3.0"'
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-extend-exclude = [".venv", "build", "dist"]
+extend-exclude = [".venv", "build", "dist", "tmp"]
 
 [tool.ruff.lint]
 select = [

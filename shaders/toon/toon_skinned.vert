@@ -23,6 +23,10 @@ layout(location = 5) in vec4 a_weights_0;
 uniform mat4 u_viewMatrix;
 uniform mat4 u_projMatrix;
 uniform mat4 u_boneMatrices[MAX_BONES];
+// Optional floor clamp — same semantics as forward/skinned.vert.
+uniform int u_groundEnabled;
+uniform float u_groundY;
+uniform float u_groundTolerance;
 
 out vec3 v_normal_world;
 out vec3 v_normal_view;
@@ -39,6 +43,14 @@ void main() {
     vec4 skinned_position = skin * vec4(a_position, 1.0);
     vec3 skinned_normal = mat3(skin) * a_normal;
     vec3 n_world = normalize(skinned_normal);
+
+    if (u_groundEnabled != 0) {
+        // 1 mm z-fight epsilon — see forward/skinned.vert for rationale.
+        float soft_floor = u_groundY - u_groundTolerance + 0.001;
+        if (skinned_position.y < soft_floor) {
+            skinned_position.y = soft_floor;
+        }
+    }
 
     v_normal_world = n_world;
     v_normal_view = normalize(mat3(u_viewMatrix) * n_world);
