@@ -4,54 +4,108 @@
   "name": "dog_crawl_demo",
   "loop_sec": 6.0,
 
-  "wind": {"direction": [1.0, 0.0, 0.2], "speed": 0.015,
-           "turbulence_amplitude": 0.008, "turbulence_frequency_hz": 0.6},
+  "wind": {"direction": [0.0, 0.0, -1.0], "speed": 0.0,
+           "turbulence_amplitude": 0.0, "turbulence_frequency_hz": 0.0},
 
   "projected_shadow": false,
+  "self_shadow": false,
+  "auto_clamp_skinned_to_ground": false,
+  "auto_body_colliders": true,
+  "gpu_hair_compute": false,
+  "floor_clamp_tolerance": 0.005,
+  "warmup_seconds": 3.0,
+  "collision_deform_meshes": ["Object_Coat"],
+
+  "colliders": [
+    {"kind": "capsule", "follow_bone": "upper_leg_L", "end_bone": "lower_leg_L", "radius": 0.08, "skin_offset": 0.01},
+    {"kind": "capsule", "follow_bone": "upper_leg_R", "end_bone": "lower_leg_R", "radius": 0.08, "skin_offset": 0.01},
+    {"kind": "capsule", "follow_bone": "lower_leg_L", "end_bone": "foot_L", "radius": 0.05, "skin_offset": 0.005},
+    {"kind": "capsule", "follow_bone": "lower_leg_R", "end_bone": "foot_R", "radius": 0.05, "skin_offset": 0.005},
+    {"kind": "capsule", "follow_bone": "foot_L", "end_bone": "Left toe_012", "radius": 0.08, "skin_offset": 0.01},
+    {"kind": "capsule", "follow_bone": "foot_R", "end_bone": "Right toe_08",  "radius": 0.08, "skin_offset": 0.01},
+    {"kind": "capsule", "follow_bone": "Hips_04", "end_bone": "Spine_0197", "radius": 0.06, "skin_offset": 0.005},
+    {"kind": "capsule", "follow_bone": "Spine_0197", "end_bone": "Chest_0179", "radius": 0.06, "skin_offset": 0.005},
+    {"kind": "capsule", "follow_bone": "Chest_0179", "end_bone": "Neck_0200", "radius": 0.06, "skin_offset": 0.005},
+    {"kind": "capsule", "follow_bone": "Neck_0200", "end_bone": "Head_0201", "radius": 0.06, "skin_offset": 0.005},
+    {"kind": "capsule", "follow_bone": "upper_arm_L", "end_bone": "lower_arm_L", "radius": 0.06, "skin_offset": 0.005},
+    {"kind": "capsule", "follow_bone": "upper_arm_R", "end_bone": "lower_arm_R", "radius": 0.06, "skin_offset": 0.005},
+    {"kind": "capsule", "follow_bone": "Left shoulder_0305", "end_bone": "upper_arm_L", "radius": 0.07, "skin_offset": 0.005},
+    {"kind": "capsule", "follow_bone": "Right shoulder_0268", "end_bone": "upper_arm_R", "radius": 0.07, "skin_offset": 0.005}
+  ],
 
   "physics_chains": {
-    "BackHair_L":    {"stiffness": 3.0, "damping": 0.35, "inertia": 0.15},
-    "BackHair_R":    {"stiffness": 3.0, "damping": 0.35, "inertia": 0.15},
-    "BackHairUpper": {"stiffness": 4.0, "damping": 0.45, "inertia": 0.10},
-    "hair_C":  {"stiffness": 4.0, "damping": 0.45, "inertia": 0.10},
-    "hair_L":  {"stiffness": 3.0, "damping": 0.35, "inertia": 0.13},
-    "hair_R":  {"stiffness": 3.0, "damping": 0.35, "inertia": 0.13},
-    "hair_LL": {"stiffness": 2.5, "damping": 0.30, "inertia": 0.15},
-    "hair_RR": {"stiffness": 2.5, "damping": 0.30, "inertia": 0.15}
+    "BackHairUpper": {"enabled": false},
+    "BackHair_L":    {"enabled": true,  "stiffness": 0.06, "damping": 0.96, "inertia": 0.04,
+                      "attract_to_bones": ["Chest_0179", "Spine_0197", "Hips_04"],
+                      "attract_max_distance": 0.35},
+    "BackHair_R":    {"enabled": true,  "stiffness": 0.06, "damping": 0.96, "inertia": 0.04,
+                      "attract_to_bones": ["Chest_0179", "Spine_0197", "Hips_04"],
+                      "attract_max_distance": 0.35},
+    "Skirt_a": {"enabled": false}, "Skirt_b": {"enabled": false},
+    "Skirt_c": {"enabled": false}, "Skirt_d": {"enabled": false},
+    "Skirt_e": {"enabled": false}, "Skirt_f": {"enabled": false},
+    "Skirt_g": {"enabled": false}, "Skirt_h": {"enabled": false},
+    "Skirt_i": {"enabled": false}, "Skirt_j": {"enabled": false},
+    "Skirt_k": {"enabled": false}, "Skirt_l": {"enabled": false},
+    "Skirt_m": {"enabled": false}, "Skirt_n": {"enabled": false},
+    "Skirt_o": {"enabled": false}, "Skirt_p": {"enabled": false}
   },
+
+  "cloth": [],
 
   "phases": [
     {
       "name": "settle_into_crawl",
       "duration_sec": 6.0,
       "body": {
-        "translation": [0.0, -0.60, 0.0]
+        "translation": [0.0, -0.54, 0.0]
       },
       "bones_local": {
-        "spine":       {"x_rad":  1.05},
-        "chest":       {"x_rad":  0.85},
-        "neck":        {"x_rad": -0.70},
-        "head":        {"x_rad": -0.80},
-        "upper_arm_L": {"x_rad": -1.55, "y_rad": -0.30, "z_rad": -1.40},
-        "upper_arm_R": {"x_rad": -1.55, "y_rad":  0.30, "z_rad":  1.40},
-        "lower_arm_L": {"x_rad":  0.10},
-        "lower_arm_R": {"x_rad":  0.10},
-        "upper_leg_L": {"x_rad": -0.20, "z_rad": -0.08},
-        "upper_leg_R": {"x_rad": -0.20, "z_rad":  0.08},
-        "lower_leg_L": {"x_rad":  1.20},
-        "lower_leg_R": {"x_rad":  1.20},
-        "Left ankle_011": {"x_rad":  0.90},
-        "Right ankle_07": {"x_rad":  0.90},
-        "Thumb0_L_0314": {"x_rad":  1.20},
-        "Thumb0_R_0277": {"x_rad":  1.20}
+        "Hips_04":     {"x_rad":  0.40},
+        "spine":       {"x_rad":  0.40},
+        "chest":       {"x_rad":  0.40},
+        "UpperBody1_0198": {"x_rad":  0.40},
+        "neck":        {"x_rad": -0.40},
+        "head":        {"x_rad": -0.30},
+        "Thumb0_L_0314": {"x_rad":  0.40},
+        "Thumb0_R_0277": {"x_rad":  0.40}
       },
       "ik": {
         "hand_l_target": [ 0.22, 0.020, 0.30],
         "hand_r_target": [-0.22, 0.020, 0.30],
-        "foot_l_target": [ 0.10, 0.005,-0.30],
-        "foot_r_target": [-0.10, 0.005,-0.30]
+        "foot_l_target": [ 0.10, 0.006,-0.15],
+        "foot_r_target": [-0.10, 0.006,-0.15],
+        "arm_max_stretch": 1.10
       },
-      "floor_align": ["hand_L", "hand_R"]
+      "floor_align": ["hand_L", "hand_R", "foot_L", "foot_R"],
+      "hidden_nodes": [],
+      "hair_anchor_offset": {
+        "BackHairUpper": [0.0, -0.10, -0.05],
+        "BackHair_L":    [0.0, -0.15, -0.10],
+        "BackHair_R":    [0.0, -0.15, -0.10]
+      },
+      "hair_pose": {
+        "BackHairUpper": [
+          [0.0, -0.40, -0.92],
+          [0.0, -0.50, -0.87],
+          [0.0, -0.60, -0.80],
+          [0.0, -0.65, -0.76]
+        ],
+        "BackHair_L": [
+          [0.05, -0.40, -0.92],
+          [0.05, -0.55, -0.83],
+          [0.05, -0.65, -0.76],
+          [0.05, -0.70, -0.71],
+          [0.05, -0.70, -0.71]
+        ],
+        "BackHair_R": [
+          [-0.05, -0.40, -0.92],
+          [-0.05, -0.55, -0.83],
+          [-0.05, -0.65, -0.76],
+          [-0.05, -0.70, -0.71],
+          [-0.05, -0.70, -0.71]
+        ]
+      }
     }
   ]
 }

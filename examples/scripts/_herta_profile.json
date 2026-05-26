@@ -40,8 +40,11 @@
     {"kind": "capsule", "follow_bone": "upper_leg_R", "end_bone": "lower_leg_R", "radius": 0.08, "skin_offset": 0.01},
     {"kind": "capsule", "follow_bone": "lower_leg_L", "end_bone": "foot_L", "radius": 0.05, "skin_offset": 0.005},
     {"kind": "capsule", "follow_bone": "lower_leg_R", "end_bone": "foot_R", "radius": 0.05, "skin_offset": 0.005},
-    {"kind": "capsule", "follow_bone": "Hips_04", "end_bone": "Spine_0197", "radius": 0.09, "skin_offset": 0.005},
-    {"kind": "capsule", "follow_bone": "Spine_0197", "end_bone": "Chest_0179", "radius": 0.09, "skin_offset": 0.005},
-    {"kind": "capsule", "follow_bone": "Chest_0179", "end_bone": "Neck_0200", "radius": 0.09, "skin_offset": 0.005}
+    {"kind": "capsule", "follow_bone": "Hips_04", "end_bone": "Spine_0197", "radius": 0.13, "skin_offset": 0.01},
+    {"kind": "capsule", "follow_bone": "Spine_0197", "end_bone": "Chest_0179", "radius": 0.13, "skin_offset": 0.01},
+    {"kind": "capsule", "follow_bone": "Chest_0179", "end_bone": "Neck_0200", "radius": 0.13, "skin_offset": 0.01},
+    {"kind": "capsule", "follow_bone": "Neck_0200", "end_bone": "Head_0201", "radius": 0.08, "skin_offset": 0.005},
+    {"kind": "capsule", "follow_bone": "upper_arm_L", "end_bone": "lower_arm_L", "radius": 0.06, "skin_offset": 0.005},
+    {"kind": "capsule", "follow_bone": "upper_arm_R", "end_bone": "lower_arm_R", "radius": 0.06, "skin_offset": 0.005}
   ]
 }
